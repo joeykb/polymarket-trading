@@ -1,0 +1,17 @@
+# TempEdge PersistentVolumeClaim
+# Stores monitoring output files so they persist across pod restarts
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempedge-output
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+  storageClassName: hostpath

@@ -1,0 +1,14 @@
+# TempEdge ConfigMap
+# Holds runtime configuration for both monitor and dashboard
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempedge-config
+  namespace: tempedge
+  labels:
+    app: tempedge
+data:
+  # Monitor settings
+  MONITOR_INTERVAL: "15"
+  # Dashboard settings
+  DASHBOARD_PORT: "3000"

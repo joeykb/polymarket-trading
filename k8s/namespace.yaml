@@ -1,0 +1,8 @@
+# TempEdge Kubernetes Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tempedge
+  labels:
+    app: tempedge
+    project: polymarket

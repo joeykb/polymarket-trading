@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Runtime data
+output/
+*.log
+
+# Environment & secrets
+.env
+.env.*
+k8s/vpn-secret.yaml
+k8s/*.ovpn
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Gemini AI
+.gemini/

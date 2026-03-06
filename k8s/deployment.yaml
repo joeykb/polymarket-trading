@@ -1,0 +1,126 @@
+# TempEdge Deployment
+# Runs monitor + dashboard + VPN sidecar sharing the same network namespace
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempedge
+  namespace: tempedge
+  labels:
+    app: tempedge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+  template:
+    metadata:
+      labels:
+        app: tempedge
+    spec:
+      containers:
+        # ── VPN Sidecar (Gluetun) ──────────────────────────
+        # Creates a NordVPN tunnel via custom .ovpn config
+        - name: vpn
+          image: qmcgaw/gluetun:latest
+          env:
+            - name: VPN_SERVICE_PROVIDER
+              value: "custom"
+            - name: VPN_TYPE
+              value: "openvpn"
+            - name: OPENVPN_CUSTOM_CONFIG
+              value: "/gluetun/custom/nordvpn.ovpn"
+            # Allow dashboard port to accept incoming connections
+            - name: FIREWALL_INPUT_PORTS
+              value: "3000"
+            # Healthcheck
+            - name: HEALTH_TARGET_ADDRESS
+              value: "gamma-api.polymarket.com:443"
+          envFrom:
+            - secretRef:
+                name: nordvpn-credentials
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: tun-device
+              mountPath: /dev/net/tun
+            - name: ovpn-config
+              mountPath: /gluetun/custom
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+        # ── Monitor Container ─────────────────────────────
+        # Runs the periodic monitoring loop
+        - name: monitor
+          image: tempedge:latest
+          imagePullPolicy: Never
+          command: ["node", "src/monitor.js"]
+          args: ["--interval", "$(MONITOR_INTERVAL)"]
+          envFrom:
+            - configMapRef:
+                name: tempedge-config
+          volumeMounts:
+            - name: output
+              mountPath: /app/output
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+        # ── Dashboard Container ───────────────────────────
+        # Serves the web dashboard on port 3000
+        - name: dashboard
+          image: tempedge:latest
+          imagePullPolicy: Never
+          command: ["node", "src/dashboard.js"]
+          envFrom:
+            - configMapRef:
+                name: tempedge-config
+          volumeMounts:
+            - name: output
+              mountPath: /app/output
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+
+      volumes:
+        - name: output
+          persistentVolumeClaim:
+            claimName: tempedge-output
+        - name: tun-device
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: ovpn-config
+          configMap:
+            name: nordvpn-ovpn
