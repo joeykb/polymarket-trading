@@ -9,6 +9,7 @@ output/
 .env
 .env.*
 k8s/vpn-secret.yaml
+k8s/trading-secret.yaml
 k8s/*.ovpn
 
 # OS files

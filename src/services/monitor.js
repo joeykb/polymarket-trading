@@ -13,10 +13,15 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { config as dotenvConfig } from 'dotenv';
 import { fetchWeatherData } from './weather.js';
 import { discoverMarket } from './polymarket.js';
 import { selectRanges } from './rangeSelector.js';
+import { executeRealBuyOrder } from './trading.js';
 import { nowISO, daysUntil, getPhase } from '../utils/dateUtils.js';
+
+// Load .env file
+dotenvConfig();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,6 +81,24 @@ function placeBuyOrder(snapshot) {
         maxPayout: 1.0,  // Only 1 range pays out $1
         maxProfit: parseFloat((1.0 - totalCost).toFixed(4)),
     };
+}
+
+/**
+ * Try real trading first, fall back to simulated
+ * @param {Object} snapshot
+ * @returns {Promise<Object>} buyOrder
+ */
+async function tryPlaceBuyOrder(snapshot) {
+    try {
+        const realOrder = await executeRealBuyOrder(snapshot);
+        if (realOrder) return realOrder;
+    } catch (err) {
+        console.warn(`  ⚠️  Real trading failed, using simulated: ${err.message}`);
+    }
+    // Fall back to simulated
+    const order = placeBuyOrder(snapshot);
+    order.simulated = true;
+    return order;
 }
 
 /**
@@ -196,6 +219,8 @@ function buildSnapshotRange(range, previous) {
 
     return {
         marketId: range.marketId,
+        conditionId: range.conditionId,
+        clobTokenIds: range.clobTokenIds,
         question: range.question,
         yesPrice: range.yesPrice,
         priceChange,
@@ -438,9 +463,9 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
 
     const phase = getPhase(targetDate);
 
-    // Place simulated buy order using initial snapshot prices
-    const buyOrder = placeBuyOrder(snapshot);
-    console.log(`  💰 Simulated buy placed: $${buyOrder.totalCost.toFixed(3)} (max profit: $${buyOrder.maxProfit.toFixed(3)})`);
+    // Place buy order (real or simulated depending on TRADING_MODE)
+    const buyOrder = await tryPlaceBuyOrder(snapshot);
+    console.log(`  💰 Buy order placed: $${buyOrder.totalCost.toFixed(3)} (max profit: $${buyOrder.maxProfit.toFixed(3)}) [${buyOrder.simulated !== false ? 'simulated' : buyOrder.mode || 'live'}]`);
 
     /** @type {import('../models/types.js').MonitoringSession} */
     const session = {
@@ -480,7 +505,7 @@ export async function runMonitoringCycle(session) {
 
     // Place buy if not yet placed and conditions are met
     if (!session.buyOrder && shouldPlaceBuy(session, snapshot)) {
-        session.buyOrder = placeBuyOrder(snapshot);
+        session.buyOrder = await tryPlaceBuyOrder(snapshot);
     }
 
     // Compute P&L against buy prices

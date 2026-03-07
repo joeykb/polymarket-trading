@@ -70,16 +70,18 @@ spec:
           envFrom:
             - configMapRef:
                 name: tempedge-config
+            - secretRef:
+                name: polymarket-trading
           volumeMounts:
             - name: output
               mountPath: /app/output
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 128Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 256Mi
 
         # ── Dashboard Container ───────────────────────────
         # Serves the web dashboard on port 3000
