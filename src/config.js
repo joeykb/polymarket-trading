@@ -86,8 +86,9 @@ const SCHEMA = {
     'polymarket.searchPageSize': { key: 'SEARCH_PAGE_SIZE', default: 50,                                     description: 'Events per search page' },
 
     // Dashboard
-    'dashboard.port':            { key: 'DASHBOARD_PORT',       default: 3000,  description: 'Dashboard HTTP port', requiresRestart: true },
-    'dashboard.refreshInterval': { key: 'DASHBOARD_REFRESH_MS', default: 15000, description: 'Auto-refresh interval (ms)' },
+    'dashboard.port':              { key: 'DASHBOARD_PORT',          default: 3000,  description: 'Dashboard HTTP port', requiresRestart: true },
+    'dashboard.refreshInterval':   { key: 'DASHBOARD_REFRESH_MS',    default: 10000, description: 'Card refresh interval (ms)' },
+    'dashboard.liquidityPollMs':   { key: 'DASHBOARD_LIQUIDITY_MS',  default: 5000,  description: 'Liquidity panel poll interval (ms)' },
 
     // Phase thresholds
     'phases.buyDaysMin': { key: 'PHASE_BUY_DAYS_MIN', default: 2, description: 'Days before target = buy phase' },

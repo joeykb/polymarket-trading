@@ -1419,7 +1419,7 @@ function getDashboardHTML(defaultDate) {
             } catch {
                 // silent
             }
-            liquidityTimer = setTimeout(fetchLiquidity, 5000);
+            liquidityTimer = setTimeout(fetchLiquidity, ${config.dashboard.liquidityPollMs});
         }
 
         function renderLiquidity(data) {
