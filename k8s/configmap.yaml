@@ -1,5 +1,9 @@
 # TempEdge ConfigMap
-# Holds runtime configuration for both monitor and dashboard
+# Only values that MUST be locked per-environment go here.
+# Everything else is managed at runtime via /admin and persisted
+# to config-overrides.json on the PVC.
+#
+# Priority: ENV (this file + secrets) > Admin Overrides > Defaults
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,7 +12,9 @@ metadata:
   labels:
     app: tempedge
 data:
-  # Monitor settings
-  MONITOR_INTERVAL: "15"
-  # Dashboard settings
+  # ── Infrastructure ──────────────────────────────────────────
   DASHBOARD_PORT: "3000"
+
+  # Everything else (weather, polymarket, trading risk, monitoring
+  # thresholds, phase logic) uses defaults from src/config.js and
+  # can be edited live at /admin.

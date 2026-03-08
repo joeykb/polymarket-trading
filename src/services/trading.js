@@ -18,22 +18,23 @@ import { Wallet } from 'ethers';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { config } from '../config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const CLOB_HOST = 'https://clob.polymarket.com';
-const CHAIN_ID = 137; // Polygon mainnet
+// CLOB_HOST and CHAIN_ID are read at call time via getClient() which uses config.trading
+// No module-level caching — supports hot-reload.
 
 // ── Config ──────────────────────────────────────────────────────────────
 
 function getConfig() {
     return {
-        privateKey: process.env.POLYMARKET_PRIVATE_KEY || '',
-        mode: (process.env.TRADING_MODE || 'disabled').toLowerCase(),
-        maxPositionCost: parseFloat(process.env.MAX_POSITION_COST || '2.00'),
-        maxDailySpend: parseFloat(process.env.MAX_DAILY_SPEND || '5.00'),
-        buySize: parseFloat(process.env.BUY_SIZE || '0'), // 0 = auto-calculate to meet $1 min
-        minOrderValue: 1.05, // Polymarket min is $1 — add 5% buffer
+        privateKey: config.trading.privateKey,
+        mode: config.trading.mode,
+        maxPositionCost: config.trading.maxPositionCost,
+        maxDailySpend: config.trading.maxDailySpend,
+        buySize: config.trading.buySize,
+        minOrderValue: config.trading.minOrderValue,
     };
 }
 
@@ -49,16 +50,16 @@ let _signer = null;
 async function getClient() {
     if (_client) return _client;
 
-    const config = getConfig();
-    if (!config.privateKey) {
+    const tradingCfg = getConfig();
+    if (!tradingCfg.privateKey) {
         throw new Error('POLYMARKET_PRIVATE_KEY not set');
     }
 
-    _signer = new Wallet(config.privateKey);
+    _signer = new Wallet(tradingCfg.privateKey);
     console.log(`  🔑 Wallet: ${_signer.address}`);
 
     // Derive API credentials from wallet
-    const tempClient = new ClobClient(CLOB_HOST, CHAIN_ID, _signer);
+    const tempClient = new ClobClient(config.trading.clobHost, config.trading.chainId, _signer);
     let apiCreds;
     try {
         apiCreds = await tempClient.createOrDeriveApiKey();
@@ -76,8 +77,8 @@ async function getClient() {
 
     // Initialize full trading client
     _client = new ClobClient(
-        CLOB_HOST,
-        CHAIN_ID,
+        config.trading.clobHost,
+        config.trading.chainId,
         _signer,
         apiCreds,
         0, // Signature type: 0 = EOA
@@ -128,18 +129,18 @@ function recordSpend(amount, orderDetails) {
  * @param {Object} config
  * @returns {Promise<Object>} - order result
  */
-async function placeSingleOrder(position, config) {
+async function placeSingleOrder(position, tradingCfg) {
     const tokenId = position.clobTokenIds?.[0]; // YES token
     if (!tokenId) {
         return { success: false, error: 'No clobTokenId for YES token', position };
     }
 
     let price = position.buyPrice;
-    const MAX_SPREAD_PCT = 0.20; // Skip if bid-ask spread > 20%
-    const MIN_ASK_DEPTH = 5;     // Need at least 5 shares available at ask
+    const MAX_SPREAD_PCT = config.trading.maxSpreadPct;
+    const MIN_ASK_DEPTH = config.trading.minAskDepth;
 
     // For LIVE orders, check liquidity and use real ask price for immediate fill
-    if (config.mode === 'live') {
+    if (tradingCfg.mode === 'live') {
         try {
             const client = await getClient();
             const book = await client.getOrderBook(tokenId);
@@ -180,34 +181,34 @@ async function placeSingleOrder(position, config) {
     }
 
     // Auto-calculate size to target exactly $1.05 per position (fractional shares OK)
-    let size = config.buySize;
+    let size = tradingCfg.buySize;
     if (size <= 0) {
-        size = parseFloat((config.minOrderValue / price).toFixed(2));
+        size = parseFloat((tradingCfg.minOrderValue / price).toFixed(2));
     }
     let cost = parseFloat((price * size).toFixed(4));
 
     console.log(`  📐 ${position.label}: price=$${price.toFixed(4)} × ${size} shares = $${cost.toFixed(4)}`);
 
     // Safety: per-position cap
-    if (cost > config.maxPositionCost) {
+    if (cost > tradingCfg.maxPositionCost) {
         return {
             success: false,
-            error: `Cost $${cost.toFixed(4)} exceeds max $${config.maxPositionCost}`,
+            error: `Cost $${cost.toFixed(4)} exceeds max $${tradingCfg.maxPositionCost}`,
             position,
         };
     }
 
     // Safety: daily spend cap
     const todaySpend = getTodaySpend();
-    if (todaySpend + cost > config.maxDailySpend) {
+    if (todaySpend + cost > tradingCfg.maxDailySpend) {
         return {
             success: false,
-            error: `Daily spend $${(todaySpend + cost).toFixed(4)} would exceed max $${config.maxDailySpend}`,
+            error: `Daily spend $${(todaySpend + cost).toFixed(4)} would exceed max $${tradingCfg.maxDailySpend}`,
             position,
         };
     }
 
-    if (config.mode === 'dry-run') {
+    if (tradingCfg.mode === 'dry-run') {
         console.log(`  🧪 DRY-RUN: Would buy ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
         console.log(`     Token: ${tokenId}`);
         console.log(`     Cost:  $${cost.toFixed(4)}`);
@@ -240,10 +241,10 @@ async function placeSingleOrder(position, config) {
         }
 
         // Re-check per-position cap after size bump
-        if (cost > config.maxPositionCost) {
+        if (cost > tradingCfg.maxPositionCost) {
             return {
                 success: false,
-                error: `Cost $${cost.toFixed(4)} (after min-size bump) exceeds max $${config.maxPositionCost}`,
+                error: `Cost $${cost.toFixed(4)} (after min-size bump) exceeds max $${tradingCfg.maxPositionCost}`,
                 position,
             };
         }
@@ -323,9 +324,9 @@ async function placeSingleOrder(position, config) {
  * @returns {Promise<Object>} - buyOrder object compatible with existing P&L logic
  */
 export async function executeRealBuyOrder(snapshot) {
-    const config = getConfig();
+    const tradingCfg = getConfig();
 
-    if (config.mode === 'disabled') {
+    if (tradingCfg.mode === 'disabled') {
         console.log('  ⚠️  Trading disabled (TRADING_MODE=disabled)');
         return null; // Fall through to simulated buy
     }
@@ -336,8 +337,8 @@ export async function executeRealBuyOrder(snapshot) {
         return null; // Fall through to simulated buy
     }
 
-    console.log(`\n  🏦 Trading Mode: ${config.mode.toUpperCase()}`);
-    console.log(`  💳 Max/position: $${config.maxPositionCost} | Max/day: $${config.maxDailySpend}`);
+    console.log(`\n  🏦 Trading Mode: ${tradingCfg.mode.toUpperCase()}`);
+    console.log(`  💳 Max/position: $${tradingCfg.maxPositionCost} | Max/day: $${tradingCfg.maxDailySpend}`);
     console.log(`  📊 Today's spend so far: $${getTodaySpend().toFixed(4)}`);
 
     // Build positions from snapshot
@@ -361,7 +362,7 @@ export async function executeRealBuyOrder(snapshot) {
     // Place orders
     const results = [];
     for (const position of positions) {
-        const result = await placeSingleOrder(position, config);
+        const result = await placeSingleOrder(position, tradingCfg);
         results.push({ ...position, ...result });
     }
 

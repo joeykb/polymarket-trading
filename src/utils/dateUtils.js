@@ -2,6 +2,8 @@
  * Date formatting utilities for TempEdge
  */
 
+import { config } from '../config.js';
+
 /**
  * Get today's date in YYYY-MM-DD format in Eastern Time
  * @returns {string}
@@ -54,7 +56,7 @@ export function daysUntil(targetDate) {
  */
 export function getPhase(targetDate) {
     const days = daysUntil(targetDate);
-    if (days >= 2) return 'buy';
+    if (days >= config.phases.buyDaysMin) return 'buy';
     if (days === 1) return 'monitor';
     return 'resolve';  // days <= 0
 }

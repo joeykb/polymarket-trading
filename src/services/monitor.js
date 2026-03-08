@@ -13,26 +13,20 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { config as dotenvConfig } from 'dotenv';
+import { config } from '../config.js';
 import { fetchWeatherData } from './weather.js';
 import { discoverMarket } from './polymarket.js';
 import { selectRanges } from './rangeSelector.js';
 import { executeRealBuyOrder } from './trading.js';
+import { liquidityMonitor } from './liquidityStream.js';
 import { nowISO, daysUntil, getPhase } from '../utils/dateUtils.js';
-
-// Load .env file
-dotenvConfig();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const OUTPUT_DIR = path.resolve(__dirname, '../../output');
 
-// ── Thresholds ──────────────────────────────────────────────────────────
-
-const FORECAST_SHIFT_THRESHOLD = 1.0;   // °F change triggers alert
-const PRICE_SPIKE_THRESHOLD = 0.05;     // 5¢ change triggers alert
-const REBALANCE_THRESHOLD = 7.0;        // °F change required to rebalance ranges
-const BUY_HOUR_EST = 7;                 // Simulated buy at 7:00am EST
+// Thresholds are read dynamically from config at each usage point
+// to support hot-reload via the admin config page.
 
 // ── Simulated Buy Order ─────────────────────────────────────────────────
 
@@ -117,7 +111,7 @@ function shouldPlaceBuy(session, snapshot) {
     // Check if current time is at or past 7am EST
     const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
     const hour = new Date(nowET).getHours();
-    return hour >= BUY_HOUR_EST;
+    return hour >= config.monitor.buyHourEST;
 }
 
 /**
@@ -336,9 +330,9 @@ export function detectAlerts(current, previous, session) {
 
     // 3. Forecast shift from initial
     const totalShift = Math.abs(current.forecastTempF - initialForecast);
-    if (totalShift >= FORECAST_SHIFT_THRESHOLD) {
+    if (totalShift >= config.monitor.forecastShiftThreshold) {
         const delta = parseFloat((current.forecastTempF - initialForecast).toFixed(1));
-        const isDrastic = totalShift >= REBALANCE_THRESHOLD;
+        const isDrastic = totalShift >= config.monitor.rebalanceThreshold;
         alerts.push({
             timestamp: now,
             type: 'forecast_shift',
@@ -374,7 +368,7 @@ export function detectAlerts(current, previous, session) {
     ];
 
     for (const { label, range } of rangesToCheck) {
-        if (range && Math.abs(range.priceChange) >= PRICE_SPIKE_THRESHOLD) {
+        if (range && Math.abs(range.priceChange) >= config.monitor.priceSpikeThreshold) {
             const direction = range.priceChange > 0 ? '📈' : '📉';
             alerts.push({
                 timestamp: now,
@@ -478,7 +472,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         initialForecastTempF: snapshot.forecastTempF,
         initialTargetRange: snapshot.target.question,
         forecastSource: snapshot.forecastSource,
-        rebalanceThreshold: REBALANCE_THRESHOLD,
+        rebalanceThreshold: config.monitor.rebalanceThreshold,
         buyOrder,
         pnl: null,
         snapshots: [snapshot],
@@ -486,6 +480,25 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
     };
 
     saveSession(session);
+
+    // ── Start WebSocket liquidity stream for BUY phase ──────────────
+    if (session.phase === 'buy' && config.liquidity.wsEnabled) {
+        const tokens = [];
+        for (const pos of ['target', 'below', 'above']) {
+            const range = snapshot[pos];
+            if (range?.clobTokenIds?.[0]) {
+                tokens.push({
+                    tokenId: range.clobTokenIds[0],
+                    label: pos,
+                    question: range.question || pos,
+                });
+            }
+        }
+        if (tokens.length > 0) {
+            liquidityMonitor.start(tokens);
+        }
+    }
+
     return session;
 }
 
@@ -541,4 +554,14 @@ export async function runMonitoringCycle(session) {
 export function stopSession(session) {
     session.status = 'stopped';
     saveSession(session);
+    liquidityMonitor.stop();
+}
+
+/**
+ * Get the current liquidity snapshot (for the dashboard API).
+ * @returns {Object|null}
+ */
+export function getLiquiditySnapshot() {
+    if (!liquidityMonitor.isRunning()) return null;
+    return liquidityMonitor.getSnapshot();
 }

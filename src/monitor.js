@@ -13,11 +13,12 @@
 
 import { createOrResumeSession, runMonitoringCycle, stopSession, loadSession } from './services/monitor.js';
 import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from './utils/dateUtils.js';
+import { config } from './config.js';
 
 // ── CLI Argument Parsing ────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-let intervalMinutes = parseInt(process.env.MONITOR_INTERVAL) || 15;
+let intervalMinutes = config.monitor.intervalMinutes;
 
 for (let i = 0; i < args.length; i++) {
     if (args[i] === '--interval' && args[i + 1]) {

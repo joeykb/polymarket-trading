@@ -11,18 +11,16 @@
  */
 
 import { nowISO } from '../utils/dateUtils.js';
+import { config } from '../config.js';
 
-// LaGuardia Airport coordinates
-const KLGA_LAT = 40.7769;
-const KLGA_LON = -73.8740;
-
-// Weather Company API (powers Weather Underground)
-// This is the publicly accessible API key used by weather.com's frontend
-const WC_API_KEY = process.env.WC_API_KEY || 'e1f10a1e78da46f5b10a1e78da96f525';
-const WC_BASE = 'https://api.weather.com/v3/wx';
-
-// Open-Meteo (fallback)
-const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
+// Weather values are read dynamically from config for hot-reload support
+const wc = () => ({
+    lat: config.weather.stationLat,
+    lon: config.weather.stationLon,
+    apiKey: config.weather.wcApiKey,
+    base: config.weather.wcBaseUrl,
+    openMeteo: config.weather.openMeteoUrl,
+});
 
 // ── Weather Company (Primary) ───────────────────────────────────────────
 
@@ -32,7 +30,8 @@ const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
  * @returns {Promise<import('../models/types.js').WeatherForecast>}
  */
 async function fetchWCForecast(targetDate) {
-    const url = `${WC_BASE}/forecast/daily/5day?geocode=${KLGA_LAT},${KLGA_LON}&format=json&units=e&language=en-US&apiKey=${WC_API_KEY}`;
+    const w = wc();
+    const url = `${w.base}/forecast/daily/5day?geocode=${w.lat},${w.lon}&format=json&units=e&language=en-US&apiKey=${w.apiKey}`;
 
     const response = await fetch(url);
     if (!response.ok) {
@@ -77,7 +76,8 @@ async function fetchWCForecast(targetDate) {
  * @returns {Promise<import('../models/types.js').CurrentConditions>}
  */
 async function fetchWCCurrentConditions() {
-    const url = `${WC_BASE}/observations/current?geocode=${KLGA_LAT},${KLGA_LON}&format=json&units=e&language=en-US&apiKey=${WC_API_KEY}`;
+    const w = wc();
+    const url = `${w.base}/observations/current?geocode=${w.lat},${w.lon}&format=json&units=e&language=en-US&apiKey=${w.apiKey}`;
 
     const response = await fetch(url);
     if (!response.ok) {
@@ -143,15 +143,16 @@ async function fetchOpenMeteoForecast(targetDate) {
  * @returns {Promise<import('../models/types.js').CurrentConditions>}
  */
 async function fetchOpenMeteoCurrentConditions() {
+    const w = wc();
     const params = new URLSearchParams({
-        latitude: KLGA_LAT.toString(),
-        longitude: KLGA_LON.toString(),
+        latitude: w.lat.toString(),
+        longitude: w.lon.toString(),
         current: 'temperature_2m,apparent_temperature,weather_code',
         temperature_unit: 'fahrenheit',
         timezone: 'America/New_York',
     });
 
-    const url = `${OPEN_METEO_URL}?${params}`;
+    const url = `${w.openMeteo}?${params}`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -181,7 +182,7 @@ async function fetchOpenMeteoCurrentConditions() {
  * @param {number} [retries=2] - Number of retries per source
  * @returns {Promise<import('../models/types.js').WeatherForecast>}
  */
-export async function fetchForecast(targetDate, retries = 2) {
+export async function fetchForecast(targetDate, retries = config.weather.retries) {
     // Try Weather Company first (matches Polymarket resolution source)
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -262,16 +263,17 @@ export async function fetchAllForecastDays() {
     } catch { /* fall through */ }
 
     // Fallback to Open-Meteo
+    const w = wc();
     const params = new URLSearchParams({
-        latitude: KLGA_LAT.toString(),
-        longitude: KLGA_LON.toString(),
+        latitude: w.lat.toString(),
+        longitude: w.lon.toString(),
         daily: 'temperature_2m_max',
         temperature_unit: 'fahrenheit',
         timezone: 'America/New_York',
         forecast_days: '7',
     });
 
-    const url = `${OPEN_METEO_URL}?${params}`;
+    const url = `${w.openMeteo}?${params}`;
     const response = await fetch(url);
 
     if (!response.ok) {

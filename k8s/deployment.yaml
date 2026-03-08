@@ -66,7 +66,6 @@ spec:
           image: tempedge:latest
           imagePullPolicy: Never
           command: ["node", "src/monitor.js"]
-          args: ["--interval", "$(MONITOR_INTERVAL)"]
           envFrom:
             - configMapRef:
                 name: tempedge-config
@@ -84,7 +83,7 @@ spec:
               memory: 256Mi
 
         # ── Dashboard Container ───────────────────────────
-        # Serves the web dashboard on port 3000
+        # Serves the web dashboard + admin config page on port 3000
         - name: dashboard
           image: tempedge:latest
           imagePullPolicy: Never
@@ -92,16 +91,18 @@ spec:
           envFrom:
             - configMapRef:
                 name: tempedge-config
+            - secretRef:
+                name: polymarket-trading
           volumeMounts:
             - name: output
               mountPath: /app/output
           resources:
             requests:
               cpu: 25m
-              memory: 32Mi
+              memory: 64Mi
             limits:
               cpu: 100m
-              memory: 64Mi
+              memory: 128Mi
           readinessProbe:
             httpGet:
               path: /api/status

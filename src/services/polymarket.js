@@ -11,8 +11,9 @@
  */
 
 import { formatDateForSlug } from '../utils/dateUtils.js';
+import { config } from '../config.js';
 
-const GAMMA_BASE = 'https://gamma-api.polymarket.com';
+const GAMMA_BASE = config.polymarket.gammaBaseUrl;
 
 /**
  * Parse a temperature range from a Polymarket market question string
@@ -150,7 +151,7 @@ async function gammaFetch(url) {
  */
 async function trySlugDiscovery(targetDate) {
     const dateSlug = formatDateForSlug(targetDate);
-    const slug = `highest-temperature-in-nyc-on-${dateSlug}`;
+    const slug = config.polymarket.slugTemplate.replace('{date}', dateSlug);
     console.log(`  Trying slug: ${slug}`);
 
     try {
@@ -208,11 +209,13 @@ async function searchAllTemperatureEvents() {
 
         // Since the Gamma API filtering is unreliable, fetch a large batch
         // and filter client-side for temperature events
-        for (let offset = 0; offset < 200; offset += 50) {
+        const maxOffset = config.polymarket.maxSearchPages * config.polymarket.searchPageSize;
+        const pageSize = config.polymarket.searchPageSize;
+        for (let offset = 0; offset < maxOffset; offset += pageSize) {
             const paginatedUrl = `${GAMMA_BASE}/events?` + new URLSearchParams({
                 active: 'true',
                 closed: 'false',
-                limit: '50',
+                limit: String(pageSize),
                 offset: String(offset),
             });
 

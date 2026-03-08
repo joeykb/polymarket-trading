@@ -20,7 +20,8 @@
   "dependencies": {
     "@polymarket/clob-client": "^5.7.0",
     "dotenv": "^17.3.1",
-    "ethers": "^5.8.0"
+    "ethers": "^5.8.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "qrcode": "^1.5.4"
