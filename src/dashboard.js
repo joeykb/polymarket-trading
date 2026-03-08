@@ -1110,6 +1110,8 @@ function getDashboardHTML(defaultDate) {
                 forecastSource, sourceLabel, daysUntilTarget, forecastChange,
                 costLabel, costValue, costSub,
                 snapshotCount: snapshots.length, alertCount: alerts.length,
+                awaitingLiquidity: session?.awaitingLiquidity || false,
+                liquidityWaitStart: session?.liquidityWaitStart || null,
             };
         }
 
@@ -1153,7 +1155,8 @@ function getDashboardHTML(defaultDate) {
 
             const vm = extractViewModel(data);
             const phaseLabels = { buy: '\\ud83d\\uded2 BUY', monitor: '\\ud83d\\udc41\\ufe0f MONITOR', resolve: '\\ud83c\\udfaf RESOLVE' };
-            const phaseStr = phaseLabels[vm.phase] ? ' \\u00b7 ' + phaseLabels[vm.phase] : '';
+            let phaseStr = phaseLabels[vm.phase] ? ' \\u00b7 ' + phaseLabels[vm.phase] : '';
+            if (vm.awaitingLiquidity) phaseStr = ' \\u00b7 \\u23f3 AWAITING LIQUIDITY';
             updateStatus(vm.status, (vm.status.charAt(0).toUpperCase() + vm.status.slice(1)) + phaseStr);
 
             updateStatCard('stat-current', vm.currentTempF !== null ? vm.currentTempF + '\\u00b0F' : '--',
@@ -1244,7 +1247,8 @@ function getDashboardHTML(defaultDate) {
             }
 
             const phaseLabels = { buy: '\\ud83d\\uded2 BUY', monitor: '\\ud83d\\udc41\\ufe0f MONITOR', resolve: '\\ud83c\\udfaf RESOLVE' };
-            const phaseStr = phaseLabels[vm.phase] ? ' \\u00b7 ' + phaseLabels[vm.phase] : '';
+            let phaseStr = phaseLabels[vm.phase] ? ' \\u00b7 ' + phaseLabels[vm.phase] : '';
+            if (vm.awaitingLiquidity) phaseStr = ' \\u00b7 \\u23f3 AWAITING LIQUIDITY';
             updateStatus(vm.status, (vm.status.charAt(0).toUpperCase() + vm.status.slice(1)) + phaseStr);
 
             const { snapshots, alerts, latest, targetRange, belowRange, aboveRange, allRanges,

@@ -291,19 +291,26 @@ function startAssessmentLoop() {
     const intervalMs = config.liquidity.checkIntervalSecs * 1000;
 
     assessmentTimer = setInterval(() => {
-        // Check if any token crossed into liquid territory
-        let anyLiquid = false;
+        // Check liquidity state across all tokens
+        let liquidCount = 0;
+        let totalCount = 0;
         for (const [, entry] of books) {
-            if (entry.isLiquid) {
-                anyLiquid = true;
-                break;
-            }
+            totalCount++;
+            if (entry.isLiquid) liquidCount++;
         }
 
+        const anyLiquid = liquidCount > 0;
+        const allLiquid = totalCount > 0 && liquidCount === totalCount;
+
         if (anyLiquid) {
-            // Fire callbacks
+            // Fire callbacks with snapshot + flags
+            const snap = getSnapshot();
+            snap.allLiquid = allLiquid;
+            snap.liquidCount = liquidCount;
+            snap.totalCount = totalCount;
+
             for (const cb of liquidityCallbacks) {
-                try { cb(getSnapshot()); } catch { /* ignore */ }
+                try { cb(snap); } catch { /* ignore */ }
             }
         }
     }, intervalMs);
@@ -433,6 +440,8 @@ function getSnapshot() {
         tokens,
         bestScore,
         bestToken,
+        allLiquid: tokens.length > 0 && tokens.every(t => t.isLiquid),
+        liquidCount: tokens.filter(t => t.isLiquid).length,
         thresholds: {
             maxSpreadPct: config.trading.maxSpreadPct,
             minAskDepth: config.trading.minAskDepth,
