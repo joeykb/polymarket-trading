@@ -43,6 +43,7 @@ function placeBuyOrder(snapshot) {
             label: 'target',
             question: snapshot.target.question,
             marketId: snapshot.target.marketId,
+            clobTokenId: snapshot.target.clobTokenIds?.[0] || null,
             buyPrice: snapshot.target.yesPrice,
             shares: 1,  // 1 share = $1 payout if YES
         });
@@ -52,6 +53,7 @@ function placeBuyOrder(snapshot) {
             label: 'below',
             question: snapshot.below.question,
             marketId: snapshot.below.marketId,
+            clobTokenId: snapshot.below.clobTokenIds?.[0] || null,
             buyPrice: snapshot.below.yesPrice,
             shares: 1,
         });
@@ -61,6 +63,7 @@ function placeBuyOrder(snapshot) {
             label: 'above',
             question: snapshot.above.question,
             marketId: snapshot.above.marketId,
+            clobTokenId: snapshot.above.clobTokenIds?.[0] || null,
             buyPrice: snapshot.above.yesPrice,
             shares: 1,
         });
@@ -297,6 +300,7 @@ export async function takeSnapshot(targetDate, previous) {
         allRanges: event.ranges.map(r => ({
             marketId: r.marketId,
             question: r.question,
+            clobTokenIds: r.clobTokenIds || [],
             yesPrice: r.yesPrice,
             impliedProbability: r.impliedProbability,
             volume: r.volume,

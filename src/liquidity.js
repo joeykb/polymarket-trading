@@ -285,11 +285,13 @@ function discoverSessions() {
             const latest = data.snapshots?.[data.snapshots.length - 1];
             if (!latest) continue;
 
-            const tokens = [];
+            const tokenMap = new Map(); // tokenId -> { tokenId, label, question }
+
+            // 1. Current snapshot ranges (target, below, above)
             for (const pos of ['target', 'below', 'above']) {
                 const range = latest[pos];
                 if (range?.clobTokenIds?.[0]) {
-                    tokens.push({
+                    tokenMap.set(range.clobTokenIds[0], {
                         tokenId: range.clobTokenIds[0],
                         label: pos,
                         question: range.question || pos,
@@ -297,6 +299,52 @@ function discoverSessions() {
                 }
             }
 
+            // 2. Buy order positions — ensures ALL purchased tokens are tracked
+            //    even if ranges shifted and some are no longer in the current snapshot
+            if (data.buyOrder?.positions) {
+                for (const pos of data.buyOrder.positions) {
+                    // If buyOrder has clobTokenId directly, use it
+                    if (pos.clobTokenId && !tokenMap.has(pos.clobTokenId)) {
+                        tokenMap.set(pos.clobTokenId, {
+                            tokenId: pos.clobTokenId,
+                            label: pos.label,
+                            question: pos.question || pos.label,
+                        });
+                        continue;
+                    }
+                    // Fallback A: look up clobTokenId from allRanges by question text
+                    if (!pos.clobTokenId && pos.question && latest.allRanges) {
+                        const match = latest.allRanges.find(r => r.question === pos.question);
+                        if (match?.clobTokenIds?.[0] && !tokenMap.has(match.clobTokenIds[0])) {
+                            tokenMap.set(match.clobTokenIds[0], {
+                                tokenId: match.clobTokenIds[0],
+                                label: pos.label,
+                                question: pos.question,
+                            });
+                            continue;
+                        }
+                    }
+                    // Fallback B: scan snapshot ranges for matching question
+                    if (!pos.clobTokenId && pos.question) {
+                        for (const snap of (data.snapshots || [])) {
+                            for (const key of ['target', 'below', 'above']) {
+                                const r = snap[key];
+                                if (r?.question === pos.question && r?.clobTokenIds?.[0] && !tokenMap.has(r.clobTokenIds[0])) {
+                                    tokenMap.set(r.clobTokenIds[0], {
+                                        tokenId: r.clobTokenIds[0],
+                                        label: pos.label,
+                                        question: pos.question,
+                                    });
+                                    break;
+                                }
+                            }
+                            if (tokenMap.size >= (data.buyOrder.positions.length + 3)) break; // found all
+                        }
+                    }
+                }
+            }
+
+            const tokens = [...tokenMap.values()];
             if (tokens.length > 0) {
                 result.set(date, tokens);
             }
