@@ -229,6 +229,62 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // Trade log — aggregated buy orders across all sessions
+    if (url.pathname === '/api/trades') {
+        const dates = listAvailableDates();
+        const trades = [];
+
+        for (const date of dates) {
+            const session = loadSessionData(date);
+            if (!session?.buyOrder) continue;
+
+            const bo = session.buyOrder;
+            const latest = session.snapshots?.[session.snapshots.length - 1];
+            const pnl = computeLivePnL(bo, latest);
+
+            trades.push({
+                date,
+                placedAt: bo.placedAt,
+                mode: bo.mode || (bo.simulated ? 'dry-run' : 'live'),
+                positions: (bo.positions || []).map(p => ({
+                    label: p.label,
+                    question: p.question,
+                    buyPrice: p.buyPrice,
+                    shares: p.shares,
+                    status: p.status || 'placed',
+                    orderId: p.orderId || null,
+                    error: p.error || null,
+                })),
+                totalCost: bo.totalCost,
+                maxProfit: bo.maxProfit,
+                pnl: pnl ? {
+                    totalPnL: pnl.totalPnL,
+                    totalPnLPct: pnl.totalPnLPct,
+                    totalBuyCost: pnl.totalBuyCost,
+                    totalCurrentValue: pnl.totalCurrentValue,
+                } : null,
+                sessionStatus: session.status,
+                phase: session.phase || getPhase(date),
+                resolution: session.resolution ? {
+                    keep: session.resolution.keep,
+                    discardLabels: session.resolution.discardLabels,
+                } : null,
+            });
+        }
+
+        // Already sorted newest first from listAvailableDates
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify({
+            trades,
+            count: trades.length,
+            serverTime: new Date().toISOString(),
+        }));
+        return;
+    }
+
     // Liquidity endpoint — proxy to dedicated liquidity microservice
     if (url.pathname === '/api/liquidity') {
         const date = url.searchParams.get('date');
@@ -1296,6 +1352,13 @@ function getDashboardHTML(defaultDate) {
             html += '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">Connecting to order book stream...</div>';
             html += '</div></div>';
 
+            // Trade Log
+            html += '<div class="card" id="tradeLogCard">';
+            html += '<div class="card-header"><span class="card-title">📋 Trade Log</span><span id="tradeLogCount" style="font-size:12px;color:var(--text-muted);">loading...</span></div>';
+            html += '<div class="card-body" id="tradeLogBody" style="padding:0;max-height:400px;overflow-y:auto;">';
+            html += '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">Loading trade history...</div>';
+            html += '</div></div>';
+
             // All Ranges Table
             html += '<div class="card">';
             html += '<div class="card-header"><span class="card-title">📊 All Temperature Ranges</span></div>';
@@ -1321,6 +1384,9 @@ function getDashboardHTML(defaultDate) {
 
             // Start liquidity polling
             fetchLiquidity();
+
+            // Start trade log polling
+            fetchTradeLog();
         }
 
         async function loadConfigPanel() {
@@ -1411,6 +1477,74 @@ function getDashboardHTML(defaultDate) {
                 // silent
             }
             liquidityTimer = setTimeout(fetchLiquidity, ${config.dashboard.liquidityPollMs});
+        }
+
+        // ── Trade Log ─────────────────────────────────
+        let tradeLogTimer = null;
+        async function fetchTradeLog() {
+            if (tradeLogTimer) clearTimeout(tradeLogTimer);
+            try {
+                const res = await fetch('/api/trades');
+                const data = await res.json();
+                renderTradeLog(data);
+            } catch { /* silent */ }
+            tradeLogTimer = setTimeout(fetchTradeLog, 30000);
+        }
+
+        function renderTradeLog(data) {
+            const body = document.getElementById('tradeLogBody');
+            const countEl = document.getElementById('tradeLogCount');
+            if (!body) return;
+            if (!data || !data.trades || data.trades.length === 0) {
+                body.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">No trades yet</div>';
+                if (countEl) countEl.textContent = '0 trades';
+                return;
+            }
+            if (countEl) countEl.textContent = data.count + ' trades';
+
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+            html += '<thead><tr style="border-bottom:1px solid var(--border);">';
+            html += '<th style="padding:10px 14px;text-align:left;color:var(--text-secondary);font-weight:600;">Date</th>';
+            html += '<th style="padding:10px 8px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>';
+            html += '<th style="padding:10px 8px;text-align:left;color:var(--text-secondary);font-weight:600;">Positions</th>';
+            html += '<th style="padding:10px 8px;text-align:right;color:var(--text-secondary);font-weight:600;">Cost</th>';
+            html += '<th style="padding:10px 8px;text-align:right;color:var(--text-secondary);font-weight:600;">P&L</th>';
+            html += '<th style="padding:10px 14px;text-align:center;color:var(--text-secondary);font-weight:600;">Status</th>';
+            html += '</tr></thead><tbody>';
+
+            for (const t of data.trades) {
+                const time = t.placedAt ? new Date(t.placedAt).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',timeZone:'America/New_York'}) : '--';
+                const posLabels = t.positions.map(p => {
+                    const icon = p.status === 'placed' ? '\\u2705' : p.status === 'dry-run' ? '\\ud83e\\uddea' : '\\u274c';
+                    return icon + ' ' + p.label + ' @' + (p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--');
+                }).join('<br>');
+
+                const pnlVal = t.pnl ? t.pnl.totalPnL : null;
+                const pnlPct = t.pnl ? t.pnl.totalPnLPct : null;
+                const pnlColor = pnlVal === null ? 'var(--text-muted)' : pnlVal >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                const pnlStr = pnlVal !== null ? (pnlVal >= 0 ? '+' : '') + '$' + pnlVal.toFixed(3) + ' (' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%)' : '--';
+
+                const statusMap = {
+                    active: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', text: '\\ud83d\\udfe2 Active' },
+                    completed: { bg: 'rgba(16,185,129,0.15)', color: '#34d399', text: '\\u2705 Completed' },
+                    stopped: { bg: 'rgba(107,114,128,0.15)', color: '#9ca3af', text: '\\u23f9 Stopped' },
+                };
+                const st = statusMap[t.sessionStatus] || statusMap.active;
+
+                const modeLabel = t.mode === 'dry-run' ? '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:1px 6px;border-radius:4px;font-size:11px;margin-left:4px;">DRY</span>' : '';
+
+                html += '<tr style="border-bottom:1px solid var(--border);transition:background 0.15s;" onmouseover="this.style.background=\'var(--bg-elevated)\'" onmouseout="this.style.background=\'transparent\'">';
+                html += '<td style="padding:10px 14px;font-weight:600;white-space:nowrap;">' + t.date + modeLabel + '</td>';
+                html += '<td style="padding:10px 8px;color:var(--text-secondary);white-space:nowrap;font-family:JetBrains Mono,monospace;font-size:12px;">' + time + ' ET</td>';
+                html += '<td style="padding:10px 8px;line-height:1.6;">' + posLabels + '</td>';
+                html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;">$' + (t.totalCost || 0).toFixed(3) + '</td>';
+                html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;color:' + pnlColor + ';">' + pnlStr + '</td>';
+                html += '<td style="padding:10px 14px;text-align:center;"><span style="background:' + st.bg + ';color:' + st.color + ';padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;">' + st.text + '</span></td>';
+                html += '</tr>';
+            }
+
+            html += '</tbody></table>';
+            body.innerHTML = html;
         }
 
         function renderLiquidity(data) {
