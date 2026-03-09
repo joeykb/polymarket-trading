@@ -1504,44 +1504,93 @@ function getDashboardHTML(defaultDate) {
                 if (countEl) countEl.textContent = '0 trades';
                 return;
             }
-            if (countEl) countEl.textContent = data.count + ' trades';
+
+            // Count real vs simulated
+            const realCount = data.trades.filter(function(t) {
+                return t.mode === 'live' && t.positions.some(function(p) { return p.status === 'placed'; });
+            }).length;
+            const simCount = data.trades.filter(function(t) { return t.mode === 'dry-run'; }).length;
+            const failCount = data.trades.filter(function(t) {
+                return t.mode === 'live' && t.positions.every(function(p) { return p.status === 'failed'; });
+            }).length;
+
+            if (countEl) {
+                countEl.textContent = realCount + ' live, ' + simCount + ' sim, ' + failCount + ' failed';
+            }
 
             let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
             html += '<thead><tr style="border-bottom:1px solid var(--border);">';
             html += '<th style="padding:10px 14px;text-align:left;color:var(--text-secondary);font-weight:600;">Date</th>';
+            html += '<th style="padding:10px 8px;text-align:center;color:var(--text-secondary);font-weight:600;">Execution</th>';
             html += '<th style="padding:10px 8px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>';
             html += '<th style="padding:10px 8px;text-align:left;color:var(--text-secondary);font-weight:600;">Positions</th>';
             html += '<th style="padding:10px 8px;text-align:right;color:var(--text-secondary);font-weight:600;">Cost</th>';
             html += '<th style="padding:10px 8px;text-align:right;color:var(--text-secondary);font-weight:600;">P&L</th>';
-            html += '<th style="padding:10px 14px;text-align:center;color:var(--text-secondary);font-weight:600;">Status</th>';
+            html += '<th style="padding:10px 14px;text-align:center;color:var(--text-secondary);font-weight:600;">Session</th>';
             html += '</tr></thead><tbody>';
 
             for (const t of data.trades) {
                 const time = t.placedAt ? new Date(t.placedAt).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',timeZone:'America/New_York'}) : '--';
-                const posLabels = t.positions.map(p => {
-                    const icon = p.status === 'placed' ? '\\u2705' : p.status === 'dry-run' ? '\\ud83e\\uddea' : '\\u274c';
-                    return icon + ' ' + p.label + ' @' + (p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--');
+
+                // Determine execution type
+                const allFailed = t.positions.every(function(p) { return p.status === 'failed'; });
+                const anyPlaced = t.positions.some(function(p) { return p.status === 'placed'; });
+                let execBadge = '';
+                if (t.mode === 'dry-run') {
+                    execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83e\\uddea DRY RUN</span>';
+                } else if (allFailed) {
+                    const firstErr = t.positions[0]?.error || 'unknown';
+                    execBadge = '<span style="background:rgba(239,68,68,0.15);color:#f87171;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="' + escapeHtml(firstErr) + '">\\u274c FAILED</span>';
+                } else if (anyPlaced) {
+                    execBadge = '<span style="background:rgba(16,185,129,0.15);color:#34d399;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83d\\udfe2 LIVE</span>';
+                } else {
+                    execBadge = '<span style="background:rgba(107,114,128,0.15);color:#9ca3af;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\u2753 Unknown</span>';
+                }
+
+                // Position details with clear icons
+                const posLabels = t.positions.map(function(p) {
+                    var icon, tipText = '';
+                    if (p.status === 'placed' && t.mode !== 'dry-run') {
+                        icon = '\\ud83d\\udfe2';  // green circle = real
+                    } else if (t.mode === 'dry-run') {
+                        icon = '\\ud83e\\uddea';  // flask = simulated
+                    } else {
+                        icon = '\\u274c';  // red X = failed
+                        tipText = p.error || '';
+                    }
+                    var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
+                    var shares = p.shares ? ' \\u00d7' + p.shares : '';
+                    var label = icon + ' ' + p.label + ' @' + priceStr + shares;
+                    if (tipText) {
+                        label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
+                    }
+                    return label;
                 }).join('<br>');
 
+                // P&L (only meaningful for real or dry-run with cost > 0)
                 const pnlVal = t.pnl ? t.pnl.totalPnL : null;
                 const pnlPct = t.pnl ? t.pnl.totalPnLPct : null;
-                const pnlColor = pnlVal === null ? 'var(--text-muted)' : pnlVal >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
-                const pnlStr = pnlVal !== null ? (pnlVal >= 0 ? '+' : '') + '$' + pnlVal.toFixed(3) + ' (' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%)' : '--';
+                const hasCost = t.totalCost > 0;
+                const pnlColor = !hasCost ? 'var(--text-muted)' : pnlVal >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                const pnlStr = hasCost && pnlVal !== null ? (pnlVal >= 0 ? '+' : '') + '$' + pnlVal.toFixed(3) + ' (' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%)' : (allFailed ? 'N/A' : '--');
 
+                // Session status badge
                 const statusMap = {
                     active: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', text: '\\ud83d\\udfe2 Active' },
-                    completed: { bg: 'rgba(16,185,129,0.15)', color: '#34d399', text: '\\u2705 Completed' },
+                    completed: { bg: 'rgba(16,185,129,0.15)', color: '#34d399', text: '\\u2705 Done' },
                     stopped: { bg: 'rgba(107,114,128,0.15)', color: '#9ca3af', text: '\\u23f9 Stopped' },
                 };
                 const st = statusMap[t.sessionStatus] || statusMap.active;
 
-                const modeLabel = t.mode === 'dry-run' ? '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:1px 6px;border-radius:4px;font-size:11px;margin-left:4px;">DRY</span>' : '';
+                // Cost display
+                const costStr = hasCost ? '$' + t.totalCost.toFixed(3) : (allFailed ? '$0 (rejected)' : '$0');
 
-                html += '<tr style="border-bottom:1px solid var(--border);transition:background 0.15s;" class="trade-row">';
-                html += '<td style="padding:10px 14px;font-weight:600;white-space:nowrap;">' + t.date + modeLabel + '</td>';
+                html += '<tr style="border-bottom:1px solid var(--border);transition:background 0.15s;' + (allFailed ? 'opacity:0.6;' : '') + '" class="trade-row">';
+                html += '<td style="padding:10px 14px;font-weight:600;white-space:nowrap;">' + t.date + '</td>';
+                html += '<td style="padding:10px 8px;text-align:center;">' + execBadge + '</td>';
                 html += '<td style="padding:10px 8px;color:var(--text-secondary);white-space:nowrap;font-family:JetBrains Mono,monospace;font-size:12px;">' + time + ' ET</td>';
                 html += '<td style="padding:10px 8px;line-height:1.6;">' + posLabels + '</td>';
-                html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;">$' + (t.totalCost || 0).toFixed(3) + '</td>';
+                html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;' + (allFailed ? 'color:var(--text-muted);' : '') + '">' + costStr + '</td>';
                 html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;color:' + pnlColor + ';">' + pnlStr + '</td>';
                 html += '<td style="padding:10px 14px;text-align:center;"><span style="background:' + st.bg + ';color:' + st.color + ';padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;">' + st.text + '</span></td>';
                 html += '</tr>';
