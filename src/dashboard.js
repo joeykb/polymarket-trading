@@ -13,7 +13,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from './utils/dateUtils.js';
 import { config, getConfigSnapshot, updateConfig, resetConfigValue, resetAllOverrides } from './config.js';
-import { liquidityMonitor } from './services/liquidityStream.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,40 +75,8 @@ function listAvailableDates() {
         .reverse();
 }
 
-/**
- * Auto-start the liquidity monitor by reading the BUY-phase session from disk.
- * The dashboard and monitor run as separate containers, so we read session files
- * to discover token IDs, then connect our own WebSocket.
- */
-function autoStartLiquidityMonitor() {
-    try {
-        const buyDate = getTargetDateET(); // T+2 = BUY phase
-        const session = loadSessionData(buyDate);
-        if (!session || getPhase(buyDate) !== 'buy') return;
 
-        const latestSnap = session.snapshots?.[session.snapshots.length - 1];
-        if (!latestSnap) return;
-
-        const tokens = [];
-        for (const pos of ['target', 'below', 'above']) {
-            const range = latestSnap[pos];
-            if (range?.clobTokenIds?.[0]) {
-                tokens.push({
-                    tokenId: range.clobTokenIds[0],
-                    label: pos,
-                    question: range.question || pos,
-                });
-            }
-        }
-
-        if (tokens.length > 0) {
-            liquidityMonitor.start(tokens);
-            console.log(`  📡 Dashboard auto-started liquidity stream for ${buyDate} (${tokens.length} tokens)`);
-        }
-    } catch (err) {
-        console.warn(`  ⚠️  Failed to auto-start liquidity monitor: ${err.message}`);
-    }
-}
+const LIQUIDITY_SERVICE_URL = `http://localhost:${process.env.LIQUIDITY_PORT || 3001}`;
 
 // ── HTTP Server ─────────────────────────────────────────────────────────
 
@@ -164,7 +131,7 @@ function computeLivePnL(buyOrder, latestSnapshot) {
     };
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
 
     // API Routes
@@ -262,22 +229,42 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // Liquidity endpoint — real-time WebSocket order book state
+    // Liquidity endpoint — proxy to dedicated liquidity microservice
     if (url.pathname === '/api/liquidity') {
-        // Auto-start the liquidity monitor if not running
-        if (!liquidityMonitor.isRunning() && config.liquidity.wsEnabled) {
-            autoStartLiquidityMonitor();
+        const date = url.searchParams.get('date');
+        const liqUrl = date
+            ? `${LIQUIDITY_SERVICE_URL}/api/liquidity?date=${date}`
+            : `${LIQUIDITY_SERVICE_URL}/api/liquidity`;
+
+        try {
+            const liqRes = await new Promise((resolve, reject) => {
+                const liqReq = http.get(liqUrl, (r) => {
+                    let body = '';
+                    r.on('data', c => body += c);
+                    r.on('end', () => resolve(body));
+                });
+                liqReq.on('error', reject);
+                liqReq.setTimeout(3000, () => { liqReq.destroy(); reject(new Error('timeout')); });
+            });
+
+            res.writeHead(200, {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+            });
+            res.end(liqRes);
+        } catch (err) {
+            res.writeHead(200, {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+            });
+            res.end(JSON.stringify({
+                status: 'service-unavailable',
+                error: err.message,
+                tokens: [],
+                tokenCount: 0,
+                timestamp: new Date().toISOString(),
+            }));
         }
-
-        const snapshot = liquidityMonitor.isRunning()
-            ? liquidityMonitor.getSnapshot()
-            : { status: 'disabled', tokens: [], tokenCount: 0, timestamp: new Date().toISOString() };
-
-        res.writeHead(200, {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-        });
-        res.end(JSON.stringify(snapshot));
         return;
     }
 
@@ -1417,7 +1404,7 @@ function getDashboardHTML(defaultDate) {
         async function fetchLiquidity() {
             if (liquidityTimer) clearTimeout(liquidityTimer);
             try {
-                const res = await fetch('/api/liquidity');
+                const res = await fetch('/api/liquidity?date=' + encodeURIComponent(currentDate));
                 const data = await res.json();
                 renderLiquidity(data);
             } catch {

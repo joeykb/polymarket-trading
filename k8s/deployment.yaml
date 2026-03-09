@@ -1,5 +1,5 @@
 # TempEdge Deployment
-# Runs monitor + dashboard + VPN sidecar sharing the same network namespace
+# Runs monitor + dashboard + liquidity + VPN sidecar sharing the same network namespace
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,7 +31,7 @@ spec:
               value: "/gluetun/custom/nordvpn.ovpn"
             # Allow dashboard port to accept incoming connections
             - name: FIREWALL_INPUT_PORTS
-              value: "3000"
+              value: "3000,3001"
             # Healthcheck
             - name: HEALTH_TARGET_ADDRESS
               value: "gamma-api.polymarket.com:443"
@@ -114,6 +114,38 @@ spec:
               path: /api/status
               port: 3000
             initialDelaySeconds: 20
+            periodSeconds: 30
+
+        # ── Liquidity Container ──────────────────────────
+        # Dedicated WebSocket microservice for real-time order book streaming
+        - name: liquidity
+          image: tempedge:latest
+          imagePullPolicy: Never
+          command: ["node", "src/liquidity.js"]
+          envFrom:
+            - configMapRef:
+                name: tempedge-config
+          volumeMounts:
+            - name: output
+              mountPath: /app/output
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 10
             periodSeconds: 30
 
       volumes:
