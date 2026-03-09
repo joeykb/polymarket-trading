@@ -933,6 +933,10 @@ function getDashboardHTML(defaultDate) {
             animation: valueFlash 1.2s ease-out;
             border-radius: var(--radius-sm);
         }
+
+        .trade-row:hover td {
+            background: var(--bg-card-hover);
+        }
     </style>
 </head>
 <body>
@@ -1533,7 +1537,7 @@ function getDashboardHTML(defaultDate) {
 
                 const modeLabel = t.mode === 'dry-run' ? '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:1px 6px;border-radius:4px;font-size:11px;margin-left:4px;">DRY</span>' : '';
 
-                html += '<tr style="border-bottom:1px solid var(--border);transition:background 0.15s;" onmouseover="this.style.background=\'var(--bg-elevated)\'" onmouseout="this.style.background=\'transparent\'">';
+                html += '<tr style="border-bottom:1px solid var(--border);transition:background 0.15s;" class="trade-row">';
                 html += '<td style="padding:10px 14px;font-weight:600;white-space:nowrap;">' + t.date + modeLabel + '</td>';
                 html += '<td style="padding:10px 8px;color:var(--text-secondary);white-space:nowrap;font-family:JetBrains Mono,monospace;font-size:12px;">' + time + ' ET</td>';
                 html += '<td style="padding:10px 8px;line-height:1.6;">' + posLabels + '</td>';
