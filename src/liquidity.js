@@ -280,7 +280,7 @@ function discoverSessions() {
         try {
             const data = JSON.parse(fs.readFileSync(path.join(OUTPUT_DIR, file), 'utf-8'));
             const date = data.targetDate;
-            if (!date || data.status === 'completed') continue;
+            if (!date) continue;
 
             const latest = data.snapshots?.[data.snapshots.length - 1];
             if (!latest) continue;
