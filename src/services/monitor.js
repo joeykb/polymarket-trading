@@ -144,7 +144,11 @@ export function computePnL(buyOrder, snapshot) {
 
     for (const pos of buyOrder.positions) {
         const currentRange = currentRanges[pos.label];
-        const currentPrice = currentRange?.yesPrice ?? pos.buyPrice;
+        // Use bestBid (sell price) for P&L — that's what we'd actually receive
+        // if we sold right now. Falls back to yesPrice if bestBid unavailable.
+        const currentPrice = currentRange?.bestBid > 0
+            ? currentRange.bestBid
+            : (currentRange?.yesPrice ?? pos.buyPrice);
         const pnl = parseFloat((currentPrice - pos.buyPrice).toFixed(4));
         const pnlPct = pos.buyPrice > 0
             ? parseFloat(((pnl / pos.buyPrice) * 100).toFixed(1))
