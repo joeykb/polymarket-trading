@@ -18,7 +18,7 @@ import { fetchWeatherData } from './weather.js';
 import { discoverMarket } from './polymarket.js';
 import { selectRanges } from './rangeSelector.js';
 import { executeRealBuyOrder } from './trading.js';
-import { liquidityMonitor } from './liquidityStream.js';
+import nodeHttp from 'http';
 import { nowISO, daysUntil, getPhase } from '../utils/dateUtils.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -427,13 +427,41 @@ export function resolveRanges(snapshot) {
 }
 // ── Liquidity-Gated Buy Flow ────────────────────────────────────────────
 
+// ── Liquidity Microservice Client ───────────────────────────────────────
+
+const LIQUIDITY_SERVICE_URL = 'http://localhost:3001';
+
 /**
- * Start monitoring liquidity via WebSocket and auto-buy when conditions are met.
+ * Fetch liquidity data from the dedicated liquidity microservice.
+ * @param {string} date - Target date (YYYY-MM-DD)
+ * @returns {Promise<Object|null>}
+ */
+function fetchLiquidityFromService(date) {
+    return new Promise((resolve) => {
+        const url = `${LIQUIDITY_SERVICE_URL}/api/liquidity?date=${date}`;
+        const req = nodeHttp.get(url, { timeout: 5000 }, (res) => {
+            let body = '';
+            res.on('data', chunk => { body += chunk; });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(body));
+                } catch {
+                    resolve(null);
+                }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+}
+
+/**
+ * Start monitoring liquidity via the microservice and auto-buy when conditions are met.
  *
- * Instead of buying immediately at 7am, we start streaming the order book
- * and wait for all (or any, per config) tokens to reach liquid conditions
- * before executing. A deadline timer forces a buy or skips if liquidity
- * never materializes.
+ * Instead of buying immediately at 7am, we poll the liquidity microservice
+ * (which streams the order book via WebSocket) and wait for all (or any,
+ * per config) tokens to reach liquid conditions before executing.
+ * A deadline timer forces a buy if liquidity never materializes.
  *
  * @param {import('../models/types.js').MonitoringSession} session
  * @param {import('../models/types.js').MonitoringSnapshot} snapshot
@@ -444,49 +472,80 @@ function startLiquidityGatedBuy(session, snapshot) {
     session.liquidityWaitStart = nowISO();
     saveSession(session);
 
-    console.log(`\n  ⏳ Liquidity gate activated — waiting for optimal buy window...`);
-    console.log(`     Deadline: ${config.liquidity.buyDeadlineHour}:00 ET`);
-    console.log(`     Require:  ${config.liquidity.requireAllLiquid ? 'ALL tokens liquid' : 'ANY token liquid'}`);
+    const targetDate = session.targetDate;
+    const pollIntervalMs = (config.liquidity.checkIntervalSecs || 30) * 1000;
 
-    // Build token list from snapshot
-    const tokens = [];
-    for (const pos of ['target', 'below', 'above']) {
-        const range = snapshot[pos];
-        if (range?.clobTokenIds?.[0]) {
-            tokens.push({
-                tokenId: range.clobTokenIds[0],
-                label: pos,
-                question: range.question || pos,
-            });
-        }
-    }
+    console.log(`\n  ⏳ Liquidity gate activated for ${targetDate}`);
+    console.log(`     Polling:   liquidity service every ${pollIntervalMs / 1000}s`);
+    console.log(`     Deadline:  ${config.liquidity.buyDeadlineHour}:00 ET`);
+    console.log(`     Require:   ${config.liquidity.requireAllLiquid ? 'ALL tokens liquid' : 'ANY token liquid'}`);
 
-    if (tokens.length === 0) {
-        console.log(`  ⚠️  No tokens with clobTokenIds — falling back to immediate buy`);
-        session.awaitingLiquidity = false;
-        tryPlaceBuyOrder(snapshot).then(order => {
-            session.buyOrder = order;
-            saveSession(session);
-        });
-        return;
-    }
-
-    // Start (or re-use) the liquidity stream
-    if (!liquidityMonitor.isRunning()) {
-        liquidityMonitor.start(tokens);
-    }
-
-    // One-shot callback: fires when liquidity conditions are met
     let bought = false;
-    liquidityMonitor.onLiquidityWindow(async (liqSnap) => {
-        if (bought || session.buyOrder) return;
 
-        // Check if conditions are met
+    // ── Polling loop ──────────────────────────────────────────────────
+    const pollTimer = setInterval(async () => {
+        if (bought || session.buyOrder) {
+            clearInterval(pollTimer);
+            return;
+        }
+
+        // Check deadline
+        const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+        const hour = new Date(nowET).getHours();
+
+        if (hour >= config.liquidity.buyDeadlineHour) {
+            clearInterval(pollTimer);
+            if (bought || session.buyOrder) return;
+
+            bought = true;
+            session.awaitingLiquidity = false;
+
+            const waitMs = Date.now() - new Date(session.liquidityWaitStart).getTime();
+            const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
+
+            console.log(`\n  ⏰ DEADLINE REACHED (${config.liquidity.buyDeadlineHour}:00 ET) — forcing buy after ${waitStr}`);
+
+            const order = await tryPlaceBuyOrder(snapshot);
+            order.liquidityWait = waitStr;
+            order.forcedByDeadline = true;
+            session.buyOrder = order;
+            session.pnl = computePnL(order, snapshot);
+            session.alerts.push({
+                timestamp: nowISO(),
+                type: 'buy_executed',
+                message: `Buy forced at deadline (${config.liquidity.buyDeadlineHour}:00 ET) after ${waitStr} — liquidity never optimal`,
+                data: { waitMs, forced: true },
+            });
+            saveSession(session);
+            console.log(`  💰 Deadline buy placed: $${order.totalCost.toFixed(3)}`);
+            return;
+        }
+
+        // Poll the liquidity microservice
+        const liqData = await fetchLiquidityFromService(targetDate);
+        if (!liqData || !liqData.tokens || liqData.tokens.length === 0) return;
+
+        // Check liquidity conditions
         const requireAll = config.liquidity.requireAllLiquid;
-        const conditionMet = requireAll ? liqSnap.allLiquid : (liqSnap.liquidCount > 0);
+        const liquidCount = liqData.liquidCount || 0;
+        const totalCount = liqData.tokenCount || liqData.tokens.length;
+        const allLiquid = liqData.allLiquid || false;
+        const conditionMet = requireAll ? allLiquid : (liquidCount > 0);
 
-        if (!conditionMet) return;
+        if (!conditionMet) {
+            // Log every few polls for visibility
+            const elapsedMin = ((Date.now() - new Date(session.liquidityWaitStart).getTime()) / 60000).toFixed(0);
+            if (parseInt(elapsedMin) % 5 === 0) {
+                console.log(`  ⏳ [${targetDate}] Liquidity check: ${liquidCount}/${totalCount} liquid (${elapsedMin}m elapsed)`);
+                for (const t of liqData.tokens) {
+                    console.log(`     ${t.isLiquid ? '✅' : '❌'} ${t.label}: spread=${(t.spreadPct * 100).toFixed(1)}% depth=${t.askDepth} score=${(t.score * 100).toFixed(0)}%`);
+                }
+            }
+            return;
+        }
 
+        // ── LIQUIDITY WINDOW OPEN — execute buy ──
+        clearInterval(pollTimer);
         bought = true;
         session.awaitingLiquidity = false;
 
@@ -495,23 +554,23 @@ function startLiquidityGatedBuy(session, snapshot) {
             ? `${(waitMs / 1000).toFixed(0)}s`
             : `${(waitMs / 60000).toFixed(1)}m`;
 
-        console.log(`\n  🟢 LIQUIDITY WINDOW OPEN — ${liqSnap.liquidCount}/${liqSnap.totalCount} tokens liquid`);
+        console.log(`\n  🟢 LIQUIDITY WINDOW OPEN — ${liquidCount}/${totalCount} tokens liquid`);
         console.log(`     Waited: ${waitStr}`);
 
         // Log per-token liquidity at buy time
-        for (const t of liqSnap.tokens) {
+        for (const t of liqData.tokens) {
             const status = t.isLiquid ? '✅' : '⚠️';
-            console.log(`     ${status} ${t.label}: bid=$${t.bestBid.toFixed(3)} ask=$${t.bestAsk.toFixed(3)} spread=${(t.spreadPct * 100).toFixed(1)}% depth=${t.askDepth.toFixed(1)} score=${(t.score * 100).toFixed(0)}%`);
+            console.log(`     ${status} ${t.label}: bid=$${t.bestBid.toFixed(3)} ask=$${t.bestAsk.toFixed(3)} spread=${(t.spreadPct * 100).toFixed(1)}% depth=${t.askDepth} score=${(t.score * 100).toFixed(0)}%`);
         }
 
-        // Update snapshot prices with live stream data (more current than last REST fetch)
+        // Update snapshot prices with live stream data
         const liveSnapshot = { ...snapshot };
-        for (const t of liqSnap.tokens) {
+        for (const t of liqData.tokens) {
             const rangeKey = t.label;  // target, below, above
             if (liveSnapshot[rangeKey]) {
                 liveSnapshot[rangeKey] = {
                     ...liveSnapshot[rangeKey],
-                    yesPrice: t.bestAsk,  // Use live ask for buy price
+                    yesPrice: t.bestAsk,  // Use live ask for immediate fill
                 };
             }
         }
@@ -520,9 +579,9 @@ function startLiquidityGatedBuy(session, snapshot) {
         const order = await tryPlaceBuyOrder(liveSnapshot);
         order.liquidityWait = waitStr;
         order.liquiditySnapshot = {
-            liquidCount: liqSnap.liquidCount,
-            totalCount: liqSnap.totalCount,
-            tokens: liqSnap.tokens.map(t => ({
+            liquidCount,
+            totalCount,
+            tokens: liqData.tokens.map(t => ({
                 label: t.label, bid: t.bestBid, ask: t.bestAsk,
                 spread: t.spreadPct, depth: t.askDepth, score: t.score,
             })),
@@ -536,52 +595,13 @@ function startLiquidityGatedBuy(session, snapshot) {
         session.alerts.push({
             timestamp: nowISO(),
             type: 'buy_executed',
-            message: `Buy executed after ${waitStr} liquidity wait (${liqSnap.liquidCount}/${liqSnap.totalCount} tokens liquid)`,
-            data: { waitMs, liquidCount: liqSnap.liquidCount, totalCount: liqSnap.totalCount },
+            message: `Buy executed after ${waitStr} liquidity wait (${liquidCount}/${totalCount} tokens liquid)`,
+            data: { waitMs, liquidCount, totalCount },
         });
         saveSession(session);
 
         console.log(`  💰 Buy order placed via liquidity gate: $${order.totalCost.toFixed(3)} [waited ${waitStr}]`);
-    });
-
-    // Deadline timer: if we hit the deadline hour, force buy
-    const checkDeadline = setInterval(() => {
-        if (bought || session.buyOrder) {
-            clearInterval(checkDeadline);
-            return;
-        }
-
-        const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-        const hour = new Date(nowET).getHours();
-
-        if (hour >= config.liquidity.buyDeadlineHour) {
-            clearInterval(checkDeadline);
-            if (bought || session.buyOrder) return;
-
-            bought = true;
-            session.awaitingLiquidity = false;
-
-            const waitMs = Date.now() - new Date(session.liquidityWaitStart).getTime();
-            const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
-
-            console.log(`\n  ⏰ DEADLINE REACHED (${config.liquidity.buyDeadlineHour}:00 ET) — forcing buy after ${waitStr}`);
-
-            tryPlaceBuyOrder(snapshot).then(order => {
-                order.liquidityWait = waitStr;
-                order.forcedByDeadline = true;
-                session.buyOrder = order;
-                session.pnl = computePnL(order, snapshot);
-                session.alerts.push({
-                    timestamp: nowISO(),
-                    type: 'buy_executed',
-                    message: `Buy forced at deadline (${config.liquidity.buyDeadlineHour}:00 ET) after ${waitStr} — liquidity never optimal`,
-                    data: { waitMs, forced: true },
-                });
-                saveSession(session);
-                console.log(`  💰 Deadline buy placed: $${order.totalCost.toFixed(3)}`);
-            });
-        }
-    }, 60_000);  // Check every minute
+    }, pollIntervalMs);
 }
 
 // ── Session management ──────────────────────────────────────────────────
@@ -654,23 +674,8 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
 
     saveSession(session);
 
-    // ── Start WebSocket liquidity stream for BUY phase ──────────────
-    if (session.phase === 'buy' && config.liquidity.wsEnabled) {
-        const tokens = [];
-        for (const pos of ['target', 'below', 'above']) {
-            const range = snapshot[pos];
-            if (range?.clobTokenIds?.[0]) {
-                tokens.push({
-                    tokenId: range.clobTokenIds[0],
-                    label: pos,
-                    question: range.question || pos,
-                });
-            }
-        }
-        if (tokens.length > 0) {
-            liquidityMonitor.start(tokens);
-        }
-    }
+    // Liquidity microservice auto-discovers sessions from output dir —
+    // no need to start a stream manually here.
 
     return session;
 }
@@ -732,14 +737,13 @@ export async function runMonitoringCycle(session) {
 export function stopSession(session) {
     session.status = 'stopped';
     saveSession(session);
-    liquidityMonitor.stop();
 }
 
 /**
- * Get the current liquidity snapshot (for the dashboard API).
- * @returns {Object|null}
+ * Get the current liquidity snapshot from the microservice.
+ * @param {string} date
+ * @returns {Promise<Object|null>}
  */
-export function getLiquiditySnapshot() {
-    if (!liquidityMonitor.isRunning()) return null;
-    return liquidityMonitor.getSnapshot();
+export async function getLiquiditySnapshot(date) {
+    return fetchLiquidityFromService(date);
 }
