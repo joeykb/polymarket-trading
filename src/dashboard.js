@@ -81,9 +81,37 @@ const LIQUIDITY_SERVICE_URL = `http://localhost:${process.env.LIQUIDITY_PORT || 
 // ── HTTP Server ─────────────────────────────────────────────────────────
 
 /**
- * Compute P&L from buyOrder vs latest snapshot — runs on every API call
+ * Fetch live bestBid from the liquidity microservice (CLOB WebSocket data).
+ * Returns a map keyed by question text for stable matching across range shifts.
+ * @param {string} date
+ * @returns {Promise<Object>} Map of { questionText: bestBid }
  */
-function computeLivePnL(buyOrder, latestSnapshot) {
+async function fetchLiquidityBids(date) {
+    const bids = {};
+    try {
+        const resp = await fetch(`${LIQUIDITY_SERVICE_URL}/api/liquidity?date=${date}`);
+        if (resp.ok) {
+            const data = await resp.json();
+            for (const t of (data.tokens || [])) {
+                if (t.question && t.bestBid > 0) {
+                    bids[t.question] = t.bestBid;
+                }
+            }
+        }
+    } catch {
+        // Liquidity service unavailable - will fall back to snapshot data
+    }
+    return bids;
+}
+
+/**
+ * Compute P&L from buyOrder vs latest snapshot - runs on every API call.
+ * Uses live CLOB bids from the liquidity microservice for accurate sell pricing.
+ * @param {Object} buyOrder
+ * @param {Object} latestSnapshot
+ * @param {Object} liquidityBids - { questionText: bestBid } from CLOB
+ */
+function computeLivePnL(buyOrder, latestSnapshot, liquidityBids) {
     if (!buyOrder || !buyOrder.positions || !latestSnapshot) return null;
 
     const currentRanges = {
@@ -92,15 +120,18 @@ function computeLivePnL(buyOrder, latestSnapshot) {
         above: latestSnapshot.above,
     };
 
+    const bids = liquidityBids || {};
+
     let totalBuyCost = 0;
     let totalCurrentValue = 0;
     const positions = [];
 
     for (const pos of buyOrder.positions) {
         const currentRange = currentRanges[pos.label];
-        // Use bestBid (sell price) for P&L — what we'd actually receive
-        const currentPrice = currentRange?.bestBid > 0
-            ? currentRange.bestBid
+        // Match by question text (stable across range shifts) for live CLOB bid
+        const clobBid = bids[pos.question];
+        const currentPrice = clobBid > 0
+            ? clobBid
             : (currentRange?.yesPrice ?? pos.buyPrice);
         const pnl = parseFloat((currentPrice - pos.buyPrice).toFixed(4));
         const pnlPct = pos.buyPrice > 0
@@ -183,11 +214,12 @@ const server = http.createServer(async (req, res) => {
         const dayAfter = getTargetDateET();
         const portfolioDates = [today, tomorrow, dayAfter];
 
-        const plays = portfolioDates.map(date => {
+        const plays = await Promise.all(portfolioDates.map(async date => {
             const session = loadSessionData(date);
             const phase = getPhase(date);
             const days = daysUntil(date);
             const latest = session?.snapshots?.[session.snapshots.length - 1] || null;
+            const liquidityBids = await fetchLiquidityBids(date);
             return {
                 date,
                 phase,
@@ -204,12 +236,12 @@ const server = http.createServer(async (req, res) => {
                     alertCount: session.alerts?.length || 0,
                     resolution: session.resolution || null,
                     buyOrder: session.buyOrder || null,
-                    pnl: computeLivePnL(session.buyOrder, latest),
+                    pnl: computeLivePnL(session.buyOrder, latest, liquidityBids),
                 } : null,
                 latest,
                 hasData: !!session || !!loadObservationData(date),
             };
-        });
+        }));
 
         res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -243,7 +275,8 @@ const server = http.createServer(async (req, res) => {
 
             const bo = session.buyOrder;
             const latest = session.snapshots?.[session.snapshots.length - 1];
-            const pnl = computeLivePnL(bo, latest);
+            const liquidityBids = await fetchLiquidityBids(date);
+            const pnl = computeLivePnL(bo, latest, liquidityBids);
 
             trades.push({
                 date,

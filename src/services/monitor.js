@@ -129,7 +129,7 @@ function shouldPlaceBuy(session, snapshot) {
  * @param {import('../models/types.js').MonitoringSnapshot} snapshot
  * @returns {Object} pnl
  */
-export function computePnL(buyOrder, snapshot) {
+export function computePnL(buyOrder, snapshot, liquidityBids) {
     if (!buyOrder || !buyOrder.positions) return null;
 
     const currentRanges = {
@@ -138,16 +138,18 @@ export function computePnL(buyOrder, snapshot) {
         above: snapshot.above,
     };
 
+    const bids = liquidityBids || {};
+
     let totalBuyCost = 0;
     let totalCurrentValue = 0;
     const positions = [];
 
     for (const pos of buyOrder.positions) {
         const currentRange = currentRanges[pos.label];
-        // Use bestBid (sell price) for P&L — that's what we'd actually receive
-        // if we sold right now. Falls back to yesPrice if bestBid unavailable.
-        const currentPrice = currentRange?.bestBid > 0
-            ? currentRange.bestBid
+        // Match by question text (stable across range shifts) for live CLOB bid
+        const clobBid = bids[pos.question];
+        const currentPrice = clobBid > 0
+            ? clobBid
             : (currentRange?.yesPrice ?? pos.buyPrice);
         const pnl = parseFloat((currentPrice - pos.buyPrice).toFixed(4));
         const pnlPct = pos.buyPrice > 0
@@ -726,9 +728,16 @@ export async function runMonitoringCycle(session) {
         startLiquidityGatedBuy(session, snapshot);
     }
 
-    // Compute P&L against buy prices
+    // Compute P&L against buy prices using live CLOB bids
     if (session.buyOrder) {
-        session.pnl = computePnL(session.buyOrder, snapshot);
+        const liqData = await fetchLiquidityFromService(session.targetDate);
+        const liquidityBids = {};
+        if (liqData && liqData.tokens) {
+            for (const t of liqData.tokens) {
+                if (t.question && t.bestBid > 0) liquidityBids[t.question] = t.bestBid;
+            }
+        }
+        session.pnl = computePnL(session.buyOrder, snapshot, liquidityBids);
     }
 
     // Append to session
