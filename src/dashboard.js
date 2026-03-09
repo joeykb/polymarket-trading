@@ -98,7 +98,10 @@ function computeLivePnL(buyOrder, latestSnapshot) {
 
     for (const pos of buyOrder.positions) {
         const currentRange = currentRanges[pos.label];
-        const currentPrice = currentRange?.yesPrice ?? pos.buyPrice;
+        // Use bestBid (sell price) for P&L — what we'd actually receive
+        const currentPrice = currentRange?.bestBid > 0
+            ? currentRange.bestBid
+            : (currentRange?.yesPrice ?? pos.buyPrice);
         const pnl = parseFloat((currentPrice - pos.buyPrice).toFixed(4));
         const pnlPct = pos.buyPrice > 0
             ? parseFloat(((pnl / pos.buyPrice) * 100).toFixed(1))
@@ -1018,7 +1021,7 @@ function getDashboardHTML(defaultDate) {
             const buyOrder = play.session?.buyOrder;
             const pnl = play.session?.pnl;
             const buyCost = buyOrder ? '$' + buyOrder.totalCost.toFixed(3) : '--';
-            const currentValue = pnl ? '$' + pnl.totalCurrentValue.toFixed(3) : (latest ? '$' + latest.totalCost?.toFixed(3) : '--');
+            const sellValue = pnl ? '$' + pnl.totalCurrentValue.toFixed(3) : '--';
             const totalPnL = pnl ? pnl.totalPnL : 0;
             const totalPnLPct = pnl ? pnl.totalPnLPct : 0;
             const pnlColor = totalPnL >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
@@ -1039,17 +1042,17 @@ function getDashboardHTML(defaultDate) {
                 buyTooltipHtml = '<span style="cursor:help;border-bottom:1px dashed rgba(255,255,255,0.3)" title="' + escapeHtml(buyTitleAttr) + '">' + buyCost + '</span>';
             }
 
-            // Build tooltip text for Current Value (per-range current + P&L)
-            let currentTooltipHtml = currentValue;
+            // Build tooltip text for Sell Value (per-range bid price + P&L)
+            let sellTooltipHtml = sellValue;
             if (pnl && pnl.positions) {
                 const lines = pnl.positions.map(function(pos) {
                     var lbl = pos.label === 'target' ? 'Target' : pos.label === 'below' ? 'Below' : 'Above';
                     var sign = pos.pnl >= 0 ? '+' : '';
-                    return lbl + ': ' + shortLabel(pos.question) + ' @ ' + (pos.currentPrice * 100).toFixed(1) + String.fromCharCode(162) + ' (' + sign + (pos.pnl * 100).toFixed(1) + String.fromCharCode(162) + ')';
+                    return lbl + ': ' + shortLabel(pos.question) + ' bid@' + (pos.currentPrice * 100).toFixed(1) + String.fromCharCode(162) + ' (' + sign + (pos.pnl * 100).toFixed(1) + String.fromCharCode(162) + ')';
                 });
-                lines.push('Total: ' + currentValue);
+                lines.push('Total: ' + sellValue);
                 var cvTitle = lines.join(String.fromCharCode(10));
-                currentTooltipHtml = '<span style="cursor:help;border-bottom:1px dashed rgba(255,255,255,0.3)" title="' + escapeHtml(cvTitle) + '">' + currentValue + '</span>';
+                sellTooltipHtml = '<span style="cursor:help;border-bottom:1px dashed rgba(255,255,255,0.3)" title="' + escapeHtml(cvTitle) + '">' + sellValue + '</span>';
             }
 
             const snaps = play.session?.snapshotCount || 0;
@@ -1082,7 +1085,7 @@ function getDashboardHTML(defaultDate) {
                 '</div>' +
                 '<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;\">' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Bought At' + (buyTime ? ' (' + buyTime + ')' : '') + '</div><div style=\"font-weight:600;\">' + buyTooltipHtml + '</div></div>' +
-                '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Current Value</div><div style=\"font-weight:600;\">' + currentTooltipHtml + '</div></div>' +
+                '<div><div style="color:var(--text-secondary);font-size:11px;">Sell Value</div><div style="font-weight:600;">' + sellTooltipHtml + '</div></div>' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">P&amp;L</div><div style=\"font-weight:700;font-size:14px;color:' + pnlColor + ';\">' + pnlDisplay + '</div></div>' +
                 '</div>' +
                 '<div style=\"margin-top:8px;color:var(--text-secondary);font-size:12px;\">' + snaps + ' snapshots \u00b7 ' + alerts + ' alerts</div>' +
@@ -1142,11 +1145,11 @@ function getDashboardHTML(defaultDate) {
             let costValue = '$' + totalCost?.toFixed(3);
             let costSub = 'Profit: $' + profit + ' \\u00b7 ROI: ' + roi + '%';
             if (detailBuyOrder) {
-                costLabel = 'Buy / P&L';
+                costLabel = 'Buy / Sell';
                 costValue = '$' + detailBuyOrder.totalCost.toFixed(3);
                 if (detailPnL) {
                     const pSign = detailPnL.totalPnL >= 0 ? '+' : '';
-                    costSub = 'P&L: ' + pSign + '$' + detailPnL.totalPnL.toFixed(4) + ' (' + pSign + detailPnL.totalPnLPct + '%)';
+                    costSub = 'Sell: $' + detailPnL.totalCurrentValue.toFixed(3) + ' \\\\u00b7 P&L: ' + pSign + '$' + detailPnL.totalPnL.toFixed(4) + ' (' + pSign + detailPnL.totalPnLPct + '%)';
                 }
             }
 
