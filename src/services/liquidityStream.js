@@ -124,8 +124,10 @@ function connect(tokens) {
             type: 'market',
             assets_ids: tokenIds,
         };
-        ws.send(JSON.stringify(sub));
+        const subStr = JSON.stringify(sub);
+        ws.send(subStr);
         console.log(`  📡 Subscribed to ${tokenIds.length} tokens: ${tokens.map(t => t.label).join(', ')}`);
+        console.log(`  📡 Sub payload: ${subStr.substring(0, 300)}`);
 
         // Start heartbeat
         clearInterval(heartbeatTimer);
@@ -173,18 +175,32 @@ function scheduleReconnect(tokens) {
 
 // ── Message Handling ────────────────────────────────────────────────────
 
+let eventCount = 0;
 function handleMessage(data) {
     // Polymarket WS sends an array of events
     const events = Array.isArray(data) ? data : [data];
 
     for (const event of events) {
         const assetId = event.asset_id;
+        const type = event.event_type || event.type;
+
+        // Price_change events nest asset_ids in price_changes array
+        if (type === 'price_change' && !assetId && event.price_changes) {
+            for (const pc of event.price_changes) {
+                if (pc.asset_id) {
+                    const pcEntry = books.get(pc.asset_id);
+                    if (pcEntry) {
+                        handlePriceChange(pcEntry, pc);
+                    }
+                }
+            }
+            continue;
+        }
+
         if (!assetId) continue;
 
         const entry = books.get(assetId);
         if (!entry) continue;
-
-        const type = event.event_type || event.type;
 
         switch (type) {
             case 'book':
@@ -197,7 +213,6 @@ function handleMessage(data) {
                 handleLastTrade(entry, event);
                 break;
             default:
-                // tick_size_change, etc.
                 break;
         }
     }
@@ -356,6 +371,9 @@ export const liquidityMonitor = {
         startAssessmentLoop();
 
         console.log(`  📡 Liquidity monitor started (${tokens.length} tokens, ${config.liquidity.checkIntervalSecs}s assessment interval).`);
+        for (const [id, entry] of books) {
+            console.log(`     📌 ${entry.label}: ${id.substring(0, 40)}...`);
+        }
     },
 
     /** Stop streaming. */
