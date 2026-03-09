@@ -69,7 +69,7 @@ const SCHEMA = {
     'liquidity.buyMode':           { key: 'LIQUIDITY_BUY_MODE',      default: 'threshold', description: 'Buy trigger: threshold or best-window' },
     'liquidity.checkIntervalSecs': { key: 'LIQUIDITY_CHECK_SECS',    default: 30,          description: 'Seconds between liquidity assessments' },
     'liquidity.windowMinutes':     { key: 'LIQUIDITY_WINDOW_MINS',   default: 60,          description: 'Minutes to track for best-window mode' },
-    'liquidity.buyDeadlineHour':   { key: 'LIQUIDITY_DEADLINE_HOUR', default: 16,          description: 'Hour (ET) deadline to buy if still illiquid' },
+    'liquidity.buyDeadlineHour':   { key: 'LIQUIDITY_DEADLINE_HOUR', default: 10.5,        description: 'Deadline hour (ET, decimal) to buy if still illiquid (10.5 = 10:30am)' },
     'liquidity.requireAllLiquid':  { key: 'LIQUIDITY_ALL_REQUIRED',  default: 1,           description: 'Require ALL tokens liquid (1) or ANY (0)' },
 
     // Weather

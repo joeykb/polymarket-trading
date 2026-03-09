@@ -475,9 +475,13 @@ function startLiquidityGatedBuy(session, snapshot) {
     const targetDate = session.targetDate;
     const pollIntervalMs = (config.liquidity.checkIntervalSecs || 30) * 1000;
 
+    const deadlineHour = config.liquidity.buyDeadlineHour || 10.5;
+    const deadlineH = Math.floor(deadlineHour);
+    const deadlineM = Math.round((deadlineHour - deadlineH) * 60);
+
     console.log(`\n  ⏳ Liquidity gate activated for ${targetDate}`);
     console.log(`     Polling:   liquidity service every ${pollIntervalMs / 1000}s`);
-    console.log(`     Deadline:  ${config.liquidity.buyDeadlineHour}:00 ET`);
+    console.log(`     Deadline:  ${deadlineH}:${String(deadlineM).padStart(2, '0')} ET`);
     console.log(`     Require:   ${config.liquidity.requireAllLiquid ? 'ALL tokens liquid' : 'ANY token liquid'}`);
 
     let bought = false;
@@ -489,11 +493,12 @@ function startLiquidityGatedBuy(session, snapshot) {
             return;
         }
 
-        // Check deadline
+        // Check deadline (supports fractional hours: 10.5 = 10:30)
         const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-        const hour = new Date(nowET).getHours();
+        const nowDate = new Date(nowET);
+        const currentDecimalHour = nowDate.getHours() + nowDate.getMinutes() / 60;
 
-        if (hour >= config.liquidity.buyDeadlineHour) {
+        if (currentDecimalHour >= deadlineHour) {
             clearInterval(pollTimer);
             if (bought || session.buyOrder) return;
 
@@ -503,7 +508,7 @@ function startLiquidityGatedBuy(session, snapshot) {
             const waitMs = Date.now() - new Date(session.liquidityWaitStart).getTime();
             const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
 
-            console.log(`\n  ⏰ DEADLINE REACHED (${config.liquidity.buyDeadlineHour}:00 ET) — forcing buy after ${waitStr}`);
+            console.log(`\n  ⏰ DEADLINE REACHED (${deadlineH}:${String(deadlineM).padStart(2, '0')} ET) — forcing buy after ${waitStr}`);
 
             const order = await tryPlaceBuyOrder(snapshot);
             order.liquidityWait = waitStr;
@@ -513,7 +518,7 @@ function startLiquidityGatedBuy(session, snapshot) {
             session.alerts.push({
                 timestamp: nowISO(),
                 type: 'buy_executed',
-                message: `Buy forced at deadline (${config.liquidity.buyDeadlineHour}:00 ET) after ${waitStr} — liquidity never optimal`,
+                message: `Buy forced at deadline (${deadlineH}:${String(deadlineM).padStart(2, '0')} ET) after ${waitStr} — liquidity never optimal`,
                 data: { waitMs, forced: true },
             });
             saveSession(session);
@@ -650,9 +655,18 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
 
     const phase = getPhase(targetDate);
 
-    // Place buy order (real or simulated depending on TRADING_MODE)
-    const buyOrder = await tryPlaceBuyOrder(snapshot);
-    console.log(`  💰 Buy order placed: $${buyOrder.totalCost.toFixed(3)} (max profit: $${buyOrder.maxProfit.toFixed(3)}) [${buyOrder.simulated !== false ? 'simulated' : buyOrder.mode || 'live'}]`);
+    // Determine buy strategy:
+    // - If liquidity-gated and in buy phase, defer to the polling loop
+    // - Otherwise, place an immediate simulated/real buy
+    let buyOrder = null;
+    const shouldGate = config.liquidity.wsEnabled && phase === 'buy';
+
+    if (!shouldGate) {
+        buyOrder = await tryPlaceBuyOrder(snapshot);
+        console.log('  ' + String.fromCodePoint(0x1F4B0) + ' Buy order placed: $' + buyOrder.totalCost.toFixed(3) + ' (max profit: $' + buyOrder.maxProfit.toFixed(3) + ') [' + (buyOrder.simulated !== false ? 'simulated' : buyOrder.mode || 'live') + ']');
+    } else {
+        console.log('  ' + String.fromCodePoint(0x23F3) + ' Buy deferred — liquidity gate will handle purchase during monitoring cycle');
+    }
 
     /** @type {import('../models/types.js').MonitoringSession} */
     const session = {
@@ -674,8 +688,9 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
 
     saveSession(session);
 
-    // Liquidity microservice auto-discovers sessions from output dir —
-    // no need to start a stream manually here.
+    // Liquidity microservice auto-discovers sessions from output dir.
+    // The buy will be handled by shouldPlaceBuy() -> startLiquidityGatedBuy()
+    // during the first monitoring cycle, NOT here (avoids bypassing the gate).
 
     return session;
 }
