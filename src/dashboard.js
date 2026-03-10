@@ -1165,6 +1165,7 @@ function getDashboardHTML(defaultDate) {
             const alerts = play.session?.alertCount || 0;
             const selected = play.date === currentDate ? 'border-color:' + color + ';' : '';
             const dayLabel = play.daysUntil === 0 ? 'Today' : play.daysUntil === 1 ? 'Tomorrow' : 'T+' + play.daysUntil;
+            var forecastAge = latest?.timestamp ? timeAgo(latest.timestamp) : '';
 
             let resolutionHtml = '';
             if (play.session?.resolution) {
@@ -1185,7 +1186,7 @@ function getDashboardHTML(defaultDate) {
                 '</div>' +
                 '<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;\">' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Current</div><div style=\"font-size:18px;font-weight:700;\">' + currentTemp + '</div></div>' +
-                '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Forecast</div><div style=\"font-size:18px;font-weight:700;\">' + forecastTemp + '</div></div>' +
+                '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Forecast' + (forecastAge ? ' <span style=\"opacity:0.5;font-size:10px;\">' + forecastAge + '</span>' : '') + '</div><div style=\"font-size:18px;font-weight:700;\">' + forecastTemp + '</div></div>' +
                 (targetShifted ?
                     '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Bought Target</div><div style=\"font-size:15px;font-weight:700;color:var(--accent-amber);\">' + boughtTarget + '</div>' +
                     '<div style=\"font-size:11px;color:var(--text-secondary);margin-top:2px;\">Forecast: <span style=\"color:' + color + ';font-weight:600;\">' + forecastTarget + '</span> \u26a0\ufe0f</div></div>' :
@@ -1274,6 +1275,7 @@ function getDashboardHTML(defaultDate) {
                 forecastSource, sourceLabel, daysUntilTarget, forecastChange,
                 costLabel, costValue, costSub,
                 snapshotCount: snapshots.length, alertCount: alerts.length,
+                snapshotTimestamp: latest?.timestamp || null,
                 awaitingLiquidity: session?.awaitingLiquidity || false,
                 liquidityWaitStart: session?.liquidityWaitStart || null,
             };
@@ -1326,7 +1328,7 @@ function getDashboardHTML(defaultDate) {
             updateStatCard('stat-current', vm.currentTempF !== null ? vm.currentTempF + '\\u00b0F' : '--',
                 vm.currentConditions + (vm.maxTodayF ? ' \\u00b7 Hi: ' + vm.maxTodayF + '\\u00b0F' : ''));
             updateStatCard('stat-forecast', vm.forecastTemp + '\\u00b0F',
-                vm.sourceLabel + (vm.daysUntilTarget !== null ? ' \\u00b7 T-' + vm.daysUntilTarget : ''));
+                vm.sourceLabel + (vm.daysUntilTarget !== null ? ' \\u00b7 T-' + vm.daysUntilTarget : '') + (vm.snapshotTimestamp ? ' \\u00b7 ' + timeAgo(vm.snapshotTimestamp) : ''));
             updateStatCard('stat-target', shortLabel(vm.targetRange?.question || '--'),
                 vm.session?.initialTargetRange ? 'Initial: ' + shortLabel(vm.session.initialTargetRange) : '');
             updateStatCard('stat-cost', vm.costValue, vm.costSub);
@@ -1993,6 +1995,22 @@ function getDashboardHTML(defaultDate) {
                 });
             } catch {
                 return iso;
+            }
+        }
+
+        function timeAgo(iso) {
+            if (!iso) return '';
+            try {
+                var ms = Date.now() - new Date(iso).getTime();
+                if (ms < 0) return 'just now';
+                var sec = Math.floor(ms / 1000);
+                if (sec < 60) return sec + 's ago';
+                var min = Math.floor(sec / 60);
+                if (min < 60) return min + 'm ago';
+                var hrs = Math.floor(min / 60);
+                return hrs + 'h ago';
+            } catch {
+                return '';
             }
         }
 
