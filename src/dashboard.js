@@ -1004,6 +1004,7 @@ function getDashboardHTML(defaultDate) {
         let currentDate = '${defaultDate}';
         let refreshTimer = null;
         let lastRenderState = null;  // Tracks what was last rendered for incremental updates
+        let currentPlay = null;     // Current portfolio play for phase-aware rendering
 
         // ── Data Fetching ─────────────────────────
         async function fetchStatus(date) {
@@ -1048,11 +1049,18 @@ function getDashboardHTML(defaultDate) {
 
             const forecastTemp = latest ? latest.forecastTempF + '\\u00b0F' : '--';
             const currentTemp = latest?.currentTempF != null ? latest.currentTempF + '\\u00b0F' : '--';
-            const target = latest ? shortLabel(latest.target?.question) : '--';
+            const forecastTarget = latest ? shortLabel(latest.target?.question) : '--';
 
             // Buy order & P&L data
             const buyOrder = play.session?.buyOrder;
             const pnl = play.session?.pnl;
+            // Only treat as "post-buy" if at least one position was actually filled
+            const hasFilled = buyOrder?.positions?.some(function(p) { return p.status !== 'failed' && p.status !== 'rejected'; });
+
+            // Detect if bought target differs from current forecast target
+            const boughtTargetQ = hasFilled ? buyOrder?.positions?.find(function(p) { return p.label === 'target'; })?.question : null;
+            const boughtTarget = boughtTargetQ ? shortLabel(boughtTargetQ) : null;
+            const targetShifted = buyOrder && boughtTarget && boughtTarget !== forecastTarget;
             const buyCost = buyOrder ? '$' + buyOrder.totalCost.toFixed(3) : '--';
             const sellValue = pnl ? '$' + pnl.totalCurrentValue.toFixed(3) : '--';
             const totalPnL = pnl ? pnl.totalPnL : 0;
@@ -1063,12 +1071,13 @@ function getDashboardHTML(defaultDate) {
             const buyTime = buyOrder ? new Date(buyOrder.placedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' }) : '';
 
             // Build tooltip text for Bought At (per-range buy prices)
+            // Use range name + role indicator instead of ambiguous buy-time labels
             let buyTitleAttr = '';
             let buyTooltipHtml = buyCost;
             if (buyOrder && buyOrder.positions) {
                 const lines = buyOrder.positions.map(function(pos) {
-                    var lbl = pos.label === 'target' ? 'Target' : pos.label === 'below' ? 'Below' : 'Above';
-                    return lbl + ': ' + shortLabel(pos.question) + ' @ ' + (pos.buyPrice * 100).toFixed(1) + String.fromCharCode(162);
+                    var marker = pos.label === 'target' ? '\ud83c\udfaf' : '\ud83d\udcca';
+                    return marker + ' ' + shortLabel(pos.question) + ' @ ' + (pos.buyPrice * 100).toFixed(1) + String.fromCharCode(162);
                 });
                 lines.push('Total: ' + buyCost);
                 buyTitleAttr = lines.join(String.fromCharCode(10));
@@ -1079,9 +1088,9 @@ function getDashboardHTML(defaultDate) {
             let sellTooltipHtml = sellValue;
             if (pnl && pnl.positions) {
                 const lines = pnl.positions.map(function(pos) {
-                    var lbl = pos.label === 'target' ? 'Target' : pos.label === 'below' ? 'Below' : 'Above';
+                    var marker = pos.label === 'target' ? '\ud83c\udfaf' : '\ud83d\udcca';
                     var sign = pos.pnl >= 0 ? '+' : '';
-                    return lbl + ': ' + shortLabel(pos.question) + ' bid@' + (pos.currentPrice * 100).toFixed(1) + String.fromCharCode(162) + ' (' + sign + (pos.pnl * 100).toFixed(1) + String.fromCharCode(162) + ')';
+                    return marker + ' ' + shortLabel(pos.question) + ' bid@' + (pos.currentPrice * 100).toFixed(1) + String.fromCharCode(162) + ' (' + sign + (pos.pnl * 100).toFixed(1) + String.fromCharCode(162) + ')';
                 });
                 lines.push('Total: ' + sellValue);
                 var cvTitle = lines.join(String.fromCharCode(10));
@@ -1114,7 +1123,10 @@ function getDashboardHTML(defaultDate) {
                 '<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;\">' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Current</div><div style=\"font-size:18px;font-weight:700;\">' + currentTemp + '</div></div>' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Forecast</div><div style=\"font-size:18px;font-weight:700;\">' + forecastTemp + '</div></div>' +
-                '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Target</div><div style=\"font-size:18px;font-weight:700;color:' + color + ';\">' + target + '</div></div>' +
+                (targetShifted ?
+                    '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Bought Target</div><div style=\"font-size:15px;font-weight:700;color:var(--accent-amber);\">' + boughtTarget + '</div>' +
+                    '<div style=\"font-size:11px;color:var(--text-secondary);margin-top:2px;\">Forecast: <span style=\"color:' + color + ';font-weight:600;\">' + forecastTarget + '</span> \u26a0\ufe0f</div></div>' :
+                    '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Target</div><div style=\"font-size:18px;font-weight:700;color:' + color + ';\">' + forecastTarget + '</div></div>') +
                 '</div>' +
                 '<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;\">' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Bought At' + (buyTime ? ' (' + buyTime + ')' : '') + '</div><div style=\"font-weight:600;\">' + buyTooltipHtml + '</div></div>' +
@@ -1255,6 +1267,7 @@ function getDashboardHTML(defaultDate) {
             if (portfolioEl && portfolio && portfolio.plays) {
                 portfolioEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">' +
                     portfolio.plays.map(p => renderPortfolioCard(p)).join('') + '</div>';
+                currentPlay = portfolio.plays.find(p => p.date === currentDate) || null;
             }
 
             if (vm.snapshotCount !== lastRenderState.snapshotCount) {
@@ -1316,6 +1329,7 @@ function getDashboardHTML(defaultDate) {
                     '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">' +
                     portfolio.plays.map(p => renderPortfolioCard(p)).join('') +
                     '</div></div></div>';
+                currentPlay = portfolio.plays.find(p => p.date === currentDate) || null;
             }
 
             if (!session && !observation) {
@@ -1658,13 +1672,33 @@ function getDashboardHTML(defaultDate) {
 
             let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0;">';
 
+            // Phase-aware label logic:
+            // - Buy phase: TARGET / BELOW / ABOVE (current forecast labels)
+            // - Post-buy: range names with bought-target marker
+            const hasBuyOrder = currentPlay?.session?.buyOrder;
+            const hasFilled = hasBuyOrder?.positions?.some(function(p) { return p.status !== 'failed' && p.status !== 'rejected'; });
+            const boughtTargetQ = hasFilled ? hasBuyOrder?.positions?.find(function(p) { return p.label === 'target'; })?.question : null;
+
             const labelColors = { target: 'var(--accent-blue)', below: 'var(--accent-orange)', above: 'var(--accent-green)' };
             const labelIcons = { target: '🎯', below: '⬇️', above: '⬆️' };
 
             for (const token of data.tokens) {
-                const lbl = token.label;
-                const color = labelColors[lbl] || 'var(--text-primary)';
-                const icon = labelIcons[lbl] || '📊';
+                // Determine display label based on phase
+                let displayLabel, displayIcon, displayColor;
+                if (hasFilled) {
+                    // Post-buy: show range name with role marker
+                    const isBoughtTarget = token.question === boughtTargetQ;
+                    displayLabel = shortLabel(token.question);
+                    displayIcon = isBoughtTarget ? '🎯' : '📊';
+                    displayColor = isBoughtTarget ? 'var(--accent-amber)' : 'var(--text-primary)';
+                } else {
+                    // Buy phase: standard TARGET/BELOW/ABOVE labels
+                    const lbl = token.label;
+                    displayLabel = lbl.toUpperCase() + ' <span style="color:var(--text-secondary);font-weight:400;">' + shortLabel(token.question) + '</span>';
+                    displayIcon = labelIcons[lbl] || '📊';
+                    displayColor = labelColors[lbl] || 'var(--text-primary)';
+                }
+
                 const liquidBg = token.isLiquid ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.05)';
                 const liquidBorder = token.isLiquid ? 'var(--accent-green)' : 'var(--border)';
                 const spreadColor = token.spreadPct <= (data.thresholds?.maxSpreadPct || 0.2) ? 'var(--accent-green)' : 'var(--accent-red)';
@@ -1681,7 +1715,7 @@ function getDashboardHTML(defaultDate) {
 
                 // Header: label + question + liquid badge
                 html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
-                html += '<div style="font-weight:600;font-size:13px;color:' + color + ';">' + icon + ' ' + lbl.toUpperCase() + ' <span style="color:var(--text-secondary);font-weight:400;">' + ql + '</span></div>';
+                html += '<div style="font-weight:600;font-size:13px;color:' + displayColor + ';">' + displayIcon + ' ' + displayLabel + '</div>';
                 html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:' + (token.isLiquid ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)') + ';color:' + (token.isLiquid ? 'var(--accent-green)' : 'var(--accent-red)') + ';">' + (token.isLiquid ? '🟢 LIQUID' : '🔴 ILLIQUID') + '</span>';
                 html += '</div>';
 

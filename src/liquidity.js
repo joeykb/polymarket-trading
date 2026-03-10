@@ -302,43 +302,53 @@ function discoverSessions() {
             // 2. Buy order positions — ensures ALL purchased tokens are tracked
             //    even if ranges shifted and some are no longer in the current snapshot
             if (data.buyOrder?.positions) {
+                // Labels already claimed by current snapshot ranges
+                const usedLabels = new Set([...tokenMap.values()].map(t => t.label));
+
                 for (const pos of data.buyOrder.positions) {
-                    // If buyOrder has clobTokenId directly, use it
-                    if (pos.clobTokenId && !tokenMap.has(pos.clobTokenId)) {
-                        tokenMap.set(pos.clobTokenId, {
-                            tokenId: pos.clobTokenId,
-                            label: pos.label,
-                            question: pos.question || pos.label,
-                        });
-                        continue;
+                    // Derive a unique label: if the buy-time label (e.g. "below")
+                    // is already taken by a current-snapshot token, use the short
+                    // range name instead (e.g. "64-65°F")
+                    let label = pos.label;
+                    if (usedLabels.has(label)) {
+                        const m = pos.question?.match(/between (\d+-\d+°F)|(\d+°F or higher)/);
+                        label = m?.[1] || m?.[2]?.replace(' or higher', '+') || pos.label;
                     }
-                    // Fallback A: look up clobTokenId from allRanges by question text
-                    if (!pos.clobTokenId && pos.question && latest.allRanges) {
-                        const match = latest.allRanges.find(r => r.question === pos.question);
-                        if (match?.clobTokenIds?.[0] && !tokenMap.has(match.clobTokenIds[0])) {
-                            tokenMap.set(match.clobTokenIds[0], {
-                                tokenId: match.clobTokenIds[0],
-                                label: pos.label,
-                                question: pos.question,
+                    usedLabels.add(label);
+
+                    // Helper to add a discovered token
+                    const addToken = (tokenId) => {
+                        if (!tokenMap.has(tokenId)) {
+                            tokenMap.set(tokenId, {
+                                tokenId,
+                                label,
+                                question: pos.question || pos.label,
                             });
-                            continue;
                         }
+                    };
+
+                    // If buyOrder has clobTokenId directly, use it
+                    if (pos.clobTokenId) { addToken(pos.clobTokenId); continue; }
+
+                    // Fallback A: look up clobTokenId from allRanges by question text
+                    if (pos.question && latest.allRanges) {
+                        const match = latest.allRanges.find(r => r.question === pos.question);
+                        if (match?.clobTokenIds?.[0]) { addToken(match.clobTokenIds[0]); continue; }
                     }
+
                     // Fallback B: scan snapshot ranges for matching question
-                    if (!pos.clobTokenId && pos.question) {
+                    if (pos.question) {
+                        let found = false;
                         for (const snap of (data.snapshots || [])) {
                             for (const key of ['target', 'below', 'above']) {
                                 const r = snap[key];
-                                if (r?.question === pos.question && r?.clobTokenIds?.[0] && !tokenMap.has(r.clobTokenIds[0])) {
-                                    tokenMap.set(r.clobTokenIds[0], {
-                                        tokenId: r.clobTokenIds[0],
-                                        label: pos.label,
-                                        question: pos.question,
-                                    });
+                                if (r?.question === pos.question && r?.clobTokenIds?.[0]) {
+                                    addToken(r.clobTokenIds[0]);
+                                    found = true;
                                     break;
                                 }
                             }
-                            if (tokenMap.size >= (data.buyOrder.positions.length + 3)) break; // found all
+                            if (found) break;
                         }
                     }
                 }
