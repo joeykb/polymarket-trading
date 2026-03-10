@@ -1119,7 +1119,6 @@ function getDashboardHTML(defaultDate) {
                 '</div>' +
                 '<span style=\"color:var(--text-secondary);font-size:12px;\">' + dayLabel + '</span>' +
                 '</div>' +
-                (!play.hasData ? '<div style=\"color:var(--text-secondary);font-size:13px;\">No market data yet</div>' :
                 '<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;\">' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Current</div><div style=\"font-size:18px;font-weight:700;\">' + currentTemp + '</div></div>' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">Forecast</div><div style=\"font-size:18px;font-weight:700;\">' + forecastTemp + '</div></div>' +
@@ -1133,8 +1132,8 @@ function getDashboardHTML(defaultDate) {
                 '<div><div style="color:var(--text-secondary);font-size:11px;">Sell Value</div><div style="font-weight:600;">' + sellTooltipHtml + '</div></div>' +
                 '<div><div style=\"color:var(--text-secondary);font-size:11px;\">P&amp;L</div><div style=\"font-weight:700;font-size:14px;color:' + pnlColor + ';\">' + pnlDisplay + '</div></div>' +
                 '</div>' +
-                '<div style=\"margin-top:8px;color:var(--text-secondary);font-size:12px;\">' + snaps + ' snapshots \u00b7 ' + alerts + ' alerts</div>' +
-                resolutionHtml) +
+                (play.hasData ? '<div style=\"margin-top:8px;color:var(--text-secondary);font-size:12px;\">' + snaps + ' snapshots \u00b7 ' + alerts + ' alerts</div>' : '<div style=\"margin-top:8px;color:var(--text-muted);font-size:12px;\">Awaiting market data</div>') +
+                resolutionHtml +
                 '</div>';
         }
 
@@ -1334,11 +1333,22 @@ function getDashboardHTML(defaultDate) {
 
             if (!session && !observation) {
                 updateStatus('none', 'No Data');
-                document.getElementById('app').innerHTML = portfolioHtml +
-                    '<div class="no-data"><h2>No monitoring data for ' + currentDate + '</h2>' +
+                let noDataHtml = '';
+
+                // Stats Row — always visible, show placeholders for missing data
+                noDataHtml += '<div class="stats-row" id="statsRow">';
+                noDataHtml += statCard('stat-current', 'Current Temp', '--', '', 0, '');
+                noDataHtml += statCard('stat-forecast', 'Forecast High', '--', '', 0, '');
+                noDataHtml += statCard('stat-target', 'Target Range', '--', '', 0, '');
+                noDataHtml += statCard('stat-cost', 'Buy / Sell', '--', '', 0, '');
+                noDataHtml += '</div>';
+
+                noDataHtml += '<div class="no-data"><h2>No monitoring data for ' + currentDate + '</h2>' +
                     '<p>Start the monitor with:<br><code>node src/monitor.js</code></p></div>' +
                     '<div id="configPanel"></div>';
-                lastRenderState = null;
+
+                document.getElementById('app').innerHTML = portfolioHtml + noDataHtml;
+                lastRenderState = { date: currentDate, snapshotCount: 0, alertCount: 0, lastRangesSnapshotCount: 0 };
                 loadConfigPanel();
                 return;
             }
