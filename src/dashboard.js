@@ -1046,14 +1046,15 @@ function getDashboardHTML(defaultDate) {
             const icon = phaseIcons[play.phase] || '';
             const label = phaseLabels[play.phase] || play.phase;
             const latest = play.latest;
+            const eventClosed = latest?.eventClosed === true;
 
             const forecastTemp = latest ? latest.forecastTempF + '\\u00b0F' : '--';
             const currentTemp = latest?.currentTempF != null ? latest.currentTempF + '\\u00b0F' : '--';
-            const forecastTarget = latest ? shortLabel(latest.target?.question) : '--';
+            const forecastTarget = (latest && !eventClosed) ? shortLabel(latest.target?.question) : '--';
 
-            // Buy order & P&L data
-            const buyOrder = play.session?.buyOrder;
-            const pnl = play.session?.pnl;
+            // Buy order & P&L data — suppress when event is closed (stale market)
+            const buyOrder = eventClosed ? null : play.session?.buyOrder;
+            const pnl = eventClosed ? null : play.session?.pnl;
             // Only treat as "post-buy" if at least one position was actually filled
             const hasFilled = buyOrder?.positions?.some(function(p) { return p.status !== 'failed' && p.status !== 'rejected'; });
 
@@ -1153,18 +1154,24 @@ function getDashboardHTML(defaultDate) {
             let currentTempF = null, currentConditions = '', maxTodayF = null;
             let forecastSource = 'unknown', daysUntilTarget = null;
 
+            // If the event is closed (e.g. T+2 before new market created),
+            // suppress stale market data but keep weather data
+            const eventClosed = latest?.eventClosed === true;
+
             if (latest) {
                 forecastTemp = latest.forecastTempF;
-                targetRange = latest.target;
-                belowRange = latest.below;
-                aboveRange = latest.above;
-                totalCost = latest.totalCost;
-                allRanges = latest.allRanges || [];
                 currentTempF = latest.currentTempF;
                 currentConditions = latest.currentConditions || '';
                 maxTodayF = latest.maxTodayF;
                 forecastSource = latest.forecastSource || session?.forecastSource || 'unknown';
                 daysUntilTarget = latest.daysUntilTarget;
+                if (!eventClosed) {
+                    targetRange = latest.target;
+                    belowRange = latest.below;
+                    aboveRange = latest.above;
+                    totalCost = latest.totalCost;
+                    allRanges = latest.allRanges || [];
+                }
             } else if (observation) {
                 forecastTemp = observation.forecast.highTempF;
                 targetRange = observation.selection.target;
@@ -1183,11 +1190,11 @@ function getDashboardHTML(defaultDate) {
             const forecastChange = latest?.forecastChange || 0;
             const sourceLabel = forecastSource === 'weather-company' ? 'WU/KLGA' : forecastSource;
 
-            const detailBuyOrder = session?.buyOrder;
-            const detailPnL = session?.pnl;
+            const detailBuyOrder = eventClosed ? null : session?.buyOrder;
+            const detailPnL = eventClosed ? null : session?.pnl;
             let costLabel = 'Total Cost';
-            let costValue = '$' + totalCost?.toFixed(3);
-            let costSub = 'Profit: $' + profit + ' \\u00b7 ROI: ' + roi + '%';
+            let costValue = totalCost > 0 ? '$' + totalCost?.toFixed(3) : '--';
+            let costSub = totalCost > 0 ? 'Profit: $' + profit + ' \\u00b7 ROI: ' + roi + '%' : '';
             if (detailBuyOrder) {
                 costLabel = 'Buy / Sell';
                 costValue = '$' + detailBuyOrder.totalCost.toFixed(3);
