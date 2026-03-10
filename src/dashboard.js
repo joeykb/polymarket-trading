@@ -81,27 +81,78 @@ const LIQUIDITY_SERVICE_URL = `http://localhost:${process.env.LIQUIDITY_PORT || 
 // ── HTTP Server ─────────────────────────────────────────────────────────
 
 /**
- * Fetch live bestBid from the liquidity microservice (CLOB WebSocket data).
- * Returns a map keyed by question text for stable matching across range shifts.
+ * Fetch live CLOB order book data for a specific date from the liquidity microservice.
+ * Returns bids (sell price), asks (buy price), and raw token data.
  * @param {string} date
- * @returns {Promise<Object>} Map of { questionText: bestBid }
+ * @returns {Promise<{bids: Object, asks: Object, tokens: Array, live: boolean}>}
  */
-async function fetchLiquidityBids(date) {
-    const bids = {};
+async function fetchLiquidityData(date) {
+    const result = { bids: {}, asks: {}, tokens: [], live: false };
     try {
         const resp = await fetch(`${LIQUIDITY_SERVICE_URL}/api/liquidity?date=${date}`);
         if (resp.ok) {
             const data = await resp.json();
-            for (const t of (data.tokens || [])) {
-                if (t.question && t.bestBid > 0) {
-                    bids[t.question] = t.bestBid;
+            result.tokens = data.tokens || [];
+            for (const t of result.tokens) {
+                if (t.question) {
+                    if (t.bestBid > 0) result.bids[t.question] = t.bestBid;
+                    if (t.bestAsk > 0) result.asks[t.question] = t.bestAsk;
                 }
             }
+            result.live = result.tokens.length > 0;
         }
     } catch {
-        // Liquidity service unavailable - will fall back to snapshot data
+        // Liquidity service unavailable — will fall back to snapshot prices
     }
+    return result;
+}
+
+// Backward-compat wrapper (used by /api/trades)
+async function fetchLiquidityBids(date) {
+    const { bids } = await fetchLiquidityData(date);
     return bids;
+}
+
+/**
+ * Overlay live CLOB prices onto a snapshot's range objects.
+ * Uses bestAsk as the displayed price (= what you'd pay to buy YES),
+ * matching the Polymarket UI convention. If WS data is unavailable,
+ * the snapshot retains its original Gamma API prices.
+ *
+ * Mutates snapshot in-place for efficiency. Adds a `_liveOverlay` flag
+ * so the frontend can indicate real-time vs snapshot pricing.
+ *
+ * @param {Object|null} snapshot - The latest monitoring snapshot
+ * @param {{bids: Object, asks: Object, live: boolean}} liveData - From fetchLiquidityData()
+ * @returns {Object|null} The same snapshot, now with live prices overlaid
+ */
+function overlayLivePrices(snapshot, liveData) {
+    if (!snapshot || !liveData.live) return snapshot;
+
+    for (const key of ['target', 'below', 'above']) {
+        const range = snapshot[key];
+        if (!range?.question) continue;
+
+        const liveAsk = liveData.asks[range.question];
+        const liveBid = liveData.bids[range.question];
+
+        if (liveAsk > 0) {
+            range.yesPrice = liveAsk;  // Display price = what you'd pay
+            range._live = true;
+        }
+        if (liveBid > 0) {
+            range.bestBid = liveBid;   // Sell price = what you'd receive
+        }
+    }
+
+    // Recalculate totalCost from the (now-live) range prices
+    const t = snapshot.target?.yesPrice || 0;
+    const b = snapshot.below?.yesPrice || 0;
+    const a = snapshot.above?.yesPrice || 0;
+    snapshot.totalCost = parseFloat((t + b + a).toFixed(4));
+    snapshot._liveOverlay = true;
+
+    return snapshot;
 }
 
 /**
@@ -173,8 +224,16 @@ const server = http.createServer(async (req, res) => {
         const date = url.searchParams.get('date') || targetDate;
         const session = loadSessionData(date);
         const observation = loadObservationData(date);
+
+        // Overlay live CLOB prices onto the latest snapshot so stat cards
+        // display real-time prices instead of 15-minute-stale Gamma data
+        const liveData = await fetchLiquidityData(date);
         const latestSnap = session?.snapshots?.[session.snapshots.length - 1] || null;
-        const livePnL = computeLivePnL(session?.buyOrder, latestSnap);
+        if (latestSnap) {
+            overlayLivePrices(latestSnap, liveData);
+        }
+
+        const livePnL = computeLivePnL(session?.buyOrder, latestSnap, liveData.bids);
 
         // Attach live P&L to session for the response
         const sessionWithPnL = session ? {
@@ -219,7 +278,11 @@ const server = http.createServer(async (req, res) => {
             const phase = getPhase(date);
             const days = daysUntil(date);
             const latest = session?.snapshots?.[session.snapshots.length - 1] || null;
-            const liquidityBids = await fetchLiquidityBids(date);
+
+            // Overlay live CLOB prices onto portfolio card snapshot
+            const liveData = await fetchLiquidityData(date);
+            if (latest) overlayLivePrices(latest, liveData);
+
             return {
                 date,
                 phase,
@@ -236,7 +299,7 @@ const server = http.createServer(async (req, res) => {
                     alertCount: session.alerts?.length || 0,
                     resolution: session.resolution || null,
                     buyOrder: session.buyOrder || null,
-                    pnl: computeLivePnL(session.buyOrder, latest, liquidityBids),
+                    pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
                 } : null,
                 latest,
                 hasData: !!session || !!loadObservationData(date),
