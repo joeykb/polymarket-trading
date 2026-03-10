@@ -395,6 +395,167 @@ export async function executeRealBuyOrder(snapshot) {
     return buyOrder;
 }
 
+// ── Sell Order Execution ────────────────────────────────────────────────
+
+/**
+ * Place a sell order for a single position (to exit/rebalance)
+ * @param {Object} position - { label, question, clobTokenId, shares, conditionId }
+ * @param {Object} tradingCfg
+ * @returns {Promise<Object>} - order result
+ */
+async function placeSellOrder(position, tradingCfg) {
+    const tokenId = position.clobTokenId;
+    if (!tokenId) {
+        return { success: false, error: 'No clobTokenId for sell', position };
+    }
+
+    if (tradingCfg.mode === 'disabled') {
+        return { success: false, error: 'Trading disabled', position };
+    }
+
+    // Fetch order book to find best bid (= price we'd receive)
+    let price = 0;
+    let bidSize = 0;
+    try {
+        const client = await getClient();
+        const book = await client.getOrderBook(tokenId);
+        const bestBid = book.bids?.[0]?.price ? parseFloat(book.bids[0].price) : null;
+        bidSize = book.bids?.[0]?.size ? parseFloat(book.bids[0].size) : 0;
+
+        if (!bestBid || bestBid <= 0) {
+            console.log(`  🚫 ${position.label}: No bids in order book — cannot sell`);
+            return { success: false, error: 'No bids in order book', position };
+        }
+
+        price = bestBid;
+        console.log(`  📊 ${position.label} SELL: bestBid=$${price.toFixed(4)} depth=${bidSize} shares`);
+    } catch (err) {
+        console.log(`  ⚠️  Could not fetch order book for sell: ${err.message}`);
+        return { success: false, error: `Order book fetch failed: ${err.message}`, position };
+    }
+
+    const size = position.shares || 1;
+    const proceeds = parseFloat((price * size).toFixed(4));
+
+    if (tradingCfg.mode === 'dry-run') {
+        console.log(`  🧪 DRY-RUN SELL: Would sell ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
+        console.log(`     Token: ${tokenId}`);
+        console.log(`     Proceeds: $${proceeds.toFixed(4)}`);
+        return {
+            success: true,
+            dryRun: true,
+            orderId: `dry-run-sell-${Date.now()}`,
+            price,
+            size,
+            proceeds,
+            tokenId,
+        };
+    }
+
+    // LIVE mode — place real sell order
+    try {
+        const client = await getClient();
+
+        const market = await client.getMarket(position.conditionId);
+        const tickSize = String(market.minimum_tick_size || '0.01');
+        const negRisk = market.neg_risk || false;
+
+        console.log(`  💰 LIVE SELL: Selling ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
+        console.log(`     Token: ${tokenId} | Tick: ${tickSize} | NegRisk: ${negRisk}`);
+
+        const response = await client.createAndPostOrder(
+            {
+                tokenID: tokenId,
+                price,
+                size,
+                side: Side.SELL,
+                orderType: OrderType.GTC,
+            },
+            {
+                tickSize,
+                negRisk,
+            },
+        );
+
+        console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
+
+        if (!response.orderID || response.status === 400 || response.status === 'error') {
+            const errMsg = response.errorMsg || response.error || response.data?.error || `status ${response.status}`;
+            console.log(`  ❌ Sell order REJECTED: ${errMsg}`);
+            return { success: false, error: errMsg, position };
+        }
+
+        console.log(`  ✅ Sell order placed: ${response.orderID}`);
+        return {
+            success: true,
+            dryRun: false,
+            orderId: response.orderID,
+            status: response.status,
+            price,
+            size,
+            proceeds,
+            tokenId,
+        };
+    } catch (err) {
+        const detail = err.response?.data || err.data || '';
+        console.log(`  ❌ Sell order FAILED for "${position.question}": ${err.message}`);
+        if (detail) console.log(`     Detail: ${JSON.stringify(detail)}`);
+        return { success: false, error: err.message, position };
+    }
+}
+
+/**
+ * Execute sell orders for out-of-range positions during rebalance.
+ * Called by the monitor when forecast shifts beyond the rebalance threshold.
+ *
+ * @param {Array<Object>} positions - positions to sell, each { label, question, clobTokenId, shares, conditionId }
+ * @returns {Promise<Object>} - sellOrder result
+ */
+export async function executeSellOrder(positions) {
+    const tradingCfg = getConfig();
+
+    if (tradingCfg.mode === 'disabled') {
+        console.log('  ⚠️  Trading disabled — skipping sell');
+        return null;
+    }
+
+    console.log(`\n  📉 Rebalance Sell — ${tradingCfg.mode.toUpperCase()} mode`);
+    console.log(`  Selling ${positions.length} out-of-range position(s):`);
+    for (const p of positions) {
+        console.log(`    • ${p.label}: "${p.question}"`);
+    }
+
+    const results = [];
+    for (const position of positions) {
+        const result = await placeSellOrder(position, tradingCfg);
+        results.push({ ...position, ...result });
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const totalProceeds = results.filter(r => r.success).reduce((sum, r) => sum + (r.proceeds || 0), 0);
+
+    const sellOrder = {
+        executedAt: new Date().toISOString(),
+        mode: tradingCfg.mode,
+        positions: results.map(r => ({
+            label: r.label,
+            question: r.question,
+            clobTokenId: r.clobTokenId || r.tokenId,
+            sellPrice: r.price || 0,
+            shares: r.size || r.shares,
+            orderId: r.orderId || null,
+            status: r.success ? (r.dryRun ? 'dry-run' : 'placed') : 'failed',
+            error: r.error || null,
+        })),
+        totalProceeds: parseFloat(totalProceeds.toFixed(4)),
+    };
+
+    console.log(`\n  📋 Sell Summary: ${successCount}/${positions.length} succeeded`);
+    console.log(`  💰 Total proceeds: $${sellOrder.totalProceeds.toFixed(4)}`);
+
+    return sellOrder;
+}
+
 /**
  * Check wallet USDC balance
  * @returns {Promise<number>}

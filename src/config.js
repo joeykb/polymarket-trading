@@ -61,7 +61,7 @@ const SCHEMA = {
     'monitor.intervalMinutes':        { key: 'MONITOR_INTERVAL',         default: 15,   description: 'Minutes between checks' },
     'monitor.forecastShiftThreshold': { key: 'FORECAST_SHIFT_THRESHOLD', default: 1.0,  description: '°F change to trigger alert' },
     'monitor.priceSpikeThreshold':    { key: 'PRICE_SPIKE_THRESHOLD',    default: 0.05, description: 'Price change (¢) to trigger alert' },
-    'monitor.rebalanceThreshold':     { key: 'REBALANCE_THRESHOLD',      default: 7.0,  description: '°F change to rebalance ranges' },
+    'monitor.rebalanceThreshold':     { key: 'REBALANCE_THRESHOLD',      default: 3.0,  description: '°F change to trigger auto-sell of out-of-range strikes' },
     'monitor.buyHourEST':             { key: 'BUY_HOUR_EST',             default: 7,    description: 'Hour (ET) to trigger buy' },
 
     // Liquidity streaming (WebSocket)

@@ -18,6 +18,7 @@ import { fetchWeatherData } from './weather.js';
 import { discoverMarket } from './polymarket.js';
 import { selectRanges } from './rangeSelector.js';
 import { executeRealBuyOrder } from './trading.js';
+import { executeSellOrder } from './trading.js';
 import nodeHttp from 'http';
 import { nowISO, daysUntil, getPhase } from '../utils/dateUtils.js';
 
@@ -108,6 +109,11 @@ function shouldPlaceBuy(session, snapshot) {
     // Already bought or already waiting?
     if (session.buyOrder) return false;
     if (session.awaitingLiquidity) return false;
+
+    // Never buy against a closed/stale event
+    if (snapshot.eventClosed) {
+        return false;
+    }
 
     // On first snapshot, always place buy (backfill/simulation)
     if (session.snapshots.length === 0) return true;
@@ -640,15 +646,18 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         existing.phase = getPhase(targetDate);
 
         // Backfill buyOrder if missing (session was created before buy feature)
-        if (!existing.buyOrder && existing.snapshots.length > 0) {
+        // Skip backfill if latest snapshot shows a closed event (stale market)
+        const latestForBackfill = existing.snapshots[existing.snapshots.length - 1];
+        if (!existing.buyOrder && existing.snapshots.length > 0 && !latestForBackfill?.eventClosed) {
             const firstSnapshot = existing.snapshots[0];
             existing.buyOrder = placeBuyOrder(firstSnapshot);
             existing.buyOrder.placedAt = existing.startedAt; // Use session start time
             console.log(`  💰 Backfilled buy order from first snapshot: $${existing.buyOrder.totalCost.toFixed(3)}`);
 
             // Compute current P&L against latest snapshot
-            const latestSnap = existing.snapshots[existing.snapshots.length - 1];
-            existing.pnl = computePnL(existing.buyOrder, latestSnap);
+            existing.pnl = computePnL(existing.buyOrder, latestForBackfill);
+        } else if (!existing.buyOrder && latestForBackfill?.eventClosed) {
+            console.log(`  ⏳ Skipping backfill buy — event is closed/not yet created`);
         }
 
         // If session was mid-liquidity-wait, reset so we can re-trigger
@@ -669,16 +678,21 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
     const phase = getPhase(targetDate);
 
     // Determine buy strategy:
+    // - Never buy against closed events (market not yet created)
     // - If liquidity-gated and in buy phase, defer to the polling loop
     // - Otherwise, place an immediate simulated/real buy
     let buyOrder = null;
-    const shouldGate = config.liquidity.wsEnabled && phase === 'buy';
 
-    if (!shouldGate) {
-        buyOrder = await tryPlaceBuyOrder(snapshot);
-        console.log('  ' + String.fromCodePoint(0x1F4B0) + ' Buy order placed: $' + buyOrder.totalCost.toFixed(3) + ' (max profit: $' + buyOrder.maxProfit.toFixed(3) + ') [' + (buyOrder.simulated !== false ? 'simulated' : buyOrder.mode || 'live') + ']');
+    if (snapshot.eventClosed) {
+        console.log('  ⏳ Event is closed/not yet created — deferring buy until market is active');
     } else {
-        console.log('  ' + String.fromCodePoint(0x23F3) + ' Buy deferred — liquidity gate will handle purchase during monitoring cycle');
+        const shouldGate = config.liquidity.wsEnabled && phase === 'buy';
+        if (!shouldGate) {
+            buyOrder = await tryPlaceBuyOrder(snapshot);
+            console.log('  ' + String.fromCodePoint(0x1F4B0) + ' Buy order placed: $' + buyOrder.totalCost.toFixed(3) + ' (max profit: $' + buyOrder.maxProfit.toFixed(3) + ') [' + (buyOrder.simulated !== false ? 'simulated' : buyOrder.mode || 'live') + ']');
+        } else {
+            console.log('  ' + String.fromCodePoint(0x23F3) + ' Buy deferred — liquidity gate will handle purchase during monitoring cycle');
+        }
     }
 
     /** @type {import('../models/types.js').MonitoringSession} */
@@ -730,6 +744,87 @@ export async function runMonitoringCycle(session) {
     } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
         // Start liquidity-gated buy flow
         startLiquidityGatedBuy(session, snapshot);
+    }
+
+    // ── Auto-Rebalance: sell out-of-range strikes on ±3°F shift ──────
+    // Only during monitor/resolve phases (T+1, Today) — not T+2 buy phase
+    if (session.buyOrder && !snapshot.eventClosed &&
+        (snapshot.phase === 'monitor' || snapshot.phase === 'resolve') &&
+        !session.rebalanceExecuted) {
+
+        const totalShift = Math.abs(snapshot.forecastTempF - session.initialForecastTempF);
+        const threshold = config.monitor.rebalanceThreshold;
+
+        if (totalShift >= threshold) {
+            console.log(`\n  🔄 REBALANCE TRIGGERED: forecast shifted ${totalShift.toFixed(1)}°F (threshold: ±${threshold}°F)`);
+            console.log(`     Initial: ${session.initialForecastTempF}°F → Current: ${snapshot.forecastTempF}°F`);
+
+            // Determine which owned positions are now out-of-range
+            // by comparing bought positions against the current target selection
+            const currentTargetQ = snapshot.target?.question;
+            const currentBelowQ = snapshot.below?.question;
+            const currentAboveQ = snapshot.above?.question;
+            const currentRangeQuestions = new Set(
+                [currentTargetQ, currentBelowQ, currentAboveQ].filter(Boolean)
+            );
+
+            const positionsToSell = [];
+            for (const pos of session.buyOrder.positions) {
+                // Skip failed/rejected buys
+                if (pos.status === 'failed' || pos.status === 'rejected') continue;
+                // If this position's question is NOT in the current range set, it's out-of-range
+                if (!currentRangeQuestions.has(pos.question)) {
+                    positionsToSell.push({
+                        label: pos.label,
+                        question: pos.question,
+                        clobTokenId: pos.clobTokenId || pos.clobTokenIds?.[0],
+                        conditionId: pos.conditionId,
+                        shares: pos.shares || 1,
+                    });
+                }
+            }
+
+            if (positionsToSell.length > 0) {
+                console.log(`  📉 ${positionsToSell.length} position(s) are now out-of-range:`);
+                for (const p of positionsToSell) {
+                    console.log(`     • ${p.label}: "${p.question}"`);
+                }
+
+                const sellResult = await executeSellOrder(positionsToSell);
+                if (sellResult) {
+                    // Record the sell in the session
+                    if (!session.sellOrders) session.sellOrders = [];
+                    session.sellOrders.push(sellResult);
+                    session.rebalanceExecuted = true;
+
+                    // Update bought positions with sell status
+                    for (const sold of sellResult.positions) {
+                        const original = session.buyOrder.positions.find(
+                            p => p.question === sold.question
+                        );
+                        if (original) {
+                            original.soldAt = sold.sellPrice;
+                            original.soldOrderId = sold.orderId;
+                            original.soldStatus = sold.status;
+                        }
+                    }
+
+                    // Add alert
+                    alerts.push({
+                        timestamp: nowISO(),
+                        type: 'rebalance_sell',
+                        message: `Sold ${positionsToSell.length} out-of-range position(s) after ${totalShift.toFixed(1)}°F forecast shift`,
+                        data: {
+                            shift: totalShift,
+                            sold: positionsToSell.map(p => p.question),
+                            proceeds: sellResult.totalProceeds,
+                        },
+                    });
+                }
+            } else {
+                console.log(`  ✅ All owned positions still in-range after shift`);
+            }
+        }
     }
 
     // Compute P&L against buy prices using live CLOB bids

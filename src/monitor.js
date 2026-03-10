@@ -185,7 +185,7 @@ async function main() {
     console.log(`  Dates:           ${dates.map(d => d.date).join(', ')}`);
     console.log(`  Check interval:  ${intervalMinutes} minutes`);
     console.log(`  Weather source:  Weather Company (WU) → matches Polymarket`);
-    console.log(`  Rebalance at:    ±7°F forecast change`);
+    console.log(`  Rebalance at:    ±${config.monitor.rebalanceThreshold}°F forecast change → auto-sell`);
     console.log(`  Dashboard:       http://localhost:30301`);
     console.log('═══════════════════════════════════════════════════════════════');
 
