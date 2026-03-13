@@ -11,9 +11,16 @@
  *   node src/monitor.js --interval 5        # Check every 5 minutes
  */
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { createOrResumeSession, runMonitoringCycle, stopSession, loadSession } from './services/monitor.js';
 import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from './utils/dateUtils.js';
 import { config } from './config.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const OUTPUT_DIR = path.resolve(__dirname, '../output');
 
 // ── CLI Argument Parsing ────────────────────────────────────────────────
 
@@ -222,9 +229,44 @@ async function main() {
     // Set up monitoring loop
     const intervalMs = intervalMinutes * 60 * 1000;
 
+    // Track which dates failed initialization so we can retry
+    const failedDates = dates.filter(d => !sessions.has(d.date));
+    if (failedDates.length > 0) {
+        console.log(`\n  ⚠️  ${failedDates.length} date(s) failed initialization — will retry each cycle: ${failedDates.map(d => d.date).join(', ')}`);
+    }
+
     const timer = setInterval(async () => {
+        // Check for restart signal from admin panel
+        const restartSignal = path.join(OUTPUT_DIR, '.restart-requested');
+        if (fs.existsSync(restartSignal)) {
+            console.log('\n  🔄 Restart signal detected from admin panel');
+            try { fs.unlinkSync(restartSignal); } catch { /* ok */ }
+            // Save all sessions before exiting
+            for (const [date, session] of sessions) {
+                await stopSession(session, date, intervalMinutes);
+            }
+            console.log('  💾 Sessions saved. Exiting for restart...');
+            process.exit(0);
+        }
+
         console.log(`\n${'═'.repeat(65)}`);
         console.log(`  ⏱️  Monitoring cycle @ ${formatTime(new Date().toISOString())}`);
+
+        // Retry any dates that failed initialization (market may have been created since)
+        const currentDates = getPortfolioDates();
+        for (const { date, phase } of currentDates) {
+            if (!sessions.has(date)) {
+                try {
+                    console.log(`  🔄 Retrying initialization for ${date}...`);
+                    const session = await createOrResumeSession(date, intervalMinutes);
+                    sessions.set(date, session);
+                    console.log(`  ✅ Successfully initialized ${date} (${phase})`);
+                } catch (err) {
+                    console.log(`  ⚠️  ${date} still unavailable: ${err.message.slice(0, 80)}`);
+                }
+            }
+        }
+
         console.log('  ┌────────────┬──────────────┬───────────┬─────────────────┬────────────────────────────┬────────────┐');
 
         for (const [date, session] of sessions) {

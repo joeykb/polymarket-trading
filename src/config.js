@@ -58,7 +58,7 @@ const SCHEMA = {
     'trading.chainId':          { key: 'CHAIN_ID',               default: 137,          description: 'Polygon chain ID', requiresRestart: true },
 
     // Monitoring
-    'monitor.intervalMinutes':        { key: 'MONITOR_INTERVAL',         default: 15,   description: 'Minutes between checks' },
+    'monitor.intervalMinutes':        { key: 'MONITOR_INTERVAL',         default: 15,   description: 'Minutes between checks', requiresRestart: true },
     'monitor.forecastShiftThreshold': { key: 'FORECAST_SHIFT_THRESHOLD', default: 1.0,  description: '°F change to trigger alert' },
     'monitor.priceSpikeThreshold':    { key: 'PRICE_SPIKE_THRESHOLD',    default: 0.05, description: 'Price change (¢) to trigger alert' },
     'monitor.rebalanceThreshold':     { key: 'REBALANCE_THRESHOLD',      default: 3.0,  description: '°F change to trigger auto-sell of out-of-range strikes' },

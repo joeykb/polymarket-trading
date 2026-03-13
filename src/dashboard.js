@@ -489,6 +489,31 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // Restart service — writes signal file and exits process
+    if (url.pathname === '/api/restart' && req.method === 'POST') {
+        console.log('\n  🔄 Restart requested via admin panel');
+        const signalPath = path.join(OUTPUT_DIR, '.restart-requested');
+        try {
+            fs.writeFileSync(signalPath, JSON.stringify({
+                requestedAt: new Date().toISOString(),
+                requestedBy: 'admin-panel',
+            }));
+        } catch (err) {
+            console.warn(`  ⚠️  Could not write restart signal: ${err.message}`);
+        }
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify({ success: true, message: 'Restart initiated — all containers will restart momentarily.' }));
+        // Give response time to flush, then exit
+        setTimeout(() => {
+            console.log('  🔄 Dashboard exiting for restart...');
+            process.exit(0);
+        }, 500);
+        return;
+    }
+
     // CORS preflight
     if (req.method === 'OPTIONS') {
         res.writeHead(204, {
@@ -2339,6 +2364,7 @@ function getAdminHTML() {
         </div>
         <div class="admin-actions">
             <a href="/" class="btn btn-ghost">← Dashboard</a>
+            <button class="btn" style="background:#f59e0b;color:#000;font-weight:700;" onclick="restartService()">🔄 Restart Service</button>
             <button class="btn btn-danger" onclick="resetAll()">Reset All to Defaults</button>
         </div>
     </header>
@@ -2438,6 +2464,36 @@ function getAdminHTML() {
                 }
             } catch (err) {
                 toast('Reset failed: ' + err.message, 'error');
+            }
+        }
+
+        // ── Restart Service ──────────────────────────
+        async function restartService() {
+            if (!confirm('Restart all TempEdge services?\\n\\nThis will briefly interrupt monitoring while containers restart.')) return;
+            try {
+                toast('Restarting services...', 'info');
+                const res = await fetch('/api/restart', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg-primary);color:var(--text-primary);flex-direction:column;gap:16px;">' +
+                        '<div style="font-size:48px;">\\ud83d\\udd04</div>' +
+                        '<h2>Restarting Services...</h2>' +
+                        '<p style="color:var(--text-secondary);">All containers are restarting. This page will reload automatically.</p>' +
+                        '<div id="countdown" style="font-size:24px;font-weight:700;color:var(--accent-cyan);">10</div>' +
+                        '</div>';
+                    var seconds = 10;
+                    var timer = setInterval(function() {
+                        seconds--;
+                        var el = document.getElementById('countdown');
+                        if (el) el.textContent = seconds;
+                        if (seconds <= 0) {
+                            clearInterval(timer);
+                            window.location.href = '/admin';
+                        }
+                    }, 1000);
+                }
+            } catch (err) {
+                toast('Restart failed: ' + err.message, 'error');
             }
         }
 
