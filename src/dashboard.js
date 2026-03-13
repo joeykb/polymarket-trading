@@ -2468,12 +2468,12 @@ function getAdminHTML() {
 
         // ── Restart Service ──────────────────────────
         async function restartService() {
-            if (!confirm('Restart the TempEdge monitor service?\n\nThe monitor will save sessions and restart within a few seconds.')) return;
+            if (!confirm('Restart the TempEdge monitor service?\\nThe monitor will save sessions and restart within a few seconds.')) return;
             try {
                 const res = await fetch('/api/restart', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
-                    toast('\ud83d\udd04 Restart signal sent \u2014 monitor will restart within 5 seconds', 'info');
+                    toast('Restart signal sent — monitor will restart within 5 seconds', 'info');
                 } else {
                     toast('Restart failed: ' + (data.error || 'Unknown error'), 'error');
                 }
