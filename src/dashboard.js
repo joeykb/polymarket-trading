@@ -489,7 +489,7 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // Restart service — writes signal file and exits process
+    // Restart service — writes signal file for monitor to pick up
     if (url.pathname === '/api/restart' && req.method === 'POST') {
         console.log('\n  🔄 Restart requested via admin panel');
         const signalPath = path.join(OUTPUT_DIR, '.restart-requested');
@@ -498,19 +498,18 @@ const server = http.createServer(async (req, res) => {
                 requestedAt: new Date().toISOString(),
                 requestedBy: 'admin-panel',
             }));
+            console.log('  ✅ Restart signal written — monitor will pick up on next cycle');
         } catch (err) {
             console.warn(`  ⚠️  Could not write restart signal: ${err.message}`);
+            res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({ success: false, error: 'Could not write restart signal: ' + err.message }));
+            return;
         }
         res.writeHead(200, {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
         });
-        res.end(JSON.stringify({ success: true, message: 'Restart initiated — all containers will restart momentarily.' }));
-        // Give response time to flush, then exit
-        setTimeout(() => {
-            console.log('  🔄 Dashboard exiting for restart...');
-            process.exit(0);
-        }, 500);
+        res.end(JSON.stringify({ success: true, message: 'Restart signal sent — monitor will restart on next cycle.' }));
         return;
     }
 
@@ -2469,28 +2468,14 @@ function getAdminHTML() {
 
         // ── Restart Service ──────────────────────────
         async function restartService() {
-            if (!confirm('Restart all TempEdge services?\\n\\nThis will briefly interrupt monitoring while containers restart.')) return;
+            if (!confirm('Restart the TempEdge monitor service?\n\nThe monitor will save sessions and restart within a few seconds.')) return;
             try {
-                toast('Restarting services...', 'info');
                 const res = await fetch('/api/restart', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
-                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg-primary);color:var(--text-primary);flex-direction:column;gap:16px;">' +
-                        '<div style="font-size:48px;">\\ud83d\\udd04</div>' +
-                        '<h2>Restarting Services...</h2>' +
-                        '<p style="color:var(--text-secondary);">All containers are restarting. This page will reload automatically.</p>' +
-                        '<div id="countdown" style="font-size:24px;font-weight:700;color:var(--accent-cyan);">10</div>' +
-                        '</div>';
-                    var seconds = 10;
-                    var timer = setInterval(function() {
-                        seconds--;
-                        var el = document.getElementById('countdown');
-                        if (el) el.textContent = seconds;
-                        if (seconds <= 0) {
-                            clearInterval(timer);
-                            window.location.href = '/admin';
-                        }
-                    }, 1000);
+                    toast('\ud83d\udd04 Restart signal sent \u2014 monitor will restart within 5 seconds', 'info');
+                } else {
+                    toast('Restart failed: ' + (data.error || 'Unknown error'), 'error');
                 }
             } catch (err) {
                 toast('Restart failed: ' + err.message, 'error');

@@ -234,21 +234,23 @@ async function main() {
     if (failedDates.length > 0) {
         console.log(`\n  ⚠️  ${failedDates.length} date(s) failed initialization — will retry each cycle: ${failedDates.map(d => d.date).join(', ')}`);
     }
-
-    const timer = setInterval(async () => {
-        // Check for restart signal from admin panel
-        const restartSignal = path.join(OUTPUT_DIR, '.restart-requested');
-        if (fs.existsSync(restartSignal)) {
+    // Fast-poll restart signal watcher (checks every 5s independently of monitor cycle)
+    const restartSignalPath = path.join(OUTPUT_DIR, '.restart-requested');
+    const restartWatcher = setInterval(async () => {
+        if (fs.existsSync(restartSignalPath)) {
+            clearInterval(restartWatcher);
+            clearInterval(timer);
             console.log('\n  🔄 Restart signal detected from admin panel');
-            try { fs.unlinkSync(restartSignal); } catch { /* ok */ }
-            // Save all sessions before exiting
+            try { fs.unlinkSync(restartSignalPath); } catch { /* ok */ }
             for (const [date, session] of sessions) {
                 await stopSession(session, date, intervalMinutes);
             }
             console.log('  💾 Sessions saved. Exiting for restart...');
             process.exit(0);
         }
+    }, 5000);
 
+    const timer = setInterval(async () => {
         console.log(`\n${'═'.repeat(65)}`);
         console.log(`  ⏱️  Monitoring cycle @ ${formatTime(new Date().toISOString())}`);
 
