@@ -86,17 +86,23 @@ function placeBuyOrder(snapshot) {
  * @param {Object} snapshot
  * @returns {Promise<Object>} buyOrder
  */
-async function tryPlaceBuyOrder(snapshot) {
+async function tryPlaceBuyOrder(snapshot, liqTokens = []) {
     try {
-        const realOrder = await executeRealBuyOrder(snapshot);
-        if (realOrder) return realOrder;
+        const realOrder = await executeRealBuyOrder(snapshot, liqTokens);
+        if (!realOrder) return null;
+
+        // If post-trade verification found no actual fills, treat as failed
+        if (realOrder.allUnfilled) {
+            console.warn('  ⚠️  Order was placed but no fills confirmed — treating as failed');
+            return null;
+        }
+
+        return realOrder;
     } catch (err) {
-        console.warn(`  ⚠️  Real trading failed, using simulated: ${err.message}`);
+        console.warn(`  ⚠️  Buy order failed: ${err.message}`);
     }
-    // Fall back to simulated
-    const order = placeBuyOrder(snapshot);
-    order.simulated = true;
-    return order;
+    // If real order failed or returned null, don't fake a buy
+    return null;
 }
 
 /**
@@ -115,8 +121,10 @@ function shouldPlaceBuy(session, snapshot) {
         return false;
     }
 
-    // On first snapshot, always place buy (backfill/simulation)
-    if (session.snapshots.length === 0) return true;
+    // Only buy during the buy phase (T+2)
+    if (snapshot.phase && snapshot.phase !== 'buy') {
+        return false;
+    }
 
     // Check if current time is at or past buyHourEST
     const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
@@ -529,7 +537,13 @@ function startLiquidityGatedBuy(session, snapshot) {
 
             console.log(`\n  ⏰ DEADLINE REACHED (${deadlineH}:${String(deadlineM).padStart(2, '0')} ET) — forcing buy after ${waitStr}`);
 
-            const order = await tryPlaceBuyOrder(snapshot);
+            // Fetch latest WS liquidity data for accurate spread checks
+            const deadlineLiq = await fetchLiquidityFromService(targetDate);
+            const order = await tryPlaceBuyOrder(snapshot, deadlineLiq?.tokens || []);
+            if (!order) {
+                console.warn('  ⚠️  Deadline buy failed — will retry next cycle');
+                return;
+            }
             order.liquidityWait = waitStr;
             order.forcedByDeadline = true;
             session.buyOrder = order;
@@ -599,8 +613,13 @@ function startLiquidityGatedBuy(session, snapshot) {
             }
         }
 
-        // Execute the buy with live prices
-        const order = await tryPlaceBuyOrder(liveSnapshot);
+        // Execute the buy with live prices + WS liquidity data
+        const order = await tryPlaceBuyOrder(liveSnapshot, liqData.tokens || []);
+        if (!order) {
+            console.warn('  ⚠️  Liquidity-gated buy failed — will retry next cycle');
+            session.awaitingLiquidity = false;
+            return;
+        }
         order.liquidityWait = waitStr;
         order.liquiditySnapshot = {
             liquidCount,
@@ -645,19 +664,19 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         // Update phase in case day changed
         existing.phase = getPhase(targetDate);
 
-        // Backfill buyOrder if missing (session was created before buy feature)
-        // Skip backfill if latest snapshot shows a closed event (stale market)
-        const latestForBackfill = existing.snapshots[existing.snapshots.length - 1];
-        if (!existing.buyOrder && existing.snapshots.length > 0 && !latestForBackfill?.eventClosed) {
-            const firstSnapshot = existing.snapshots[0];
-            existing.buyOrder = placeBuyOrder(firstSnapshot);
-            existing.buyOrder.placedAt = existing.startedAt; // Use session start time
-            console.log(`  💰 Backfilled buy order from first snapshot: $${existing.buyOrder.totalCost.toFixed(3)}`);
+        // Clean up failed buy orders (totalCost=0, all positions failed) — legacy artifacts
+        if (existing.buyOrder && existing.buyOrder.totalCost === 0) {
+            const allFailed = existing.buyOrder.positions?.every(p => p.status === 'failed');
+            if (allFailed) {
+                console.log(`  🧹 Clearing failed buy order (totalCost=0, all positions failed)`);
+                existing.buyOrder = null;
+                existing.pnl = null;
+            }
+        }
 
-            // Compute current P&L against latest snapshot
-            existing.pnl = computePnL(existing.buyOrder, latestForBackfill);
-        } else if (!existing.buyOrder && latestForBackfill?.eventClosed) {
-            console.log(`  ⏳ Skipping backfill buy — event is closed/not yet created`);
+        // If no buy order exists, note it — we don't backfill fake buys
+        if (!existing.buyOrder) {
+            console.log(`  ⏳ No buy order yet — will trigger via normal buy flow`);
         }
 
         // If session was mid-liquidity-wait, reset so we can re-trigger
@@ -688,8 +707,13 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
     } else {
         const shouldGate = config.liquidity.wsEnabled && phase === 'buy';
         if (!shouldGate) {
-            buyOrder = await tryPlaceBuyOrder(snapshot);
-            console.log('  ' + String.fromCodePoint(0x1F4B0) + ' Buy order placed: $' + buyOrder.totalCost.toFixed(3) + ' (max profit: $' + buyOrder.maxProfit.toFixed(3) + ') [' + (buyOrder.simulated !== false ? 'simulated' : buyOrder.mode || 'live') + ']');
+            const initLiq = await fetchLiquidityFromService(targetDate);
+            buyOrder = await tryPlaceBuyOrder(snapshot, initLiq?.tokens || []);
+            if (buyOrder) {
+                console.log('  ' + String.fromCodePoint(0x1F4B0) + ' Buy order placed: $' + buyOrder.totalCost.toFixed(3) + ' (max profit: $' + buyOrder.maxProfit.toFixed(3) + ') [' + (buyOrder.mode || 'live') + ']');
+            } else {
+                console.log('  ' + String.fromCodePoint(0x26A0) + ' Buy order attempted but failed — will retry on next cycle');
+            }
         } else {
             console.log('  ' + String.fromCodePoint(0x23F3) + ' Buy deferred — liquidity gate will handle purchase during monitoring cycle');
         }
@@ -739,8 +763,9 @@ export async function runMonitoringCycle(session) {
     // Place buy (immediate or liquidity-gated)
     const buySignal = shouldPlaceBuy(session, snapshot);
     if (buySignal === true) {
-        // Immediate buy (old path: no WS, first snapshot, etc.)
-        session.buyOrder = await tryPlaceBuyOrder(snapshot);
+        // Immediate buy — fetch WS liquidity data for accurate spread checks
+        const immLiq = await fetchLiquidityFromService(session.targetDate);
+        session.buyOrder = await tryPlaceBuyOrder(snapshot, immLiq?.tokens || []);
     } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
         // Start liquidity-gated buy flow
         startLiquidityGatedBuy(session, snapshot);
