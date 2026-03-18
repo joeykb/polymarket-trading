@@ -109,12 +109,16 @@ spec:
               port: 3000
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
           livenessProbe:
             httpGet:
               path: /api/status
               port: 3000
             initialDelaySeconds: 20
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
 
         # ── Liquidity Container ──────────────────────────
         # Dedicated WebSocket microservice for real-time order book streaming
@@ -141,12 +145,16 @@ spec:
               port: 3001
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 3001
             initialDelaySeconds: 10
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
 
       volumes:
         - name: output
