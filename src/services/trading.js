@@ -638,13 +638,21 @@ async function placeSellOrder(position, tradingCfg) {
         console.log(`  💰 LIVE SELL: Selling ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
         console.log(`     Token: ${tokenId} | Tick: ${tickSize} | NegRisk: ${negRisk}`);
 
-        const response = await client.createAndPostOrder(
+        // Cancel any existing orders on this token to prevent self-matching
+        try {
+            await client.cancelMarketOrders({ asset_id: tokenId });
+            console.log(`     Cleared existing orders for token (self-trade prevention)`);
+        } catch (cancelErr) {
+            console.log(`     Could not cancel existing orders: ${cancelErr.message}`);
+        }
+
+        // Create order first, then post separately for better error handling
+        const order = await client.createOrder(
             {
                 tokenID: tokenId,
                 price,
                 size,
                 side: Side.SELL,
-                orderType: OrderType.GTC,
             },
             {
                 tickSize,
@@ -652,19 +660,29 @@ async function placeSellOrder(position, tradingCfg) {
             },
         );
 
+        console.log(`  📝 Order signed: maker=${order.maker} sigType=${order.signatureType}`);
+
+        const response = await client.postOrder(order, OrderType.GTC);
+
         console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
 
-        if (!response.orderID || response.status === 400 || response.status === 'error') {
-            const errMsg = response.errorMsg || response.error || response.data?.error || `status ${response.status}`;
+        if (response.error || response.status === 400) {
+            const errMsg = response.error || response.errorMsg || `status ${response.status}`;
             console.log(`  ❌ Sell order REJECTED: ${errMsg}`);
             return { success: false, error: errMsg, position };
         }
 
-        console.log(`  ✅ Sell order placed: ${response.orderID}`);
+        const orderID = response.orderID || response.order_id;
+        if (!orderID) {
+            console.log(`  ❌ Sell order REJECTED: no orderID in response`);
+            return { success: false, error: 'No orderID in response', position };
+        }
+
+        console.log(`  ✅ Sell order placed: ${orderID}`);
         return {
             success: true,
             dryRun: false,
-            orderId: response.orderID,
+            orderId: orderID,
             status: response.status,
             price,
             size,

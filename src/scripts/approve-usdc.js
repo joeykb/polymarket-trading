@@ -108,6 +108,7 @@ async function main() {
     const ctfSpenders = [
         { name: 'CTF Exchange (CTF)', address: CTF_EXCHANGE },
         { name: 'Neg Risk CTF Exchange (CTF)', address: NEG_RISK_CTF_EXCHANGE },
+        { name: 'Neg Risk Adapter (CTF)', address: NEG_RISK_ADAPTER },
     ];
 
     for (const { name, address } of ctfSpenders) {
