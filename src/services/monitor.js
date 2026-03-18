@@ -771,83 +771,152 @@ export async function runMonitoringCycle(session) {
         startLiquidityGatedBuy(session, snapshot);
     }
 
-    // ── Auto-Rebalance: sell out-of-range strikes on ±3°F shift ──────
-    // Only during monitor/resolve phases (T+1, Today) — not T+2 buy phase
-    if (session.buyOrder && !snapshot.eventClosed &&
-        (snapshot.phase === 'monitor' || snapshot.phase === 'resolve') &&
-        !session.rebalanceExecuted) {
+    // ── Sell Strategy: phase-dependent ────────────────────────────────
+    if (session.buyOrder && !snapshot.eventClosed) {
 
-        const totalShift = Math.abs(snapshot.forecastTempF - session.initialForecastTempF);
-        const threshold = config.monitor.rebalanceThreshold;
+        // ── RESOLVE DAY (T+0): Sell hedge positions immediately ──────
+        // On resolve day the forecast is mature — sell the 2 positions
+        // that don't match the current target range to lock in value.
+        if (snapshot.phase === 'resolve' && !session.resolveSellExecuted) {
 
-        if (totalShift >= threshold) {
-            console.log(`\n  🔄 REBALANCE TRIGGERED: forecast shifted ${totalShift.toFixed(1)}°F (threshold: ±${threshold}°F)`);
-            console.log(`     Initial: ${session.initialForecastTempF}°F → Current: ${snapshot.forecastTempF}°F`);
-
-            // Determine which owned positions are now out-of-range
-            // by comparing bought positions against the current target selection
             const currentTargetQ = snapshot.target?.question;
-            const currentBelowQ = snapshot.below?.question;
-            const currentAboveQ = snapshot.above?.question;
-            const currentRangeQuestions = new Set(
-                [currentTargetQ, currentBelowQ, currentAboveQ].filter(Boolean)
-            );
+            if (currentTargetQ) {
+                const positionsToSell = [];
+                const positionsToKeep = [];
 
-            const positionsToSell = [];
-            for (const pos of session.buyOrder.positions) {
-                // Skip failed/rejected buys
-                if (pos.status === 'failed' || pos.status === 'rejected') continue;
-                // If this position's question is NOT in the current range set, it's out-of-range
-                if (!currentRangeQuestions.has(pos.question)) {
-                    positionsToSell.push({
-                        label: pos.label,
-                        question: pos.question,
-                        clobTokenId: pos.clobTokenId || pos.clobTokenIds?.[0],
-                        conditionId: pos.conditionId,
-                        shares: pos.shares || 1,
-                    });
-                }
-            }
+                for (const pos of session.buyOrder.positions) {
+                    if (pos.status === 'failed' || pos.status === 'rejected') continue;
+                    if (pos.soldAt) continue; // Already sold
 
-            if (positionsToSell.length > 0) {
-                console.log(`  📉 ${positionsToSell.length} position(s) are now out-of-range:`);
-                for (const p of positionsToSell) {
-                    console.log(`     • ${p.label}: "${p.question}"`);
+                    if (pos.question === currentTargetQ) {
+                        positionsToKeep.push(pos);
+                    } else {
+                        positionsToSell.push({
+                            label: pos.label,
+                            question: pos.question,
+                            clobTokenId: pos.clobTokenId || pos.clobTokenIds?.[0],
+                            conditionId: pos.conditionId,
+                            shares: pos.shares || 1,
+                        });
+                    }
                 }
 
-                const sellResult = await executeSellOrder(positionsToSell);
-                if (sellResult) {
-                    // Record the sell in the session
-                    if (!session.sellOrders) session.sellOrders = [];
-                    session.sellOrders.push(sellResult);
-                    session.rebalanceExecuted = true;
-
-                    // Update bought positions with sell status
-                    for (const sold of sellResult.positions) {
-                        const original = session.buyOrder.positions.find(
-                            p => p.question === sold.question
-                        );
-                        if (original) {
-                            original.soldAt = sold.sellPrice;
-                            original.soldOrderId = sold.orderId;
-                            original.soldStatus = sold.status;
-                        }
+                if (positionsToSell.length > 0) {
+                    console.log(`\n  🎯 RESOLVE-DAY SELL: keeping target "${currentTargetQ.substring(55, 80)}"`);
+                    console.log(`     Forecast: ${snapshot.forecastTempF}°F — selling ${positionsToSell.length} hedge position(s):`);
+                    for (const p of positionsToSell) {
+                        console.log(`     📉 ${p.label}: "${p.question.substring(55, 80)}" (${p.shares} shares)`);
                     }
 
-                    // Add alert
-                    alerts.push({
-                        timestamp: nowISO(),
-                        type: 'rebalance_sell',
-                        message: `Sold ${positionsToSell.length} out-of-range position(s) after ${totalShift.toFixed(1)}°F forecast shift`,
-                        data: {
-                            shift: totalShift,
-                            sold: positionsToSell.map(p => p.question),
-                            proceeds: sellResult.totalProceeds,
-                        },
-                    });
+                    const sellResult = await executeSellOrder(positionsToSell);
+                    if (sellResult) {
+                        if (!session.sellOrders) session.sellOrders = [];
+                        session.sellOrders.push(sellResult);
+                        session.resolveSellExecuted = true;
+
+                        // Update bought positions with sell status
+                        for (const sold of sellResult.positions) {
+                            const original = session.buyOrder.positions.find(
+                                p => p.question === sold.question
+                            );
+                            if (original) {
+                                original.soldAt = sold.sellPrice;
+                                original.soldOrderId = sold.orderId;
+                                original.soldStatus = sold.status;
+                            }
+                        }
+
+                        alerts.push({
+                            timestamp: nowISO(),
+                            type: 'resolve_sell',
+                            message: `Resolve-day sell: sold ${positionsToSell.length} hedge position(s), keeping "${positionsToKeep[0]?.label || 'target'}"`,
+                            data: {
+                                forecast: snapshot.forecastTempF,
+                                kept: positionsToKeep.map(p => p.question),
+                                sold: positionsToSell.map(p => p.question),
+                                proceeds: sellResult.totalProceeds,
+                            },
+                        });
+                    }
+                } else {
+                    console.log(`  ✅ Resolve day: no hedge positions to sell`);
+                    session.resolveSellExecuted = true;
                 }
-            } else {
-                console.log(`  ✅ All owned positions still in-range after shift`);
+            }
+        }
+
+        // ── MONITOR/BUY (T+1, T+2): Rebalance on ±3°F forecast shift ──
+        // During earlier phases, the forecast can still swing. Only sell
+        // if it moves significantly from the initial buy forecast.
+        if ((snapshot.phase === 'monitor' || snapshot.phase === 'buy') &&
+            !session.rebalanceExecuted) {
+
+            const totalShift = Math.abs(snapshot.forecastTempF - session.initialForecastTempF);
+            const threshold = config.monitor.rebalanceThreshold;
+
+            if (totalShift >= threshold) {
+                console.log(`\n  🔄 REBALANCE TRIGGERED: forecast shifted ${totalShift.toFixed(1)}°F (threshold: ±${threshold}°F)`);
+                console.log(`     Initial: ${session.initialForecastTempF}°F → Current: ${snapshot.forecastTempF}°F`);
+
+                const currentTargetQ = snapshot.target?.question;
+                const currentBelowQ = snapshot.below?.question;
+                const currentAboveQ = snapshot.above?.question;
+                const currentRangeQuestions = new Set(
+                    [currentTargetQ, currentBelowQ, currentAboveQ].filter(Boolean)
+                );
+
+                const positionsToSell = [];
+                for (const pos of session.buyOrder.positions) {
+                    if (pos.status === 'failed' || pos.status === 'rejected') continue;
+                    if (pos.soldAt) continue;
+                    if (!currentRangeQuestions.has(pos.question)) {
+                        positionsToSell.push({
+                            label: pos.label,
+                            question: pos.question,
+                            clobTokenId: pos.clobTokenId || pos.clobTokenIds?.[0],
+                            conditionId: pos.conditionId,
+                            shares: pos.shares || 1,
+                        });
+                    }
+                }
+
+                if (positionsToSell.length > 0) {
+                    console.log(`  📉 ${positionsToSell.length} position(s) are now out-of-range:`);
+                    for (const p of positionsToSell) {
+                        console.log(`     • ${p.label}: "${p.question}"`);
+                    }
+
+                    const sellResult = await executeSellOrder(positionsToSell);
+                    if (sellResult) {
+                        if (!session.sellOrders) session.sellOrders = [];
+                        session.sellOrders.push(sellResult);
+                        session.rebalanceExecuted = true;
+
+                        for (const sold of sellResult.positions) {
+                            const original = session.buyOrder.positions.find(
+                                p => p.question === sold.question
+                            );
+                            if (original) {
+                                original.soldAt = sold.sellPrice;
+                                original.soldOrderId = sold.orderId;
+                                original.soldStatus = sold.status;
+                            }
+                        }
+
+                        alerts.push({
+                            timestamp: nowISO(),
+                            type: 'rebalance_sell',
+                            message: `Sold ${positionsToSell.length} out-of-range position(s) after ${totalShift.toFixed(1)}°F forecast shift`,
+                            data: {
+                                shift: totalShift,
+                                sold: positionsToSell.map(p => p.question),
+                                proceeds: sellResult.totalProceeds,
+                            },
+                        });
+                    }
+                } else {
+                    console.log(`  ✅ All owned positions still in-range after shift`);
+                }
             }
         }
     }
