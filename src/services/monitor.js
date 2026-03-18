@@ -20,7 +20,22 @@ import { selectRanges } from './rangeSelector.js';
 import { executeRealBuyOrder } from './trading.js';
 import { executeSellOrder } from './trading.js';
 import nodeHttp from 'http';
+import { ethers } from 'ethers';
 import { nowISO, daysUntil, getPhase, getTodayET } from '../utils/dateUtils.js';
+
+// ── On-chain redemption constants ───────────────────────────────────────
+const CTF_CONTRACT_ADDR = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const CTF_REDEEM_ABI = [
+    'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
+    'function payoutDenominator(bytes32 conditionId) view returns (uint256)',
+    'function payoutNumerators(bytes32 conditionId, uint256 index) view returns (uint256)',
+];
+const GAS_OVERRIDES = {
+    gasLimit: 300000,
+    maxFeePerGas: ethers.utils.parseUnits('200', 'gwei'),
+    maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,6 +118,114 @@ async function tryPlaceBuyOrder(snapshot, liqTokens = []) {
     }
     // If real order failed or returned null, don't fake a buy
     return null;
+}
+
+// ── Auto-Redemption ─────────────────────────────────────────────────────
+
+/**
+ * Attempt to redeem resolved winning positions on-chain.
+ * Called automatically when a market is detected as closed.
+ *
+ * @param {import('../models/types.js').MonitoringSession} session
+ * @returns {Promise<{redeemed: number, totalValue: number, positions: Array}|null>}
+ */
+async function tryRedeemPositions(session) {
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
+    if (!privateKey) {
+        console.log(`  ⚠️  POLYMARKET_PRIVATE_KEY not set — cannot redeem`);
+        return null;
+    }
+
+    try {
+        const rpc = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
+        const provider = new ethers.providers.StaticJsonRpcProvider(rpc, 137);
+        const wallet = new ethers.Wallet(privateKey, provider);
+        const ctf = new ethers.Contract(CTF_CONTRACT_ADDR, CTF_REDEEM_ABI, wallet);
+
+        // Collect held positions with conditionIds
+        const heldPositions = session.buyOrder.positions.filter(
+            p => !p.soldAt && !p.redeemed && p.conditionId &&
+                 p.status !== 'failed' && p.status !== 'rejected'
+        );
+
+        if (heldPositions.length === 0) {
+            console.log(`  ℹ️  No held positions to redeem`);
+            return null;
+        }
+
+        // Deduplicate by conditionId
+        const conditionIds = [...new Set(heldPositions.map(p => p.conditionId))];
+        let totalRedeemed = 0;
+        let totalValue = 0;
+        const results = [];
+
+        for (const condId of conditionIds) {
+            try {
+                // Check on-chain payout
+                const denom = await ctf.payoutDenominator(condId);
+                if (!denom.gt(0)) {
+                    console.log(`  ⏳ conditionId ${condId.substring(0, 12)}... not yet resolved on-chain`);
+                    continue;
+                }
+
+                const yesNumerator = await ctf.payoutNumerators(condId, 0);
+                const won = yesNumerator.gt(0);
+
+                const pos = heldPositions.find(p => p.conditionId === condId);
+                const shares = pos?.shares || 1;
+
+                if (!won) {
+                    console.log(`  ❌ ${pos?.label || 'position'}: Resolved NO — worthless`);
+                    // Mark as redeemed (no value)
+                    for (const p of heldPositions.filter(p => p.conditionId === condId)) {
+                        p.redeemed = true;
+                        p.redeemedAt = nowISO();
+                        p.redeemedValue = 0;
+                    }
+                    continue;
+                }
+
+                // Winner — redeem on-chain
+                const value = shares;
+                console.log(`  🏆 ${pos?.label || 'position'}: WON! Redeeming ${shares} shares ($${value.toFixed(2)})...`);
+
+                const tx = await ctf.redeemPositions(
+                    USDC_E_ADDRESS,
+                    ethers.constants.HashZero,
+                    condId,
+                    [1, 2],
+                    GAS_OVERRIDES,
+                );
+
+                console.log(`     TX: ${tx.hash}`);
+                const receipt = await tx.wait();
+                console.log(`     ✅ Redeemed! Gas: ${receipt.gasUsed.toString()}`);
+
+                // Update position metadata
+                for (const p of heldPositions.filter(p => p.conditionId === condId)) {
+                    p.redeemed = true;
+                    p.redeemedAt = nowISO();
+                    p.redeemedTx = tx.hash;
+                    p.redeemedValue = p.shares || 1;
+                }
+
+                totalRedeemed++;
+                totalValue += value;
+                results.push({ conditionId: condId, label: pos?.label, shares, txHash: tx.hash });
+
+            } catch (err) {
+                console.log(`  ❌ Redeem failed for ${condId.substring(0, 12)}...: ${err.message}`);
+            }
+        }
+
+        return totalRedeemed > 0
+            ? { redeemed: totalRedeemed, totalValue, positions: results }
+            : null;
+
+    } catch (err) {
+        console.log(`  ❌ Auto-redeem error: ${err.message}`);
+        return null;
+    }
 }
 
 // ── Forecast Trend Analysis ─────────────────────────────────────────────
@@ -1073,9 +1196,24 @@ export async function runMonitoringCycle(session) {
         session.resolution = resolution;
     }
 
-    // Check if market closed
-    if (snapshot.eventClosed) {
+    // Check if market closed → attempt auto-redemption
+    if (snapshot.eventClosed && session.status !== 'completed') {
         session.status = 'completed';
+
+        // Auto-redeem any held positions
+        if (session.buyOrder && !session.redeemExecuted) {
+            const redeemResult = await tryRedeemPositions(session);
+            if (redeemResult) {
+                session.redeemExecuted = true;
+                session.redeemResult = redeemResult;
+                alerts.push({
+                    timestamp: nowISO(),
+                    type: 'redeem',
+                    message: `Auto-redeemed ${redeemResult.redeemed} position(s) for $${redeemResult.totalValue.toFixed(2)}`,
+                    data: redeemResult,
+                });
+            }
+        }
     }
 
     // Persist
