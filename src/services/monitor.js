@@ -229,7 +229,7 @@ function saveSession(session) {
     }
 
     // Hot-patch: check for external patch file and merge into in-memory session
-    const patchPath = join(OUTPUT_DIR, `patch-${session.targetDate}.json`);
+    const patchPath = path.join(OUTPUT_DIR, `patch-${session.targetDate}.json`);
     if (fs.existsSync(patchPath)) {
         try {
             const patch = JSON.parse(fs.readFileSync(patchPath, 'utf-8'));
