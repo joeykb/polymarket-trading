@@ -274,9 +274,23 @@ async function main() {
         // WINNER!
         const totalShares = positions.reduce((s, p) => s + p.shares, 0);
         const value = totalShares; // $1.00 per share
+
+        // Verify on-chain balance before redeeming
+        let hasBalance = false;
+        for (const p of positions) {
+            try {
+                const bal = await ctf.balanceOf(wallet.address, p.tokenId);
+                if (bal.gt(0)) { hasBalance = true; break; }
+            } catch { /* skip */ }
+        }
+
+        if (!hasBalance) {
+            console.log(`  ℹ️  ${pos0.date} ${rangeDesc}: WON but no on-chain balance (already sold/redeemed)`);
+            continue;
+        }
+
         console.log(`  🏆 ${pos0.date} ${rangeDesc}: WON! ${totalShares.toFixed(2)} shares = $${value.toFixed(2)}`);
         console.log(`     conditionId: ${conditionId}`);
-        console.log(`     negRisk: ${negRisk}`);
 
         if (dryRun) {
             console.log(`     🧪 DRY RUN — would redeem $${value.toFixed(2)}`);
@@ -284,10 +298,11 @@ async function main() {
             continue;
         }
 
-        // Execute redemption
+        // Execute redemption — temperature markets are neg-risk, default true
         try {
             let tx;
-            if (negRisk) {
+            const isNegRisk = negRisk !== false; // Default to true for temperature
+            if (isNegRisk) {
                 const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ADAPTER_ABI, wallet);
                 console.log(`     📝 Calling NegRiskAdapter.redeemPositions...`);
                 tx = await adapter.redeemPositions(

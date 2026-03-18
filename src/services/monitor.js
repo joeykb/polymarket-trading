@@ -25,11 +25,16 @@ import { nowISO, daysUntil, getPhase, getTodayET } from '../utils/dateUtils.js';
 
 // ── On-chain redemption constants ───────────────────────────────────────
 const CTF_CONTRACT_ADDR = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const NEG_RISK_ADAPTER_ADDR = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const CTF_REDEEM_ABI = [
     'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
+    'function balanceOf(address owner, uint256 id) view returns (uint256)',
     'function payoutDenominator(bytes32 conditionId) view returns (uint256)',
     'function payoutNumerators(bytes32 conditionId, uint256 index) view returns (uint256)',
+];
+const NEG_RISK_ADAPTER_ABI = [
+    'function redeemPositions(bytes32 conditionId, uint256[] indexSets)',
 ];
 const GAS_OVERRIDES = {
     gasLimit: 300000,
@@ -185,17 +190,57 @@ async function tryRedeemPositions(session) {
                     continue;
                 }
 
-                // Winner — redeem on-chain
+                // Winner — check on-chain balance before redeeming
                 const value = shares;
+                
+                // Verify we still hold tokens (may have been sold)
+                let hasBalance = false;
+                if (pos?.clobTokenIds) {
+                    for (const tid of (Array.isArray(pos.clobTokenIds) ? pos.clobTokenIds : [])) {
+                        try {
+                            const bal = await ctf.balanceOf(wallet.address, tid);
+                            if (bal.gt(0)) { hasBalance = true; break; }
+                        } catch { /* skip */ }
+                    }
+                } else {
+                    hasBalance = true; // Assume we hold if no tokenIds to check
+                }
+
+                if (!hasBalance) {
+                    console.log(`  ℹ️  ${pos?.label || 'position'}: WON but no on-chain balance (already sold?)`);
+                    for (const p of heldPositions.filter(p => p.conditionId === condId)) {
+                        p.redeemed = true;
+                        p.redeemedAt = nowISO();
+                        p.redeemedValue = 0;
+                    }
+                    continue;
+                }
+
                 console.log(`  🏆 ${pos?.label || 'position'}: WON! Redeeming ${shares} shares ($${value.toFixed(2)})...`);
 
-                const tx = await ctf.redeemPositions(
-                    USDC_E_ADDRESS,
-                    ethers.constants.HashZero,
-                    condId,
-                    [1, 2],
-                    GAS_OVERRIDES,
-                );
+                // Temperature markets are neg-risk — use NegRiskAdapter
+                // For non-neg-risk, use CTF directly
+                let tx;
+                // Temperature markets are all neg-risk on Polymarket
+                const isNegRisk = session.negRisk !== false; // Default true for temperature
+                if (isNegRisk) {
+                    const adapter = new ethers.Contract(NEG_RISK_ADAPTER_ADDR, NEG_RISK_ADAPTER_ABI, wallet);
+                    console.log(`     📝 Calling NegRiskAdapter.redeemPositions...`);
+                    tx = await adapter.redeemPositions(
+                        condId,
+                        [1, 2],
+                        GAS_OVERRIDES,
+                    );
+                } else {
+                    console.log(`     📝 Calling CTF.redeemPositions...`);
+                    tx = await ctf.redeemPositions(
+                        USDC_E_ADDRESS,
+                        ethers.constants.HashZero,
+                        condId,
+                        [1, 2],
+                        GAS_OVERRIDES,
+                    );
+                }
 
                 console.log(`     TX: ${tx.hash}`);
                 const receipt = await tx.wait();
