@@ -56,6 +56,8 @@ export function daysUntil(targetDate) {
  */
 export function getPhase(targetDate) {
     const days = daysUntil(targetDate);
+    if (days >= config.phases.scoutDaysMax) return 'scout';
+    if (days === config.phases.scoutDaysMax - 1) return 'track';
     if (days >= config.phases.buyDaysMin) return 'buy';
     if (days === 1) return 'monitor';
     return 'resolve';  // days <= 0
@@ -91,4 +93,16 @@ export function formatDateForSlug(isoDate) {
  */
 export function nowISO() {
     return new Date().toISOString();
+}
+
+/**
+ * Get a date N days from today in YYYY-MM-DD format in Eastern Time
+ * @param {number} daysAhead
+ * @returns {string}
+ */
+export function getDateOffsetET(daysAhead) {
+    const now = new Date();
+    const target = new Date(now);
+    target.setDate(target.getDate() + daysAhead);
+    return target.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }

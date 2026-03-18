@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createOrResumeSession, runMonitoringCycle, stopSession, loadSession } from './services/monitor.js';
-import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from './utils/dateUtils.js';
+import { getTodayET, getTomorrowET, getTargetDateET, getDateOffsetET, daysUntil, getPhase } from './utils/dateUtils.js';
 import { config } from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -37,15 +37,19 @@ for (let i = 0; i < args.length; i++) {
 // ── Console Formatting ──────────────────────────────────────────────────
 
 const PHASE_LABELS = {
+    scout: '🔭 SCOUT',
+    track: '📈 TRACK',
     buy: '🛒 BUY',
     monitor: '👁️  MONITOR',
     resolve: '🎯 RESOLVE',
 };
 
 const PHASE_COLORS = {
-    buy: '\x1b[32m',      // green
-    monitor: '\x1b[33m',  // yellow
-    resolve: '\x1b[31m',  // red
+    scout: '\x1b[36m',     // cyan
+    track: '\x1b[35m',     // magenta
+    buy: '\x1b[32m',       // green
+    monitor: '\x1b[33m',   // yellow
+    resolve: '\x1b[31m',   // red
 };
 
 const RESET = '\x1b[0m';
@@ -150,15 +154,14 @@ function printResolution(resolution) {
  * @returns {{ date: string, phase: string }[]}
  */
 function getPortfolioDates() {
-    const today = getTodayET();
-    const tomorrow = getTomorrowET();
-    const dayAfter = getTargetDateET();
-
-    return [
-        { date: today, phase: 'resolve' },
-        { date: tomorrow, phase: 'monitor' },
-        { date: dayAfter, phase: 'buy' },
-    ];
+    const maxDays = config.phases.scoutDaysMax;
+    const dates = [];
+    for (let i = 0; i <= maxDays; i++) {
+        const date = getDateOffsetET(i);
+        const phase = getPhase(date);
+        dates.push({ date, phase });
+    }
+    return dates;
 }
 
 /**

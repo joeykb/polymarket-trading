@@ -406,6 +406,39 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // Forecast pipeline — scout/track sessions
+    if (url.pathname === '/api/pipeline') {
+        const dates = listAvailableDates();
+        const pipeline = [];
+
+        for (const date of dates) {
+            const session = loadSessionData(date);
+            if (!session) continue;
+            const phase = session.phase || getPhase(date);
+            if (phase !== 'scout' && phase !== 'track') continue;
+
+            pipeline.push({
+                date,
+                phase,
+                forecastHistory: session.forecastHistory || [],
+                trend: session.trend || null,
+                latestForecast: session.snapshots?.length
+                    ? session.snapshots[session.snapshots.length - 1].forecastTempF
+                    : null,
+                targetRange: session.snapshots?.length
+                    ? session.snapshots[session.snapshots.length - 1].target?.question?.match(/(\d+-\d+)/)?.[1] || null
+                    : null,
+            });
+        }
+
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify({ pipeline }));
+        return;
+    }
+
     // Liquidity endpoint — proxy to dedicated liquidity microservice
     if (url.pathname === '/api/liquidity') {
         const date = url.searchParams.get('date');
@@ -1534,6 +1567,13 @@ function getDashboardHTML(defaultDate) {
             html += '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">Connecting to order book stream...</div>';
             html += '</div></div>';
 
+            // Forecast Pipeline (Scout/Track observations)
+            html += '<div class="card" id="pipelineCard" style="display:none;">';
+            html += '<div class="card-header"><span class="card-title">🔭 Forecast Pipeline</span><span id="pipelineCount" style="font-size:12px;color:var(--text-muted);">loading...</span></div>';
+            html += '<div class="card-body" id="pipelineBody" style="padding:0;">';
+            html += '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">Loading pipeline data...</div>';
+            html += '</div></div>';
+
             // Trade Log
             html += '<div class="card" id="tradeLogCard">';
             html += '<div class="card-header"><span class="card-title">📋 Trade Log</span><span id="tradeLogCount" style="font-size:12px;color:var(--text-muted);">loading...</span></div>';
@@ -1566,6 +1606,9 @@ function getDashboardHTML(defaultDate) {
 
             // Start liquidity polling
             fetchLiquidity();
+
+            // Start pipeline polling
+            fetchPipeline();
 
             // Start trade log polling
             fetchTradeLog();
@@ -1659,6 +1702,90 @@ function getDashboardHTML(defaultDate) {
                 // silent
             }
             liquidityTimer = setTimeout(fetchLiquidity, ${config.dashboard.liquidityPollMs});
+        }
+
+        // ── Forecast Pipeline ───────────────────────────
+        let pipelineTimer = null;
+        async function fetchPipeline() {
+            if (pipelineTimer) clearTimeout(pipelineTimer);
+            try {
+                const res = await fetch('/api/pipeline');
+                const data = await res.json();
+                renderPipeline(data);
+            } catch { /* silent */ }
+            pipelineTimer = setTimeout(fetchPipeline, 30000);
+        }
+
+        function renderPipeline(data) {
+            const card = document.getElementById('pipelineCard');
+            const body = document.getElementById('pipelineBody');
+            const countEl = document.getElementById('pipelineCount');
+            if (!card || !body) return;
+            if (!data || !data.pipeline || data.pipeline.length === 0) {
+                card.style.display = 'none';
+                return;
+            }
+            card.style.display = 'block';
+            if (countEl) countEl.textContent = data.pipeline.length + ' scouting';
+
+            var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+            html += '<thead><tr style="border-bottom:1px solid var(--border);">';
+            html += '<th style="padding:10px 14px;text-align:left;color:var(--text-secondary);font-weight:600;">Date</th>';
+            html += '<th style="padding:10px 8px;text-align:center;color:var(--text-secondary);font-weight:600;">Phase</th>';
+            html += '<th style="padding:10px 8px;text-align:left;color:var(--text-secondary);font-weight:600;">Current Forecast</th>';
+            html += '<th style="padding:10px 8px;text-align:left;color:var(--text-secondary);font-weight:600;">Forecast History</th>';
+            html += '<th style="padding:10px 14px;text-align:center;color:var(--text-secondary);font-weight:600;">Trend</th>';
+            html += '</tr></thead><tbody>';
+
+            for (var i = 0; i < data.pipeline.length; i++) {
+                var p = data.pipeline[i];
+                var phaseBadge = p.phase === 'scout'
+                    ? '<span style="background:rgba(6,182,212,0.15);color:#22d3ee;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83d\\udd2d Scout</span>'
+                    : '<span style="background:rgba(168,85,247,0.15);color:#c084fc;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83d\\udcc8 Track</span>';
+
+                var forecastStr = p.latestForecast ? p.latestForecast + '\\u00b0F' : '--';
+                var rangeStr = p.targetRange ? ' (' + p.targetRange + '\\u00b0F)' : '';
+
+                // Build forecast history progression
+                var historyParts = [];
+                if (p.forecastHistory && p.forecastHistory.length > 0) {
+                    var sorted = p.forecastHistory.slice().sort(function(a,b) { return b.daysOut - a.daysOut; });
+                    for (var j = 0; j < sorted.length; j++) {
+                        var h = sorted[j];
+                        var label = 'T+' + h.daysOut + ': ' + h.forecast + '\\u00b0F';
+                        if (j > 0) {
+                            var delta = h.forecast - sorted[j-1].forecast;
+                            var sign = delta > 0 ? '+' : '';
+                            var col = delta > 0 ? 'var(--accent-red)' : delta < 0 ? 'var(--accent-cyan)' : 'var(--text-muted)';
+                            label += ' <span style="color:' + col + ';font-size:11px;">(' + sign + delta + ')</span>';
+                        }
+                        historyParts.push(label);
+                    }
+                }
+                var historyStr = historyParts.length > 0 ? historyParts.join(' \\u2192 ') : '<span style="color:var(--text-muted);">Awaiting first observation</span>';
+
+                // Trend badge
+                var trendBadge = '<span style="color:var(--text-muted);font-size:12px;">--</span>';
+                if (p.trend && p.trend.direction !== 'neutral' && p.forecastHistory && p.forecastHistory.length >= 2) {
+                    var arrow = p.trend.direction === 'warming' ? '\\u2197\\ufe0f' : '\\u2198\\ufe0f';
+                    var tColor = p.trend.direction === 'warming' ? 'var(--accent-red)' : 'var(--accent-cyan)';
+                    var tSign = p.trend.magnitude > 0 ? '+' : '';
+                    trendBadge = '<span style="color:' + tColor + ';font-weight:700;font-size:13px;">' + arrow + ' ' + tSign + p.trend.magnitude + '\\u00b0F</span>';
+                } else if (p.forecastHistory && p.forecastHistory.length >= 2) {
+                    trendBadge = '<span style="color:var(--text-muted);font-size:12px;">\\u2194\\ufe0f Neutral</span>';
+                }
+
+                html += '<tr style="border-bottom:1px solid var(--border);">';
+                html += '<td style="padding:10px 14px;font-weight:600;white-space:nowrap;">' + p.date + '</td>';
+                html += '<td style="padding:10px 8px;text-align:center;">' + phaseBadge + '</td>';
+                html += '<td style="padding:10px 8px;font-family:JetBrains Mono,monospace;font-weight:600;">' + forecastStr + rangeStr + '</td>';
+                html += '<td style="padding:10px 8px;font-size:12px;line-height:1.6;">' + historyStr + '</td>';
+                html += '<td style="padding:10px 14px;text-align:center;">' + trendBadge + '</td>';
+                html += '</tr>';
+            }
+
+            html += '</tbody></table>';
+            body.innerHTML = html;
         }
 
         // ── Trade Log ─────────────────────────────────

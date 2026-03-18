@@ -20,7 +20,7 @@ import { selectRanges } from './rangeSelector.js';
 import { executeRealBuyOrder } from './trading.js';
 import { executeSellOrder } from './trading.js';
 import nodeHttp from 'http';
-import { nowISO, daysUntil, getPhase } from '../utils/dateUtils.js';
+import { nowISO, daysUntil, getPhase, getTodayET } from '../utils/dateUtils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,6 +103,39 @@ async function tryPlaceBuyOrder(snapshot, liqTokens = []) {
     }
     // If real order failed or returned null, don't fake a buy
     return null;
+}
+
+// ── Forecast Trend Analysis ─────────────────────────────────────────────
+
+/**
+ * Analyze forecast history to determine trend direction.
+ * Compares earliest observation to latest to detect warming/cooling.
+ *
+ * @param {Array<{date:string, daysOut:number, forecast:number}>} forecastHistory
+ * @returns {{ direction: 'warming'|'cooling'|'neutral', magnitude: number, points: Array }}
+ */
+function analyzeTrend(forecastHistory) {
+    if (!forecastHistory || forecastHistory.length < 2) {
+        return { direction: 'neutral', magnitude: 0, points: forecastHistory || [] };
+    }
+
+    // Sort by daysOut descending (earliest observation first)
+    const sorted = [...forecastHistory].sort((a, b) => b.daysOut - a.daysOut);
+    const first = sorted[0].forecast;       // earliest (e.g. T+4)
+    const last = sorted[sorted.length - 1].forecast; // latest (e.g. T+2)
+    const totalDelta = last - first;
+
+    const threshold = config.phases.trendThreshold;
+
+    let direction = 'neutral';
+    if (totalDelta >= threshold) direction = 'warming';
+    if (totalDelta <= -threshold) direction = 'cooling';
+
+    return {
+        direction,
+        magnitude: totalDelta,
+        points: sorted,
+    };
 }
 
 /**
@@ -369,7 +402,7 @@ export function detectAlerts(current, previous, session) {
 
     // 2. Phase change
     if (previous && current.phase !== previous.phase) {
-        const phaseLabels = { buy: '🛒 Buy', monitor: '👁️ Monitor', resolve: '🎯 Resolve' };
+        const phaseLabels = { scout: '🔭 Scout', track: '📈 Track', buy: '🛒 Buy', monitor: '👁️ Monitor', resolve: '🎯 Resolve' };
         alerts.push({
             timestamp: now,
             type: 'phase_change',
@@ -794,6 +827,36 @@ export async function runMonitoringCycle(session) {
 
     // Update session phase
     session.phase = snapshot.phase;
+
+    // ── Forecast History Recording (all phases) ──────────────────────
+    // Record one observation per day for trend analysis
+    if (!session.forecastHistory) session.forecastHistory = [];
+    const todayET = getTodayET();
+    const alreadyRecordedToday = session.forecastHistory.some(
+        h => h.date === todayET
+    );
+    if (!alreadyRecordedToday && snapshot.forecastTempF != null) {
+        session.forecastHistory.push({
+            date: todayET,
+            daysOut: snapshot.daysUntilTarget,
+            forecast: snapshot.forecastTempF,
+            source: snapshot.forecastSource,
+            timestamp: nowISO(),
+        });
+    }
+
+    // ── Trend Analysis ──────────────────────────────────────────────
+    // Compute trend from accumulated forecast history
+    session.trend = analyzeTrend(session.forecastHistory);
+
+    // ── Scout/Track: observation only — skip buy/sell logic ──────────
+    if (snapshot.phase === 'scout' || snapshot.phase === 'track') {
+        // Append snapshot and save — no buy/sell actions
+        session.snapshots.push(snapshot);
+        session.alerts = [...(session.alerts || []), ...alerts];
+        saveSession(session);
+        return { snapshot, alerts };
+    }
 
     // Place buy (immediate or liquidity-gated)
     const buySignal = shouldPlaceBuy(session, snapshot);

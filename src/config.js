@@ -93,7 +93,9 @@ const SCHEMA = {
     'dashboard.liquidityPollMs':   { key: 'DASHBOARD_LIQUIDITY_MS',  default: 5000,  description: 'Liquidity panel poll interval (ms)' },
 
     // Phase thresholds
-    'phases.buyDaysMin': { key: 'PHASE_BUY_DAYS_MIN', default: 2, description: 'Days before target = buy phase' },
+    'phases.buyDaysMin':      { key: 'PHASE_BUY_DAYS_MIN',   default: 2, description: 'Days before target = buy phase' },
+    'phases.scoutDaysMax':    { key: 'PHASE_SCOUT_DAYS_MAX', default: 4, description: 'How far ahead to start scouting forecasts' },
+    'phases.trendThreshold':  { key: 'TREND_THRESHOLD_F',    default: 2, description: '°F shift over scout window to declare a trend' },
 };
 
 // ── Overrides File ──────────────────────────────────────────────────────
