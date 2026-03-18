@@ -227,6 +227,22 @@ function saveSession(session) {
     if (!fs.existsSync(OUTPUT_DIR)) {
         fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     }
+
+    // Hot-patch: check for external patch file and merge into in-memory session
+    const patchPath = join(OUTPUT_DIR, `patch-${session.targetDate}.json`);
+    if (fs.existsSync(patchPath)) {
+        try {
+            const patch = JSON.parse(fs.readFileSync(patchPath, 'utf-8'));
+            console.log(`  🔧 HOT-PATCH: applying patch for ${session.targetDate}`);
+            Object.assign(session, patch);
+            // Delete patch file after applying
+            fs.unlinkSync(patchPath);
+            console.log(`  ✅ Patch applied and removed`);
+        } catch (err) {
+            console.log(`  ⚠️  Failed to apply patch: ${err.message}`);
+        }
+    }
+
     const filePath = getSessionPath(session.targetDate);
     fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
 }
