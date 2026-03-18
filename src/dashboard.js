@@ -1690,7 +1690,8 @@ function getDashboardHTML(defaultDate) {
 
                 // Determine execution type
                 const allFailed = t.positions.every(function(p) { return p.status === 'failed'; });
-                const anyPlaced = t.positions.some(function(p) { return p.status === 'placed'; });
+                const anyPlaced = t.positions.some(function(p) { return p.status === 'placed' || p.status === 'filled'; });
+                const anyPartial = t.positions.some(function(p) { return p.status === 'partial'; });
                 let execBadge = '';
                 if (t.mode === 'dry-run') {
                     execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83e\\uddea DRY RUN</span>';
@@ -1699,6 +1700,8 @@ function getDashboardHTML(defaultDate) {
                     execBadge = '<span style="background:rgba(239,68,68,0.15);color:#f87171;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="' + escapeHtml(firstErr) + '">\\u274c FAILED</span>';
                 } else if (anyPlaced) {
                     execBadge = '<span style="background:rgba(16,185,129,0.15);color:#34d399;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83d\\udfe2 LIVE</span>';
+                } else if (anyPartial) {
+                    execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\ud83d\\udfe1 PARTIAL</span>';
                 } else {
                     execBadge = '<span style="background:rgba(107,114,128,0.15);color:#9ca3af;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\\u2753 Unknown</span>';
                 }
@@ -1706,8 +1709,8 @@ function getDashboardHTML(defaultDate) {
                 // Position details with clear icons
                 const posLabels = t.positions.map(function(p) {
                     var icon, tipText = '';
-                    if (p.status === 'placed' && t.mode !== 'dry-run') {
-                        icon = '\\ud83d\\udfe2';  // green circle = real
+                    if ((p.status === 'placed' || p.status === 'filled') && t.mode !== 'dry-run') {
+                        icon = '\\ud83d\\udfe2';  // green circle = filled/placed
                     } else if (t.mode === 'dry-run') {
                         icon = '\\ud83e\\uddea';  // flask = simulated
                     } else {
