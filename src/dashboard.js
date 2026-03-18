@@ -178,27 +178,46 @@ function computeLivePnL(buyOrder, latestSnapshot, liquidityBids) {
     const positions = [];
 
     for (const pos of buyOrder.positions) {
-        const currentRange = currentRanges[pos.label];
-        // Match by question text (stable across range shifts) for live CLOB bid
-        const clobBid = bids[pos.question];
-        const currentPrice = clobBid > 0
-            ? clobBid
-            : (currentRange?.yesPrice ?? pos.buyPrice);
-        const pnl = parseFloat((currentPrice - pos.buyPrice).toFixed(4));
-        const pnlPct = pos.buyPrice > 0
-            ? parseFloat(((pnl / pos.buyPrice) * 100).toFixed(1))
+        const shares = pos.shares || 1;
+        const buyCost = pos.buyPrice * shares;
+
+        let currentPrice;
+        let sold = false;
+        let sellPrice = 0;
+
+        if (pos.soldAt && pos.soldStatus === 'placed') {
+            // Position was sold — use actual sell price
+            sold = true;
+            sellPrice = typeof pos.soldAt === 'number' ? pos.soldAt : parseFloat(pos.soldAt) || 0;
+            currentPrice = sellPrice;
+        } else {
+            // Still held — use live CLOB bid
+            const currentRange = currentRanges[pos.label];
+            const clobBid = bids[pos.question];
+            currentPrice = clobBid > 0
+                ? clobBid
+                : (currentRange?.yesPrice ?? pos.buyPrice);
+        }
+
+        const currentValue = currentPrice * shares;
+        const pnl = parseFloat((currentValue - buyCost).toFixed(4));
+        const pnlPct = buyCost > 0
+            ? parseFloat(((pnl / buyCost) * 100).toFixed(1))
             : 0;
 
-        totalBuyCost += pos.buyPrice;
-        totalCurrentValue += currentPrice;
+        totalBuyCost += buyCost;
+        totalCurrentValue += currentValue;
 
         positions.push({
             label: pos.label,
             question: pos.question,
             buyPrice: pos.buyPrice,
             currentPrice,
+            shares,
             pnl,
             pnlPct,
+            sold,
+            sellPrice: sold ? sellPrice : null,
         });
     }
 
@@ -353,6 +372,9 @@ const server = http.createServer(async (req, res) => {
                     status: p.status || 'placed',
                     orderId: p.orderId || null,
                     error: p.error || null,
+                    soldAt: p.soldAt || null,
+                    soldStatus: p.soldStatus || null,
+                    sellPrice: (p.soldAt && p.soldStatus === 'placed') ? (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0) : null,
                 })),
                 totalCost: bo.totalCost,
                 maxProfit: bo.maxProfit,
@@ -1708,8 +1730,18 @@ function getDashboardHTML(defaultDate) {
 
                 // Position details with clear icons
                 const posLabels = t.positions.map(function(p) {
-                    var icon, tipText = '';
-                    if ((p.status === 'placed' || p.status === 'filled') && t.mode !== 'dry-run') {
+                    var icon, tipText = '', extraInfo = '';
+                    if (p.soldAt && p.soldStatus === 'placed') {
+                        // Sold position
+                        icon = '\\ud83d\\udcb5';  // money = sold
+                        var sp = p.sellPrice || (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0);
+                        var posShares = p.shares || 1;
+                        var realizedPnl = (sp - p.buyPrice) * posShares;
+                        var pnlSign = realizedPnl >= 0 ? '+' : '';
+                        var pnlColor = realizedPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                        extraInfo = ' <span style="background:rgba(107,114,128,0.25);color:#9ca3af;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">SOLD @$' + sp.toFixed(2) + '</span>';
+                        extraInfo += ' <span style="color:' + pnlColor + ';font-size:11px;font-weight:600;">' + pnlSign + '$' + realizedPnl.toFixed(3) + '</span>';
+                    } else if ((p.status === 'placed' || p.status === 'filled') && t.mode !== 'dry-run') {
                         icon = '\\ud83d\\udfe2';  // green circle = filled/placed
                     } else if (t.mode === 'dry-run') {
                         icon = '\\ud83e\\uddea';  // flask = simulated
@@ -1719,7 +1751,7 @@ function getDashboardHTML(defaultDate) {
                     }
                     var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
                     var shares = p.shares ? ' \\u00d7' + p.shares : '';
-                    var label = icon + ' ' + p.label + ' @' + priceStr + shares;
+                    var label = icon + ' ' + p.label + ' @' + priceStr + shares + extraInfo;
                     if (tipText) {
                         label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
                     }
