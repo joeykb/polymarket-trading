@@ -679,14 +679,39 @@ async function placeSellOrder(position, tradingCfg) {
         }
 
         console.log(`  ✅ Sell order placed: ${orderID}`);
+
+        // Poll for actual fill price (GTC orders may fill at better than limit price)
+        let fillPrice = price;
+        let fillProceeds = proceeds;
+        try {
+            // Wait briefly for CLOB to match the order
+            await new Promise(r => setTimeout(r, 3000));
+            const orderInfo = await client.getOrder(orderID);
+            if (orderInfo) {
+                const avgPrice = parseFloat(orderInfo.associate_trades?.reduce(
+                    (acc, t) => acc + parseFloat(t.price) * parseFloat(t.size), 0
+                ) / parseFloat(orderInfo.size_matched || size)) || 0;
+                if (avgPrice > 0) {
+                    fillPrice = avgPrice;
+                    fillProceeds = parseFloat((fillPrice * size).toFixed(4));
+                    console.log(`  💰 Actual fill price: $${fillPrice.toFixed(4)} (limit was $${price.toFixed(4)})`);
+                } else if (parseFloat(orderInfo.size_matched || 0) > 0) {
+                    // size was matched but we can't compute avg price — use best bid as estimate
+                    fillPrice = price;
+                }
+            }
+        } catch (fillErr) {
+            console.log(`  ℹ️  Could not check fill price: ${fillErr.message} — using limit price`);
+        }
+
         return {
             success: true,
             dryRun: false,
             orderId: orderID,
             status: response.status,
-            price,
+            price: fillPrice,
             size,
-            proceeds,
+            proceeds: fillProceeds,
             tokenId,
         };
     } catch (err) {
