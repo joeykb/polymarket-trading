@@ -685,6 +685,25 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
             console.log(`  🔄 Resetting liquidity wait (will re-trigger at buy hour)`);
         }
 
+        // If resolve sell was attempted but all positions failed, allow retry
+        if (existing.resolveSellExecuted && existing.sellOrders?.length > 0) {
+            const lastSell = existing.sellOrders[existing.sellOrders.length - 1];
+            const allSellsFailed = lastSell.positions?.every(p => p.status === 'failed');
+            if (allSellsFailed) {
+                console.log(`  🔄 Resetting failed resolve sell — will retry with resolved token IDs`);
+                existing.resolveSellExecuted = false;
+                existing.sellOrders.pop();
+                // Clear sold status on positions
+                for (const p of existing.buyOrder?.positions || []) {
+                    if (p.soldStatus === 'failed') {
+                        p.soldAt = undefined;
+                        p.soldStatus = undefined;
+                        p.soldOrderId = undefined;
+                    }
+                }
+            }
+        }
+
         saveSession(existing);
         console.log(`  📋 Resuming existing session (${existing.snapshots.length} snapshots, phase: ${existing.phase})`);
         return existing;
@@ -788,13 +807,29 @@ export async function runMonitoringCycle(session) {
                     if (pos.status === 'failed' || pos.status === 'rejected') continue;
                     if (pos.soldAt) continue; // Already sold
 
+                    // Resolve clobTokenId — fall back to snapshot data if not stored on position
+                    let tokenId = pos.clobTokenId || pos.clobTokenIds?.[0] || pos.tokenId;
+                    if (!tokenId) {
+                        // Look up from snapshot by matching question text
+                        for (const key of ['target', 'below', 'above']) {
+                            const snapRange = snapshot[key];
+                            if (snapRange && snapRange.question === pos.question && snapRange.clobTokenIds?.[0]) {
+                                tokenId = snapRange.clobTokenIds[0];
+                                pos.clobTokenIds = snapRange.clobTokenIds;
+                                pos.tokenId = tokenId;
+                                console.log(`     🔧 Resolved tokenId for ${pos.label} from snapshot`);
+                                break;
+                            }
+                        }
+                    }
+
                     if (pos.question === currentTargetQ) {
                         positionsToKeep.push(pos);
                     } else {
                         positionsToSell.push({
                             label: pos.label,
                             question: pos.question,
-                            clobTokenId: pos.clobTokenId || pos.clobTokenIds?.[0],
+                            clobTokenId: tokenId,
                             conditionId: pos.conditionId,
                             shares: pos.shares || 1,
                         });
@@ -869,11 +904,26 @@ export async function runMonitoringCycle(session) {
                 for (const pos of session.buyOrder.positions) {
                     if (pos.status === 'failed' || pos.status === 'rejected') continue;
                     if (pos.soldAt) continue;
+
+                    // Resolve tokenId from snapshot if missing
+                    let tokenId = pos.clobTokenId || pos.clobTokenIds?.[0] || pos.tokenId;
+                    if (!tokenId) {
+                        for (const key of ['target', 'below', 'above']) {
+                            const snapRange = snapshot[key];
+                            if (snapRange && snapRange.question === pos.question && snapRange.clobTokenIds?.[0]) {
+                                tokenId = snapRange.clobTokenIds[0];
+                                pos.clobTokenIds = snapRange.clobTokenIds;
+                                pos.tokenId = tokenId;
+                                break;
+                            }
+                        }
+                    }
+
                     if (!currentRangeQuestions.has(pos.question)) {
                         positionsToSell.push({
                             label: pos.label,
                             question: pos.question,
-                            clobTokenId: pos.clobTokenId || pos.clobTokenIds?.[0],
+                            clobTokenId: tokenId,
                             conditionId: pos.conditionId,
                             shares: pos.shares || 1,
                         });
