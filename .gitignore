@@ -22,6 +22,7 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+*.code-workspace
 
 # Gemini AI
 .gemini/
