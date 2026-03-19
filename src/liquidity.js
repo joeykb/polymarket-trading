@@ -28,7 +28,7 @@ const OUTPUT_DIR = path.resolve(__dirname, '../output');
 const PORT = parseInt(process.env.LIQUIDITY_PORT || '3001');
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
-const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 10_000; // Polymarket requires PING every 10s
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
 const MAX_HISTORY = 200;
@@ -119,7 +119,7 @@ function connectDate(stream) {
         stream.lastError = null;
 
         const tokenIds = stream.tokens.map(t => t.tokenId);
-        const sub = { type: 'market', assets_ids: tokenIds };
+        const sub = { type: 'market', assets_ids: tokenIds, custom_feature_enabled: true };
         stream.ws.send(JSON.stringify(sub));
         console.log(`  ✅ [${stream.date}] Connected — ${stream.tokens.map(t => t.label).join(', ')}`);
 
@@ -127,14 +127,16 @@ function connectDate(stream) {
         clearInterval(stream.heartbeatTimer);
         stream.heartbeatTimer = setInterval(() => {
             if (stream.ws?.readyState === WebSocket.OPEN) {
-                stream.ws.ping();
+                stream.ws.send('PING');
             }
         }, HEARTBEAT_INTERVAL_MS);
     });
 
     stream.ws.on('message', (raw) => {
+        const text = raw.toString();
+        if (text === 'PONG') return;
         try {
-            const data = JSON.parse(raw.toString());
+            const data = JSON.parse(text);
             handleMessage(stream, data);
         } catch { /* ignore non-JSON */ }
     });
@@ -199,6 +201,16 @@ function handleMessage(stream, data) {
                     entry.lastTrade = parseFloat(event.price || event.last_trade_price);
                     entry.lastUpdate = new Date().toISOString();
                 }
+                break;
+            case 'tick_size_change':
+                console.log(`  ⚠️  [${stream.date}] TICK SIZE CHANGE: ${entry.label} ${event.old_tick_size} → ${event.new_tick_size}`);
+                entry.tickSize = event.new_tick_size;
+                break;
+            case 'market_resolved':
+                console.log(`  🏁 [${stream.date}] MARKET RESOLVED: ${entry.label} winner=${event.winning_outcome}`);
+                entry.resolved = true;
+                entry.winningOutcome = event.winning_outcome;
+                entry.winningAssetId = event.winning_asset_id;
                 break;
         }
     }

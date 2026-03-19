@@ -215,6 +215,17 @@ function handleMessage(data) {
             case 'last_trade_price':
                 handleLastTrade(entry, event);
                 break;
+            case 'tick_size_change':
+                // Critical: if tick size changes and we use the old one, orders are rejected
+                console.log(`  ⚠️  TICK SIZE CHANGE: ${entry.label} ${event.old_tick_size} → ${event.new_tick_size}`);
+                entry.tickSize = event.new_tick_size;
+                break;
+            case 'market_resolved':
+                console.log(`  🏁 MARKET RESOLVED: ${entry.label} winner=${event.winning_outcome}`);
+                entry.resolved = true;
+                entry.winningOutcome = event.winning_outcome;
+                entry.winningAssetId = event.winning_asset_id;
+                break;
             default:
                 break;
         }
