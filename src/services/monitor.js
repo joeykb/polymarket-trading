@@ -316,10 +316,11 @@ function shouldPlaceBuy(session, snapshot) {
         return false;
     }
 
-    // Check if current time is at or past buyHourEST
+    // Check if current time is at or past buyHourEST (supports decimals: 9.5 = 9:30am)
     const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-    const hour = new Date(nowET).getHours();
-    if (hour < config.monitor.buyHourEST) return false;
+    const nowDate = new Date(nowET);
+    const currentHourDecimal = nowDate.getHours() + nowDate.getMinutes() / 60;
+    if (currentHourDecimal < config.monitor.buyHourEST) return false;
 
     // If WebSocket liquidity streaming is enabled, gate the buy
     if (config.liquidity.wsEnabled) {

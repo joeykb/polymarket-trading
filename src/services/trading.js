@@ -681,27 +681,56 @@ async function placeSellOrder(position, tradingCfg) {
         console.log(`  ✅ Sell order placed: ${orderID}`);
 
         // Poll for actual fill price (GTC orders may fill at better than limit price)
+        // The CLOB fills GTC sells at the best available bid, which may be much higher
+        // than our limit. We must capture the real fill to record accurate P&L.
         let fillPrice = price;
         let fillProceeds = proceeds;
-        try {
-            // Wait briefly for CLOB to match the order
-            await new Promise(r => setTimeout(r, 3000));
-            const orderInfo = await client.getOrder(orderID);
-            if (orderInfo) {
-                const avgPrice = parseFloat(orderInfo.associate_trades?.reduce(
-                    (acc, t) => acc + parseFloat(t.price) * parseFloat(t.size), 0
-                ) / parseFloat(orderInfo.size_matched || size)) || 0;
-                if (avgPrice > 0) {
-                    fillPrice = avgPrice;
+        const maxRetries = 3;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await new Promise(r => setTimeout(r, attempt === 1 ? 3000 : 5000));
+                const orderInfo = await client.getOrder(orderID);
+                if (!orderInfo) continue;
+
+                // Method 1: average_price field (direct from CLOB)
+                if (orderInfo.average_price && parseFloat(orderInfo.average_price) > 0) {
+                    fillPrice = parseFloat(orderInfo.average_price);
                     fillProceeds = parseFloat((fillPrice * size).toFixed(4));
-                    console.log(`  💰 Actual fill price: $${fillPrice.toFixed(4)} (limit was $${price.toFixed(4)})`);
-                } else if (parseFloat(orderInfo.size_matched || 0) > 0) {
-                    // size was matched but we can't compute avg price — use best bid as estimate
-                    fillPrice = price;
+                    console.log(`  💰 Fill price (avg_price): $${fillPrice.toFixed(4)} (limit was $${price.toFixed(4)})`);
+                    break;
                 }
+
+                // Method 2: Calculate from associate_trades
+                if (orderInfo.associate_trades?.length > 0) {
+                    const totalFillValue = orderInfo.associate_trades.reduce(
+                        (acc, t) => acc + parseFloat(t.price || 0) * parseFloat(t.size || 0), 0
+                    );
+                    const totalFillSize = orderInfo.associate_trades.reduce(
+                        (acc, t) => acc + parseFloat(t.size || 0), 0
+                    );
+                    if (totalFillSize > 0) {
+                        fillPrice = totalFillValue / totalFillSize;
+                        fillProceeds = parseFloat((fillPrice * size).toFixed(4));
+                        console.log(`  💰 Fill price (trades): $${fillPrice.toFixed(4)} (limit was $${price.toFixed(4)})`);
+                        break;
+                    }
+                }
+
+                // Method 3: Check if size was matched but no trade details yet
+                const matched = parseFloat(orderInfo.size_matched || 0);
+                if (matched > 0 && attempt < maxRetries) {
+                    console.log(`  ⏳ ${matched} shares matched but no trade details yet (attempt ${attempt}/${maxRetries})`);
+                    continue; // Retry — trades may populate shortly
+                }
+            } catch (fillErr) {
+                console.log(`  ℹ️  Fill price check attempt ${attempt} failed: ${fillErr.message}`);
             }
-        } catch (fillErr) {
-            console.log(`  ℹ️  Could not check fill price: ${fillErr.message} — using limit price`);
+        }
+
+        // Warn if we're still using the limit price (likely inaccurate)
+        if (fillPrice === price) {
+            console.log(`  ⚠️  Could not determine actual fill price — recording limit price $${price.toFixed(4)}`);
+            console.log(`     The actual fill may have been higher. Check Polymarket activity for order ${orderID}`);
         }
 
         return {

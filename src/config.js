@@ -62,7 +62,7 @@ const SCHEMA = {
     'monitor.forecastShiftThreshold': { key: 'FORECAST_SHIFT_THRESHOLD', default: 1.0,  description: '°F change to trigger alert' },
     'monitor.priceSpikeThreshold':    { key: 'PRICE_SPIKE_THRESHOLD',    default: 0.05, description: 'Price change (¢) to trigger alert' },
     'monitor.rebalanceThreshold':     { key: 'REBALANCE_THRESHOLD',      default: 3.0,  description: '°F change to trigger auto-sell of out-of-range strikes' },
-    'monitor.buyHourEST':             { key: 'BUY_HOUR_EST',             default: 7,    description: 'Hour (ET) to trigger buy' },
+    'monitor.buyHourEST':             { key: 'BUY_HOUR_EST',             default: 9.5,  description: 'Hour (ET, decimal) to trigger buy (9.5 = 9:30am)' },
 
     // Liquidity streaming (WebSocket)
     'liquidity.wsEnabled':         { key: 'WS_LIQUIDITY_ENABLED',    default: 1,           description: 'Enable WebSocket liquidity streaming (1/0)' },
