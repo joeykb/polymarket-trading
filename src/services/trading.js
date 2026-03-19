@@ -282,12 +282,12 @@ async function placeSingleOrder(position, tradingCfg, liqTokenData = null) {
                 price,
                 size,
                 side: Side.BUY,
-                orderType: OrderType.GTC,
             },
             {
                 tickSize,
                 negRisk,
             },
+            OrderType.GTC,
         );
 
         // Log full response for debugging

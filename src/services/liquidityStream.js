@@ -18,7 +18,7 @@ import WebSocket from 'ws';
 import { config } from '../config.js';
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
-const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 10_000; // Polymarket requires PING every 10s
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
 const MAX_HISTORY = 200;  // Keep last 200 data points per token
@@ -123,6 +123,7 @@ function connect(tokens) {
         const sub = {
             type: 'market',
             assets_ids: tokenIds,
+            custom_feature_enabled: true, // Enables best_bid_ask, market_resolved events
         };
         const subStr = JSON.stringify(sub);
         ws.send(subStr);
@@ -133,14 +134,16 @@ function connect(tokens) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = setInterval(() => {
             if (ws?.readyState === WebSocket.OPEN) {
-                ws.ping();
+                ws.send('PING'); // Must be text message, not protocol-level ping
             }
         }, HEARTBEAT_INTERVAL_MS);
     });
 
     ws.on('message', (raw) => {
+        const text = raw.toString();
+        if (text === 'PONG') return; // Heartbeat response — ignore
         try {
-            const data = JSON.parse(raw.toString());
+            const data = JSON.parse(text);
             handleMessage(data);
         } catch (err) {
             // Occasionally non-JSON heartbeats come through
