@@ -1,14 +1,13 @@
 /**
  * Redeem resolved winning positions on Polymarket
  *
- * Follows official Polymarket docs:
- * https://docs.polymarket.com/market-makers/inventory#redeeming-after-resolution
+ * For neg-risk markets: calls NegRiskAdapter.redeemPositions(conditionId, amounts[])
+ *   - amounts = [yesTokenAmount, noTokenAmount] (NOT indexSets!)
+ *   - The adapter pulls tokens from msg.sender via ctf.safeBatchTransferFrom
+ *   - Requires CTF approval for the NegRiskAdapter (setApprovalForAll)
+ *   - Source: https://github.com/Polymarket/neg-risk-ctf-adapter/blob/main/src/NegRiskAdapter.sol
  *
- * Two-phase approach:
- *  Phase 1: Scan on-chain CTF token balances for all known positions
- *  Phase 2: Use CLOB client getMarket() to check resolution, then call
- *           CTF.redeemPositions for standard markets or
- *           NegRiskAdapter.redeemPositions for neg-risk markets
+ * For standard markets: calls CTF.redeemPositions(collateral, parentId, conditionId, indexSets[])
  *
  * Usage: node src/scripts/redeem.js [--dry-run]
  */
@@ -30,17 +29,22 @@ const POLYGON_RPC = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
 
 // Polymarket contracts on Polygon
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 
 // ABIs
 const CTF_ABI = [
     'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
     'function balanceOf(address owner, uint256 id) view returns (uint256)',
+    'function isApprovedForAll(address owner, address operator) view returns (bool)',
+    'function setApprovalForAll(address operator, bool approved)',
 ];
 
+// NegRiskAdapter.redeemPositions takes AMOUNTS not indexSets
+// amounts[0] = yes token amount, amounts[1] = no token amount
 const NEG_RISK_ADAPTER_ABI = [
-    'function redeemPositions(bytes32 conditionId, uint256[] indexSets)',
+    'function redeemPositions(bytes32 conditionId, uint256[] amounts)',
+    'function getPositionId(bytes32 questionId, bool outcome) view returns (uint256)',
 ];
 
 const ERC20_ABI = [
@@ -57,8 +61,7 @@ const GAS_OVERRIDES = {
 const PARENT_COLLECTION_ID = ethers.constants.HashZero;
 
 /**
- * Check market resolution via CLOB client (official approach per docs)
- * Returns the winning token info and neg_risk flag
+ * Check market resolution via CLOB client
  */
 async function checkMarketResolution(conditionId, clobClient) {
     try {
@@ -91,9 +94,10 @@ async function main() {
 
     const provider = new ethers.providers.StaticJsonRpcProvider(POLYGON_RPC, 137);
     const wallet = new ethers.Wallet(privateKey, provider);
-    const ctf = new ethers.Contract(CTF_CONTRACT, CTF_ABI, wallet);
+    const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, wallet);
+    const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ADAPTER_ABI, wallet);
 
-    // Initialize CLOB client for market resolution checks
+    // Initialize CLOB client
     const clobClient = new ClobClient(
         'https://clob.polymarket.com',
         137,
@@ -124,8 +128,7 @@ async function main() {
         .filter(f => f.startsWith('monitor-2026') && f.endsWith('.json'))
         .sort();
 
-    // Collect all known token IDs with their conditionIds
-    const knownTokens = []; // { tokenId, conditionId, question, date, key }
+    const knownTokens = [];
 
     for (const file of sessionFiles) {
         const session = JSON.parse(fs.readFileSync(path.join(OUTPUT_DIR, file), 'utf8'));
@@ -138,28 +141,19 @@ async function main() {
             if (!range || !range.clobTokenIds) continue;
 
             let conditionId = range.conditionId;
-
-            // Also check buyOrder positions for conditionId
             if (!conditionId && session.buyOrder) {
                 const pos = session.buyOrder.positions.find(p => p.question === range.question);
                 if (pos?.conditionId) conditionId = pos.conditionId;
             }
 
             for (const tokenId of range.clobTokenIds) {
-                knownTokens.push({
-                    tokenId,
-                    question: range.question,
-                    conditionId,
-                    date,
-                    key,
-                });
+                knownTokens.push({ tokenId, question: range.question, conditionId, date, key });
             }
         }
     }
 
     console.log(`  Found ${knownTokens.length} known token IDs across ${sessionFiles.length} sessions\n`);
 
-    // Check on-chain balances
     const heldPositions = [];
     for (const token of knownTokens) {
         try {
@@ -168,7 +162,7 @@ async function main() {
             if (balNum > 0.001) {
                 heldPositions.push({ ...token, shares: balNum, rawBalance: bal });
             }
-        } catch { /* skip invalid token IDs */ }
+        } catch { /* skip */ }
     }
 
     console.log(`  ${heldPositions.length} position(s) with on-chain balance:\n`);
@@ -178,13 +172,23 @@ async function main() {
         return;
     }
 
+    // ── Ensure CTF approval for NegRiskAdapter ──────────────────────
+    const isApproved = await ctf.isApprovedForAll(wallet.address, NEG_RISK_ADAPTER);
+    if (!isApproved) {
+        console.log(`  🔐 Setting CTF approval for NegRiskAdapter...`);
+        if (!dryRun) {
+            const approveTx = await ctf.setApprovalForAll(NEG_RISK_ADAPTER, true, GAS_OVERRIDES);
+            await approveTx.wait();
+            console.log(`  ✅ Approved\n`);
+        }
+    }
+
     // ── Phase 2: Check resolution via CLOB and redeem ─────────────────
     console.log(`📋 Phase 2: Checking market resolution via CLOB...\n`);
 
     let totalRedeemed = 0;
     let totalValue = 0;
 
-    // Group by conditionId
     const byCondition = {};
     for (const pos of heldPositions) {
         if (!pos.conditionId) {
@@ -199,7 +203,6 @@ async function main() {
         const pos0 = positions[0];
         const rangeDesc = pos0.question?.substring(55, 80) || 'unknown';
 
-        // Use CLOB client to check resolution (per official docs)
         const { resolved, winner, negRisk, winnerTokenId } = await checkMarketResolution(conditionId, clobClient);
 
         if (!resolved) {
@@ -213,7 +216,6 @@ async function main() {
             continue;
         }
 
-        // Check if we hold the winning token specifically
         const winnerPosition = winnerTokenId
             ? positions.find(p => p.tokenId === winnerTokenId)
             : positions[0];
@@ -235,21 +237,23 @@ async function main() {
             continue;
         }
 
-        // Execute redemption per official docs
         try {
             let tx;
+
             if (negRisk) {
-                // Neg-risk: use NegRiskAdapter
-                const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ADAPTER_ABI, wallet);
-                console.log(`     📝 Calling NegRiskAdapter.redeemPositions...`);
+                // Neg-risk: NegRiskAdapter.redeemPositions(conditionId, amounts[])
+                // amounts = [yesTokenAmount, noTokenAmount]
+                // The adapter calls ctf.safeBatchTransferFrom(msg.sender, ...) to pull tokens
+                const yesBalance = winnerPosition.rawBalance;
+                console.log(`     📝 NegRiskAdapter.redeemPositions(conditionId, [${ethers.utils.formatUnits(yesBalance, 6)}, 0])...`);
                 tx = await adapter.redeemPositions(
                     conditionId,
-                    [1, 2],
+                    [yesBalance, 0],
                     GAS_OVERRIDES,
                 );
             } else {
-                // Standard: use CTF directly (per docs)
-                console.log(`     📝 Calling CTF.redeemPositions...`);
+                // Standard: CTF.redeemPositions
+                console.log(`     📝 CTF.redeemPositions...`);
                 tx = await ctf.redeemPositions(
                     USDC_E_ADDRESS,
                     PARENT_COLLECTION_ID,
@@ -261,8 +265,13 @@ async function main() {
 
             console.log(`     TX: ${tx.hash}`);
             const receipt = await tx.wait();
-            console.log(`     ✅ Redeemed! Gas used: ${receipt.gasUsed.toString()}`);
 
+            if (receipt.status === 0) {
+                console.log(`     ❌ Transaction reverted on-chain!`);
+                continue;
+            }
+
+            console.log(`     ✅ Redeemed! Gas used: ${receipt.gasUsed.toString()}`);
             totalRedeemed++;
             totalValue += value;
 

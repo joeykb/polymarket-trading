@@ -18,6 +18,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/clob-client": "^5.7.0",
     "dotenv": "^17.3.1",
     "ethers": "^5.8.0",
