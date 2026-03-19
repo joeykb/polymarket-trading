@@ -42,16 +42,37 @@ if (!targetDate) {
 
 // ── Data Loading ────────────────────────────────────────────────────────
 
+/** @type {Map<string, {data: Object, mtime: number, cachedAt: number}>} */
+const sessionCache = new Map();
+const SESSION_CACHE_TTL_MS = 60_000; // 60s — session files update every 15 min
+
 function loadSessionData(date) {
     const sessionPath = path.join(OUTPUT_DIR, `monitor-${date}.json`);
-    if (fs.existsSync(sessionPath)) {
-        try {
-            return JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
-        } catch {
-            return null;
+    if (!fs.existsSync(sessionPath)) return null;
+
+    try {
+        const stat = fs.statSync(sessionPath);
+        const mtime = stat.mtimeMs;
+        const cached = sessionCache.get(date);
+
+        // Return cached if file hasn't changed and cache is fresh
+        if (cached && cached.mtime === mtime && (Date.now() - cached.cachedAt) < SESSION_CACHE_TTL_MS) {
+            return cached.data;
         }
+
+        const data = JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
+        sessionCache.set(date, { data, mtime, cachedAt: Date.now() });
+
+        // Evict old cache entries to prevent memory leak
+        if (sessionCache.size > 10) {
+            const oldest = [...sessionCache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt)[0];
+            if (oldest) sessionCache.delete(oldest[0]);
+        }
+
+        return data;
+    } catch {
+        return null;
     }
-    return null;
 }
 
 function loadObservationData(date) {
@@ -252,13 +273,36 @@ const server = http.createServer(async (req, res) => {
             overlayLivePrices(latestSnap, liveData);
         }
 
-        const livePnL = computeLivePnL(session?.buyOrder, latestSnap, liveData.bids);
+        // Attach live P&L directly (avoid spreading the 10MB+ session object)
+        if (session) {
+            session.pnl = computeLivePnL(session.buyOrder, latestSnap, liveData.bids);
+        }
 
-        // Attach live P&L to session for the response
-        const sessionWithPnL = session ? {
-            ...session,
-            pnl: livePnL,
-        } : null;
+        // Build a lightweight session response — strip the massive snapshots array
+        // (11MB+) and only send the last 20 for chart rendering. The frontend uses
+        // /api/snapshots if it needs the full history.
+        let sessionLight = null;
+        if (session) {
+            const recentSnaps = session.snapshots ? session.snapshots.slice(-20) : [];
+            sessionLight = {
+                id: session.id,
+                status: session.status,
+                phase: session.phase,
+                initialForecastTempF: session.initialForecastTempF,
+                initialTargetRange: session.initialTargetRange,
+                forecastSource: session.forecastSource,
+                rebalanceThreshold: session.rebalanceThreshold,
+                resolution: session.resolution || null,
+                buyOrder: session.buyOrder || null,
+                pnl: session.pnl,
+                redeemExecuted: session.redeemExecuted || false,
+                redeemResult: session.redeemResult || null,
+                awaitingLiquidity: session.awaitingLiquidity || false,
+                liquidityWaitStart: session.liquidityWaitStart || null,
+                snapshots: recentSnaps,
+                alerts: session.alerts || [],
+            };
+        }
 
         res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -266,7 +310,7 @@ const server = http.createServer(async (req, res) => {
         });
         res.end(JSON.stringify({
             targetDate: date,
-            session: sessionWithPnL,
+            session: sessionLight,
             observation,
             availableDates: listAvailableDates(),
             serverTime: new Date().toISOString(),
@@ -320,7 +364,23 @@ const server = http.createServer(async (req, res) => {
                     buyOrder: session.buyOrder || null,
                     pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
                 } : null,
-                latest,
+                latest: latest ? {
+                    timestamp: latest.timestamp,
+                    phase: latest.phase,
+                    forecastTempF: latest.forecastTempF,
+                    forecastChange: latest.forecastChange,
+                    forecastSource: latest.forecastSource,
+                    currentTempF: latest.currentTempF,
+                    currentConditions: latest.currentConditions,
+                    maxTodayF: latest.maxTodayF,
+                    target: latest.target,
+                    below: latest.below,
+                    above: latest.above,
+                    totalCost: latest.totalCost,
+                    eventClosed: latest.eventClosed,
+                    daysUntilTarget: latest.daysUntilTarget,
+                    _liveOverlay: latest._liveOverlay,
+                } : null,
                 hasData: !!session || !!loadObservationData(date),
             };
         }));
