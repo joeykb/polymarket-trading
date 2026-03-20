@@ -791,12 +791,40 @@ const server = http.createServer(async (req, res) => {
 
                 console.log(`\n  🔄 Retrying position #${positionId}: ${pos.label} for ${pos.target_date}`);
 
+                // Resolve market data — DB may not have conditionId/clobTokenIds
+                // (e.g. backfilled trades), so fall back to the session snapshot
+                let conditionId = pos.condition_id;
+                let clobTokenIds = pos.clob_token_ids;
+
+                if (!conditionId || !clobTokenIds) {
+                    const session = loadSessionData(pos.target_date);
+                    if (session) {
+                        const latestSnap = session.snapshots?.[session.snapshots.length - 1];
+                        if (latestSnap) {
+                            for (const rangeKey of ['target', 'below', 'above']) {
+                                const range = latestSnap[rangeKey];
+                                if (range && range.question === pos.question) {
+                                    conditionId = conditionId || range.conditionId;
+                                    clobTokenIds = clobTokenIds || (range.clobTokenIds ? JSON.stringify(range.clobTokenIds) : null);
+                                    console.log(`  📡 Resolved ${rangeKey} from session snapshot: conditionId=${conditionId}, tokenId=${range.clobTokenIds?.[0]}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!clobTokenIds) {
+                        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                        res.end(JSON.stringify({ success: false, error: 'Cannot resolve market data (clobTokenIds) for this position — no session snapshot available' }));
+                        return;
+                    }
+                }
+
                 // Call the trading service to place a single order
                 const result = await retrySinglePosition({
                     label: pos.label,
                     question: pos.question,
-                    conditionId: pos.condition_id,
-                    clobTokenIds: pos.clob_token_ids,
+                    conditionId,
+                    clobTokenIds,
                     buyPrice: pos.price,
                     marketId: pos.polymarket_id,
                 });
@@ -804,9 +832,10 @@ const server = http.createServer(async (req, res) => {
                 if (result.success) {
                     // Update the position in the DB
                     db.prepare(`
-                        UPDATE positions SET status = 'filled', shares = ?, price = ?, fill_price = ?, fill_shares = ?, order_id = ?, error = NULL
+                        UPDATE positions SET status = 'filled', shares = ?, price = ?, fill_price = ?, fill_shares = ?, order_id = ?, error = NULL,
+                        condition_id = COALESCE(condition_id, ?), clob_token_ids = COALESCE(clob_token_ids, ?)
                         WHERE id = ?
-                    `).run(result.shares, result.price, result.price, result.shares, result.orderId, positionId);
+                    `).run(result.shares, result.price, result.price, result.shares, result.orderId, conditionId, clobTokenIds, positionId);
 
                     // Update the trade's total cost
                     db.prepare(`
