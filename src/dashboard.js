@@ -423,6 +423,27 @@ const server = http.createServer(async (req, res) => {
             };
         }));
 
+        // Current temp is a single real-time value — use the most recent across all sessions
+        let latestCurrentTemp = null, latestCurrentCond = null, latestMaxToday = null, latestTs = '';
+        for (const play of plays) {
+            const lt = play.latest;
+            if (lt && lt.timestamp > latestTs && lt.currentTempF != null) {
+                latestTs = lt.timestamp;
+                latestCurrentTemp = lt.currentTempF;
+                latestCurrentCond = lt.currentConditions;
+                latestMaxToday = lt.maxTodayF;
+            }
+        }
+        if (latestCurrentTemp != null) {
+            for (const play of plays) {
+                if (play.latest) {
+                    play.latest.currentTempF = latestCurrentTemp;
+                    play.latest.currentConditions = latestCurrentCond;
+                    play.latest.maxTodayF = latestMaxToday;
+                }
+            }
+        }
+
         res.writeHead(200, {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
