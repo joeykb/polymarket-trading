@@ -2240,8 +2240,8 @@ function getDashboardHTML(defaultDate) {
                     if (tipText) {
                         label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
                     }
-                    // Add retry button for failed live positions
-                    if (p.status === 'failed' && t.mode === 'live' && p.positionId) {
+                    // Add retry button for failed live positions (only on active sessions)
+                    if (p.status === 'failed' && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
                         label += ' <button onclick="retryPosition(' + p.positionId + ', this)" class="retry-btn" title="Retry this failed order">\ud83d\udd04 Retry</button>';
                     }
                     return label;
