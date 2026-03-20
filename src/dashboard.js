@@ -819,6 +819,21 @@ const server = http.createServer(async (req, res) => {
                     }
                 }
 
+                // Fetch live WS liquidity data so we use accurate spreads
+                // (the REST CLOB API returns unreliable data for these markets)
+                let liqTokenData = null;
+                try {
+                    const liqData = await fetchLiquidityData(pos.target_date);
+                    if (liqData.tokens && liqData.tokens.length > 0) {
+                        liqTokenData = liqData.tokens.find(t => t.question === pos.question) || null;
+                        if (liqTokenData) {
+                            console.log(`  📡 Using WS liquidity: bid=$${liqTokenData.bestBid?.toFixed(4)} | ask=$${liqTokenData.bestAsk?.toFixed(4)} | depth=${liqTokenData.askDepth}`);
+                        }
+                    }
+                } catch (liqErr) {
+                    console.warn(`  ⚠️  Could not fetch WS liquidity: ${liqErr.message} — will fall back to REST`);
+                }
+
                 // Call the trading service to place a single order
                 const result = await retrySinglePosition({
                     label: pos.label,
@@ -827,7 +842,7 @@ const server = http.createServer(async (req, res) => {
                     clobTokenIds,
                     buyPrice: pos.price,
                     marketId: pos.polymarket_id,
-                });
+                }, liqTokenData);
 
                 if (result.success) {
                     // Update the position in the DB

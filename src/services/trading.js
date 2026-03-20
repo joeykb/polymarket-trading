@@ -880,9 +880,10 @@ export { getConfig };
 /**
  * Retry a single failed position — called from the dashboard API.
  * @param {Object} position - { label, question, conditionId, clobTokenIds, buyPrice }
+ * @param {Object|null} liqTokenData - WebSocket liquidity data for this token (preferred over REST)
  * @returns {Promise<Object>} - { success, orderId, shares, cost, error }
  */
-export async function retrySinglePosition(position) {
+export async function retrySinglePosition(position, liqTokenData = null) {
     const tradingCfg = getConfig();
 
     if (tradingCfg.mode !== 'live') {
@@ -897,7 +898,7 @@ export async function retrySinglePosition(position) {
     console.log(`\n  🔄 RETRY: ${position.label} — ${position.question}`);
     console.log(`     Daily spend: $${getTodaySpend().toFixed(4)} / $${tradingCfg.maxDailySpend}`);
 
-    const result = await placeSingleOrder(position, tradingCfg, null);
+    const result = await placeSingleOrder(position, tradingCfg, liqTokenData);
 
     if (result.success) {
         recordSpend(result.cost, { position: position.label, question: position.question, retry: true });
