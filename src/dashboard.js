@@ -1623,6 +1623,26 @@ function getDashboardHTML(defaultDate) {
             cursor: wait;
             opacity: 0.7;
         }
+        .sell-btn {
+            background: rgba(239,68,68,0.15);
+            color: #f87171;
+            border: 1px solid rgba(239,68,68,0.3);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-right: 4px;
+            transition: all 0.2s;
+        }
+        .sell-btn:hover {
+            background: rgba(239,68,68,0.35);
+            border-color: rgba(239,68,68,0.5);
+        }
+        .sell-btn:disabled {
+            cursor: wait;
+            opacity: 0.5;
+        }
     </style>
 </head>
 <body>
@@ -2365,6 +2385,36 @@ function getDashboardHTML(defaultDate) {
             }
         }
 
+        async function sellPosition(positionId, btnEl) {
+            if (!positionId) return;
+            if (!confirm("Sell this position at market price? This cannot be undone.")) return;
+            btnEl.disabled = true;
+            btnEl.textContent = "Selling...";
+            try {
+                const res = await fetch("/api/sell-position", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ positionId: positionId, targetDate: currentDate }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    btnEl.textContent = "Sold $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
+                    btnEl.style.background = "rgba(16,185,129,0.2)";
+                    btnEl.style.color = "#34d399";
+                    btnEl.style.borderColor = "rgba(16,185,129,0.3)";
+                    setTimeout(function() { fetchTradeLog(); }, 2000);
+                } else {
+                    alert("Sell failed: " + (data.error || "Unknown error"));
+                    btnEl.textContent = "SELL";
+                    btnEl.disabled = false;
+                }
+            } catch (err) {
+                alert("Sell error: " + err.message);
+                btnEl.textContent = "SELL";
+                btnEl.disabled = false;
+            }
+        }
+
         function renderTradeLog(data) {
             const body = document.getElementById('tradeLogBody');
             const countEl = document.getElementById('tradeLogCount');
@@ -2422,7 +2472,10 @@ function getDashboardHTML(defaultDate) {
 
                 // Position details with clear icons
                 const posLabels = t.positions.map(function(p) {
-                    var icon, tipText = '', extraInfo = '';
+                    var icon, tipText = '', extraInfo = '', sellBtn = '';
+                    if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
+                        sellBtn = '<button onclick="sellPosition(' + p.positionId + ', this)" class="sell-btn" title="Sell at market">SELL</button> ';
+                    }
                     if (p.soldAt && p.soldStatus === 'placed') {
                         // Sold position
                         icon = '\\ud83d\\udcb5';  // money = sold
@@ -2449,7 +2502,7 @@ function getDashboardHTML(defaultDate) {
                     var roleTag = (p.label && p.label !== displayLabel) ? ' <span style="color:var(--text-muted);font-size:10px;opacity:0.7;">(' + p.label + ')</span>' : '';
                     var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
                     var shares = p.shares ? ' \\u00d7' + p.shares : '';
-                    var label = icon + ' ' + displayLabel + roleTag + ' @' + priceStr + shares + extraInfo;
+                    var label = sellBtn + icon + ' ' + displayLabel + roleTag + ' @' + priceStr + shares + extraInfo;
                     if (tipText) {
                         label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
                     }
@@ -2457,10 +2510,7 @@ function getDashboardHTML(defaultDate) {
                     if (p.status === 'failed' && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
                         label += ' <button onclick="retryPosition(' + p.positionId + ', this)" class="retry-btn" title="Retry this failed order">\ud83d\udd04 Retry</button>';
                     }
-                    // Add sell button for active positions (feature-flagged)
-                    if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
-                        label += ' <button onclick="sellPosition(' + p.positionId + ', this)" class="sell-btn" title="Sell this position at market price">SELL</button>';
-                    }
+                    // Sell button handled via sellBtn prepended to label
                     return label;
                 }).join('<br>');
 
