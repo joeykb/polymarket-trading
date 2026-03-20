@@ -212,7 +212,34 @@ async function main() {
         }
 
         if (winner !== 'YES') {
-            console.log(`  ❌ ${pos0.date} ${rangeDesc}: Resolved ${winner || 'NO'} — no payout`);
+            // Losing positions can still be redeemed to clear tokens from wallet
+            const totalShares = positions.reduce((s, p) => s + p.shares, 0);
+            console.log(`  ❌ ${pos0.date} ${rangeDesc}: Resolved ${winner || 'NO'} — $0 payout, clearing ${totalShares.toFixed(2)} tokens`);
+
+            if (dryRun) {
+                console.log(`     🧪 DRY RUN — would redeem (burn) ${totalShares.toFixed(2)} losing tokens`);
+                totalRedeemed++;
+                continue;
+            }
+
+            // Redeem to burn tokens (returns $0 but clears them from portfolio)
+            try {
+                let tx;
+                const bal = positions[0].rawBalance;
+                if (negRisk) {
+                    console.log(`     📝 NegRiskAdapter.redeemPositions (burn losing)...`);
+                    tx = await adapter.redeemPositions(conditionId, [bal, 0], GAS_OVERRIDES);
+                } else {
+                    console.log(`     📝 CTF.redeemPositions (burn losing)...`);
+                    tx = await ctf.redeemPositions(USDC_E_ADDRESS, PARENT_COLLECTION_ID, conditionId, [1, 2], GAS_OVERRIDES);
+                }
+                console.log(`     TX: ${tx.hash}`);
+                await tx.wait();
+                console.log(`     ✅ Tokens burned — position cleared from portfolio`);
+                totalRedeemed++;
+            } catch (err) {
+                console.log(`     ⚠️  Burn failed: ${err.message}`);
+            }
             continue;
         }
 
@@ -221,7 +248,31 @@ async function main() {
             : positions[0];
 
         if (!winnerPosition) {
-            console.log(`  ℹ️  ${pos0.date} ${rangeDesc}: Resolved YES but we hold the NO token`);
+            // We hold the losing side — still redeem to clear
+            const totalShares = positions.reduce((s, p) => s + p.shares, 0);
+            console.log(`  ℹ️  ${pos0.date} ${rangeDesc}: Resolved YES but we hold the NO token (${totalShares.toFixed(2)} shares)`);
+
+            if (dryRun) {
+                console.log(`     🧪 DRY RUN — would burn ${totalShares.toFixed(2)} losing NO tokens`);
+                totalRedeemed++;
+                continue;
+            }
+
+            try {
+                let tx;
+                const bal = positions[0].rawBalance;
+                if (negRisk) {
+                    tx = await adapter.redeemPositions(conditionId, [0, bal], GAS_OVERRIDES);
+                } else {
+                    tx = await ctf.redeemPositions(USDC_E_ADDRESS, PARENT_COLLECTION_ID, conditionId, [1, 2], GAS_OVERRIDES);
+                }
+                console.log(`     TX: ${tx.hash}`);
+                await tx.wait();
+                console.log(`     ✅ NO tokens burned — cleared from portfolio`);
+                totalRedeemed++;
+            } catch (err) {
+                console.log(`     ⚠️  Burn failed: ${err.message}`);
+            }
             continue;
         }
 
