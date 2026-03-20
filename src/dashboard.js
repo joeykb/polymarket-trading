@@ -13,6 +13,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from './utils/dateUtils.js';
 import { config, getConfigSnapshot, updateConfig, resetConfigValue, resetAllOverrides } from './config.js';
+import { getDb } from './db/index.js';
+import { getAllTrades, getPositionsForTrade, getAllSessions, getSession } from './db/queries.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -407,53 +409,170 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Trade log — aggregated buy orders across all sessions
+    // Phase 3: reads from SQLite DB (survives pod restarts), falls back to JSON
     if (url.pathname === '/api/trades') {
-        const dates = listAvailableDates();
-        const trades = [];
+        let trades = [];
 
-        for (const date of dates) {
-            const session = loadSessionData(date);
-            if (!session?.buyOrder) continue;
+        try {
+            // Try DB-first approach
+            const db = getDb();
+            const dbTrades = db.prepare(`
+                SELECT t.*, s.phase, s.status as session_status, s.initial_forecast_temp
+                FROM trades t
+                LEFT JOIN sessions s ON t.session_id = s.id
+                WHERE t.type = 'buy'
+                ORDER BY t.target_date DESC
+            `).all();
 
-            const bo = session.buyOrder;
-            const latest = session.snapshots?.[session.snapshots.length - 1];
-            const liquidityBids = await fetchLiquidityBids(date);
-            const pnl = computeLivePnL(bo, latest, liquidityBids);
+            if (dbTrades.length > 0) {
+                for (const dbt of dbTrades) {
+                    const positions = db.prepare('SELECT * FROM positions WHERE trade_id = ?').all(dbt.id);
 
-            trades.push({
-                date,
-                placedAt: bo.placedAt,
-                mode: bo.mode || (bo.simulated ? 'dry-run' : 'live'),
-                positions: (bo.positions || []).map(p => ({
-                    label: p.label,
-                    question: p.question,
-                    buyPrice: p.buyPrice,
-                    shares: p.shares,
-                    status: p.status || 'placed',
-                    orderId: p.orderId || null,
-                    error: p.error || null,
-                    soldAt: p.soldAt || null,
-                    soldStatus: p.soldStatus || null,
-                    sellPrice: (p.soldAt && p.soldStatus === 'placed') ? (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0) : null,
-                })),
-                totalCost: bo.totalCost,
-                maxProfit: bo.maxProfit,
-                pnl: pnl ? {
-                    totalPnL: pnl.totalPnL,
-                    totalPnLPct: pnl.totalPnLPct,
-                    totalBuyCost: pnl.totalBuyCost,
-                    totalCurrentValue: pnl.totalCurrentValue,
-                } : null,
-                sessionStatus: session.status,
-                phase: session.phase || getPhase(date),
-                resolution: session.resolution ? {
-                    keep: session.resolution.keep,
-                    discardLabels: session.resolution.discardLabels,
-                } : null,
-            });
+                    // Get latest snapshot for P&L (try DB first, fall back to JSON)
+                    let latestSnap = null;
+                    if (dbt.session_id) {
+                        const dbSnap = db.prepare(
+                            'SELECT * FROM snapshots WHERE session_id = ? ORDER BY id DESC LIMIT 1'
+                        ).get(dbt.session_id);
+                        if (dbSnap) {
+                            latestSnap = {
+                                target: dbSnap.target_question ? { question: dbSnap.target_question, yesPrice: dbSnap.target_price } : null,
+                                below: dbSnap.below_question ? { question: dbSnap.below_question, yesPrice: dbSnap.below_price } : null,
+                                above: dbSnap.above_question ? { question: dbSnap.above_question, yesPrice: dbSnap.above_price } : null,
+                            };
+                        }
+                    }
+                    // Fallback to JSON snapshot if DB doesn't have it
+                    if (!latestSnap) {
+                        const session = loadSessionData(dbt.target_date);
+                        latestSnap = session?.snapshots?.[session.snapshots.length - 1] || null;
+                    }
+
+                    const liquidityBids = await fetchLiquidityBids(dbt.target_date);
+
+                    // Build buyOrder-compatible object for P&L computation
+                    const buyOrderCompat = {
+                        positions: positions.map(p => ({
+                            label: p.label,
+                            question: p.question,
+                            buyPrice: p.price,
+                            shares: p.shares,
+                            soldAt: p.sold_at ? (p.sell_price || p.sold_at) : null,
+                            soldStatus: p.status === 'sold' ? 'placed' : null,
+                        })),
+                    };
+                    const pnl = computeLivePnL(buyOrderCompat, latestSnap, liquidityBids);
+
+                    // Parse metadata JSON
+                    let metadata = {};
+                    try { metadata = dbt.metadata ? JSON.parse(dbt.metadata) : {}; } catch { /* ignore */ }
+
+                    // Check for sells on this date
+                    const sells = db.prepare(
+                        "SELECT * FROM trades WHERE target_date = ? AND type = 'sell' AND market_id = ?"
+                    ).all(dbt.target_date, dbt.market_id || 'nyc');
+                    const sellPositions = new Map();
+                    for (const sell of sells) {
+                        const sp = db.prepare('SELECT * FROM positions WHERE trade_id = ?').all(sell.id);
+                        for (const p of sp) {
+                            sellPositions.set(p.question, { price: p.price, status: p.status });
+                        }
+                    }
+
+                    // Check for redeems
+                    const redeems = db.prepare(
+                        "SELECT * FROM trades WHERE target_date = ? AND type = 'redeem' AND market_id = ?"
+                    ).all(dbt.target_date, dbt.market_id || 'nyc');
+
+                    trades.push({
+                        date: dbt.target_date,
+                        placedAt: dbt.placed_at,
+                        mode: dbt.mode || 'live',
+                        positions: positions.map(p => {
+                            const sold = sellPositions.get(p.question);
+                            const redeemed = p.status === 'redeemed';
+                            return {
+                                label: p.label,
+                                question: p.question,
+                                buyPrice: p.price,
+                                shares: p.shares,
+                                status: redeemed ? 'redeemed' : (sold ? 'sold' : (p.status || 'placed')),
+                                orderId: p.order_id || null,
+                                error: p.error || null,
+                                soldAt: sold ? sold.price : null,
+                                soldStatus: sold ? 'placed' : null,
+                                sellPrice: sold ? sold.price : null,
+                                redeemedAt: p.redeemed_at || null,
+                                redeemedValue: p.redeemed_value || null,
+                            };
+                        }),
+                        totalCost: dbt.actual_cost || dbt.total_cost,
+                        maxProfit: metadata.maxProfit || parseFloat((1.0 - (dbt.actual_cost || dbt.total_cost)).toFixed(4)),
+                        pnl: pnl ? {
+                            totalPnL: pnl.totalPnL,
+                            totalPnLPct: pnl.totalPnLPct,
+                            totalBuyCost: pnl.totalBuyCost,
+                            totalCurrentValue: pnl.totalCurrentValue,
+                        } : null,
+                        sessionStatus: dbt.session_status || 'active',
+                        phase: dbt.phase || getPhase(dbt.target_date),
+                        resolution: null, // TODO: pull from session if needed
+                        redeemed: redeems.length > 0,
+                    });
+                }
+            }
+        } catch (dbErr) {
+            console.warn(`Trade log DB read failed, falling back to JSON: ${dbErr.message}`);
+            trades = []; // Reset to trigger fallback
         }
 
-        // Already sorted newest first from listAvailableDates
+        // Fallback: JSON-based approach (for backward compatibility)
+        if (trades.length === 0) {
+            const dates = listAvailableDates();
+            for (const date of dates) {
+                const session = loadSessionData(date);
+                if (!session?.buyOrder) continue;
+
+                const bo = session.buyOrder;
+                const latest = session.snapshots?.[session.snapshots.length - 1];
+                const liquidityBids = await fetchLiquidityBids(date);
+                const pnl = computeLivePnL(bo, latest, liquidityBids);
+
+                trades.push({
+                    date,
+                    placedAt: bo.placedAt,
+                    mode: bo.mode || (bo.simulated ? 'dry-run' : 'live'),
+                    positions: (bo.positions || []).map(p => ({
+                        label: p.label,
+                        question: p.question,
+                        buyPrice: p.buyPrice,
+                        shares: p.shares,
+                        status: p.status || 'placed',
+                        orderId: p.orderId || null,
+                        error: p.error || null,
+                        soldAt: p.soldAt || null,
+                        soldStatus: p.soldStatus || null,
+                        sellPrice: (p.soldAt && p.soldStatus === 'placed') ? (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0) : null,
+                    })),
+                    totalCost: bo.totalCost,
+                    maxProfit: bo.maxProfit,
+                    pnl: pnl ? {
+                        totalPnL: pnl.totalPnL,
+                        totalPnLPct: pnl.totalPnLPct,
+                        totalBuyCost: pnl.totalBuyCost,
+                        totalCurrentValue: pnl.totalCurrentValue,
+                    } : null,
+                    sessionStatus: session.status,
+                    phase: session.phase || getPhase(date),
+                    resolution: session.resolution ? {
+                        keep: session.resolution.keep,
+                        discardLabels: session.resolution.discardLabels,
+                    } : null,
+                });
+            }
+        }
+
+        // Already sorted newest first
         res.writeHead(200, {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
@@ -462,7 +581,46 @@ const server = http.createServer(async (req, res) => {
             trades,
             count: trades.length,
             serverTime: new Date().toISOString(),
+            source: trades.length > 0 ? 'db' : 'json',
         }));
+        return;
+    }
+
+    // Analytics endpoint — P&L summary, forecast accuracy, stats
+    if (url.pathname === '/api/analytics') {
+        try {
+            const db = getDb();
+            const pnlByDate = db.prepare(`
+                SELECT
+                    t.target_date,
+                    t.market_id,
+                    SUM(CASE WHEN t.type = 'buy' THEN COALESCE(t.actual_cost, t.total_cost) ELSE 0 END) as total_bought,
+                    SUM(CASE WHEN t.type = 'sell' THEN t.total_proceeds ELSE 0 END) as total_sold,
+                    SUM(CASE WHEN t.type = 'redeem' THEN t.total_proceeds ELSE 0 END) as total_redeemed,
+                    COUNT(DISTINCT t.id) as trade_count,
+                    COUNT(DISTINCT CASE WHEN t.type = 'buy' THEN t.id END) as buy_count,
+                    COUNT(DISTINCT CASE WHEN t.type = 'sell' THEN t.id END) as sell_count
+                FROM trades t
+                WHERE t.status != 'failed'
+                GROUP BY t.target_date, t.market_id
+                ORDER BY t.target_date DESC
+            `).all();
+
+            const totals = {
+                totalInvested: pnlByDate.reduce((s, r) => s + r.total_bought, 0),
+                totalSold: pnlByDate.reduce((s, r) => s + r.total_sold, 0),
+                totalRedeemed: pnlByDate.reduce((s, r) => s + r.total_redeemed, 0),
+                tradingDays: pnlByDate.length,
+                totalTrades: db.prepare("SELECT COUNT(*) as c FROM trades WHERE status != 'failed'").get().c,
+            };
+            totals.realizedPnL = (totals.totalSold + totals.totalRedeemed) - totals.totalInvested;
+
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({ pnlByDate, totals, serverTime: new Date().toISOString() }));
+        } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+        }
         return;
     }
 
