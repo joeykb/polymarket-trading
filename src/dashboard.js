@@ -43,33 +43,40 @@ if (!targetDate) {
     targetDate = getTargetDateET();
 }
 
-// ── Data Loading ────────────────────────────────────────────────────────
+// ── Data Loading & Caching ───────────────────────────────────────────────
 
-/** @type {Map<string, {data: Object, mtime: number, cachedAt: number}>} */
-const sessionCache = new Map();
-const SESSION_CACHE_TTL_MS = 60_000; // 60s — session files update every 15 min
+/** Mtime-based in-memory cache for session JSON files */
+const sessionCache = new Map();   // date → { data, mtimeMs }
+const observationCache = new Map(); // date → { data, mtimeMs }
+
+/** Global current-temp cache — updated whenever any session is loaded */
+let globalCurrentTemp = { tempF: null, conditions: null, maxTodayF: null, timestamp: '' };
 
 function loadSessionData(date) {
     const sessionPath = path.join(OUTPUT_DIR, `monitor-${date}.json`);
-    if (!fs.existsSync(sessionPath)) return null;
-
     try {
         const stat = fs.statSync(sessionPath);
-        const mtime = stat.mtimeMs;
         const cached = sessionCache.get(date);
-
-        // Return cached if file hasn't changed and cache is fresh
-        if (cached && cached.mtime === mtime && (Date.now() - cached.cachedAt) < SESSION_CACHE_TTL_MS) {
-            return cached.data;
-        }
+        if (cached && cached.mtimeMs === stat.mtimeMs) return cached.data;
 
         const data = JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
-        sessionCache.set(date, { data, mtime, cachedAt: Date.now() });
+        sessionCache.set(date, { data, mtimeMs: stat.mtimeMs });
 
-        // Evict old cache entries to prevent memory leak
+        // Update global current temp if this session's latest snapshot is newer
+        const snap = data.snapshots?.[data.snapshots.length - 1];
+        if (snap && snap.timestamp > globalCurrentTemp.timestamp && snap.currentTempF != null) {
+            globalCurrentTemp = {
+                tempF: snap.currentTempF,
+                conditions: snap.currentConditions,
+                maxTodayF: snap.maxTodayF,
+                timestamp: snap.timestamp,
+            };
+        }
+
+        // Evict old cache entries (keep max 10)
         if (sessionCache.size > 10) {
-            const oldest = [...sessionCache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt)[0];
-            if (oldest) sessionCache.delete(oldest[0]);
+            const oldest = [...sessionCache.keys()].sort()[0];
+            sessionCache.delete(oldest);
         }
 
         return data;
@@ -80,14 +87,23 @@ function loadSessionData(date) {
 
 function loadObservationData(date) {
     const obsPath = path.join(OUTPUT_DIR, `${date}.json`);
-    if (fs.existsSync(obsPath)) {
-        try {
-            return JSON.parse(fs.readFileSync(obsPath, 'utf-8'));
-        } catch {
-            return null;
+    try {
+        const stat = fs.statSync(obsPath);
+        const cached = observationCache.get(date);
+        if (cached && cached.mtimeMs === stat.mtimeMs) return cached.data;
+
+        const data = JSON.parse(fs.readFileSync(obsPath, 'utf-8'));
+        observationCache.set(date, { data, mtimeMs: stat.mtimeMs });
+
+        if (observationCache.size > 10) {
+            const oldest = [...observationCache.keys()].sort()[0];
+            observationCache.delete(oldest);
         }
+
+        return data;
+    } catch {
+        return null;
     }
-    return null;
 }
 
 function listAvailableDates() {
@@ -345,29 +361,12 @@ const server = http.createServer(async (req, res) => {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
         });
-        // Current temp is a single real-time value — grab the freshest across all sessions
-        const allDates = listAvailableDates();
-        let freshestCurrentTempF = latestSnap?.currentTempF;
-        let freshestConditions = latestSnap?.currentConditions;
-        let freshestMaxToday = latestSnap?.maxTodayF;
-        let freshestTs = latestSnap?.timestamp || '';
-        for (const d of allDates) {
-            if (d === date) continue;
-            const s = loadSessionData(d);
-            const snap = s?.snapshots?.[s.snapshots.length - 1];
-            if (snap && snap.timestamp > freshestTs && snap.currentTempF != null) {
-                freshestTs = snap.timestamp;
-                freshestCurrentTempF = snap.currentTempF;
-                freshestConditions = snap.currentConditions;
-                freshestMaxToday = snap.maxTodayF;
-            }
-        }
-        // Override the latest snapshot's current temp with the freshest value
-        if (sessionLight && sessionLight.snapshots && sessionLight.snapshots.length > 0 && freshestCurrentTempF != null) {
+        // Use cached global current temp (updated automatically when sessions are loaded)
+        if (sessionLight && sessionLight.snapshots && sessionLight.snapshots.length > 0 && globalCurrentTemp.tempF != null) {
             const lastSnap = sessionLight.snapshots[sessionLight.snapshots.length - 1];
-            lastSnap.currentTempF = freshestCurrentTempF;
-            lastSnap.currentConditions = freshestConditions;
-            lastSnap.maxTodayF = freshestMaxToday;
+            lastSnap.currentTempF = globalCurrentTemp.tempF;
+            lastSnap.currentConditions = globalCurrentTemp.conditions;
+            lastSnap.maxTodayF = globalCurrentTemp.maxTodayF;
         }
 
         res.end(JSON.stringify({
@@ -448,23 +447,13 @@ const server = http.createServer(async (req, res) => {
             };
         }));
 
-        // Current temp is a single real-time value — use the most recent across all sessions
-        let latestCurrentTemp = null, latestCurrentCond = null, latestMaxToday = null, latestTs = '';
-        for (const play of plays) {
-            const lt = play.latest;
-            if (lt && lt.timestamp > latestTs && lt.currentTempF != null) {
-                latestTs = lt.timestamp;
-                latestCurrentTemp = lt.currentTempF;
-                latestCurrentCond = lt.currentConditions;
-                latestMaxToday = lt.maxTodayF;
-            }
-        }
-        if (latestCurrentTemp != null) {
+        // Use cached global current temp across all portfolio cards
+        if (globalCurrentTemp.tempF != null) {
             for (const play of plays) {
                 if (play.latest) {
-                    play.latest.currentTempF = latestCurrentTemp;
-                    play.latest.currentConditions = latestCurrentCond;
-                    play.latest.maxTodayF = latestMaxToday;
+                    play.latest.currentTempF = globalCurrentTemp.tempF;
+                    play.latest.currentConditions = globalCurrentTemp.conditions;
+                    play.latest.maxTodayF = globalCurrentTemp.maxTodayF;
                 }
             }
         }
