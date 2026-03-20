@@ -2278,9 +2278,14 @@ function getDashboardHTML(defaultDate) {
                         icon = '\\u274c';  // red X = failed
                         tipText = p.error || '';
                     }
+                    // Extract range from question (e.g., "54-55°F" from "...between 54-55°F on March 20?")
+                    var rangeMatch = p.question ? p.question.match(/between\s+(\d+-\d+°F)/i) : null;
+                    var displayLabel = rangeMatch ? rangeMatch[1] : p.label;
+                    // Add role as a subtle tag: (target), (below), (above)
+                    var roleTag = (p.label && p.label !== displayLabel) ? ' <span style="color:var(--text-muted);font-size:10px;opacity:0.7;">(' + p.label + ')</span>' : '';
                     var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
                     var shares = p.shares ? ' \\u00d7' + p.shares : '';
-                    var label = icon + ' ' + p.label + ' @' + priceStr + shares + extraInfo;
+                    var label = icon + ' ' + displayLabel + roleTag + ' @' + priceStr + shares + extraInfo;
                     if (tipText) {
                         label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
                     }
