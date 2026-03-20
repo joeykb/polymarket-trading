@@ -1,15 +1,19 @@
-# TempEdge - Polymarket NYC Temperature Predictor
-# Multi-stage build for minimal image size
+# TempEdge - Polymarket Temperature Predictor
+# Alpine build with native SQLite support
 
 FROM node:20-alpine AS base
 
+# Install build tools for better-sqlite3 native compilation
+RUN apk add --no-cache python3 make g++
+
 WORKDIR /app
 
-# Copy package files
-COPY package.json ./
+# Copy package files and install
+COPY package.json package-lock.json ./
+RUN npm ci --production
 
-# Install dependencies (none currently, but future-proof)
-RUN npm install --production 2>/dev/null || true
+# Remove build tools to shrink image
+RUN apk del python3 make g++
 
 # Copy source code
 COPY src/ ./src/
