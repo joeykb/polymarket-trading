@@ -876,3 +876,42 @@ export async function getWalletBalance() {
 }
 
 export { getConfig };
+
+/**
+ * Retry a single failed position — called from the dashboard API.
+ * @param {Object} position - { label, question, conditionId, clobTokenIds, buyPrice }
+ * @returns {Promise<Object>} - { success, orderId, shares, cost, error }
+ */
+export async function retrySinglePosition(position) {
+    const tradingCfg = getConfig();
+
+    if (tradingCfg.mode !== 'live') {
+        return { success: false, error: `Trading mode is "${tradingCfg.mode}" — must be "live" to retry` };
+    }
+
+    // Parse clobTokenIds if it's a JSON string
+    if (typeof position.clobTokenIds === 'string') {
+        try { position.clobTokenIds = JSON.parse(position.clobTokenIds); } catch {}
+    }
+
+    console.log(`\n  🔄 RETRY: ${position.label} — ${position.question}`);
+    console.log(`     Daily spend: $${getTodaySpend().toFixed(4)} / $${tradingCfg.maxDailySpend}`);
+
+    const result = await placeSingleOrder(position, tradingCfg, null);
+
+    if (result.success) {
+        recordSpend(result.cost, { position: position.label, question: position.question, retry: true });
+        console.log(`  ✅ RETRY SUCCESS: ${result.size} shares at $${result.price.toFixed(4)} = $${result.cost.toFixed(4)}`);
+    } else {
+        console.log(`  ❌ RETRY FAILED: ${result.error}`);
+    }
+
+    return {
+        success: result.success || false,
+        orderId: result.orderId || null,
+        shares: result.size || 0,
+        cost: result.cost || 0,
+        price: result.price || 0,
+        error: result.error || null,
+    };
+}

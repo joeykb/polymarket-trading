@@ -14,7 +14,8 @@ import { fileURLToPath } from 'url';
 import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from './utils/dateUtils.js';
 import { config, getConfigSnapshot, updateConfig, resetConfigValue, resetAllOverrides } from './config.js';
 import { getDb } from './db/index.js';
-import { getAllTrades, getPositionsForTrade, getAllSessions, getSession } from './db/queries.js';
+import { getAllTrades, getPositionsForTrade, getAllSessions, getSession, insertTrade, insertPositions } from './db/queries.js';
+import { retrySinglePosition } from './services/trading.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -492,6 +493,7 @@ const server = http.createServer(async (req, res) => {
                             const sold = sellPositions.get(p.question);
                             const redeemed = p.status === 'redeemed';
                             return {
+                                positionId: p.id,
                                 label: p.label,
                                 question: p.question,
                                 buyPrice: p.price,
@@ -762,6 +764,70 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // Retry a failed position — place a single order for a position that previously failed
+    if (url.pathname === '/api/retry-position' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+            try {
+                const { positionId, targetDate } = JSON.parse(body);
+                if (!positionId) throw new Error('positionId is required');
+
+                const db = getDb();
+
+                // Look up the failed position
+                const pos = db.prepare(`
+                    SELECT p.*, t.target_date, t.session_id, t.market_id, t.id as trade_id
+                    FROM positions p
+                    JOIN trades t ON p.trade_id = t.id
+                    WHERE p.id = ? AND p.status = 'failed'
+                `).get(positionId);
+
+                if (!pos) {
+                    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Position not found or not in failed status' }));
+                    return;
+                }
+
+                console.log(`\n  🔄 Retrying position #${positionId}: ${pos.label} for ${pos.target_date}`);
+
+                // Call the trading service to place a single order
+                const result = await retrySinglePosition({
+                    label: pos.label,
+                    question: pos.question,
+                    conditionId: pos.condition_id,
+                    clobTokenIds: pos.clob_token_ids,
+                    buyPrice: pos.price,
+                    marketId: pos.polymarket_id,
+                });
+
+                if (result.success) {
+                    // Update the position in the DB
+                    db.prepare(`
+                        UPDATE positions SET status = 'filled', shares = ?, price = ?, fill_price = ?, fill_shares = ?, order_id = ?, error = NULL
+                        WHERE id = ?
+                    `).run(result.shares, result.price, result.price, result.shares, result.orderId, positionId);
+
+                    // Update the trade's total cost
+                    db.prepare(`
+                        UPDATE trades SET total_cost = total_cost + ?, actual_cost = COALESCE(actual_cost, 0) + ?, status = 'filled'
+                        WHERE id = ?
+                    `).run(result.cost, result.cost, pos.trade_id);
+
+                    console.log(`  ✅ Position #${positionId} retried successfully: ${result.shares} shares at $${result.price}`);
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify(result));
+            } catch (err) {
+                console.error(`  ❌ Retry error: ${err.message}`);
+                res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify({ success: false, error: err.message }));
+            }
+        });
+        return;
+    }
+
     // Restart service — writes signal file for monitor to pick up
     if (url.pathname === '/api/restart' && req.method === 'POST') {
         console.log('\n  🔄 Restart requested via admin panel');
@@ -790,7 +856,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') {
         res.writeHead(204, {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type',
         });
         res.end();
@@ -1332,6 +1398,26 @@ function getDashboardHTML(defaultDate) {
 
         .trade-row:hover td {
             background: var(--bg-card-hover);
+        }
+
+        .retry-btn {
+            background: rgba(59,130,246,0.2);
+            color: #60a5fa;
+            border: 1px solid rgba(59,130,246,0.3);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-left: 6px;
+            transition: all 0.2s;
+        }
+        .retry-btn:hover {
+            background: rgba(59,130,246,0.4);
+        }
+        .retry-btn:disabled {
+            cursor: wait;
+            opacity: 0.7;
         }
     </style>
 </head>
@@ -2018,6 +2104,60 @@ function getDashboardHTML(defaultDate) {
             tradeLogTimer = setTimeout(fetchTradeLog, 30000);
         }
 
+        async function retryPosition(positionId, btnEl) {
+            if (!positionId) return;
+            if (!confirm('Retry this failed order? This will place a real trade.')) return;
+
+            // Loading state
+            var origHtml = btnEl.innerHTML;
+            btnEl.disabled = true;
+            btnEl.innerHTML = '\u23f3 Placing...';
+            btnEl.style.background = 'rgba(251,191,36,0.2)';
+            btnEl.style.color = '#fbbf24';
+            btnEl.style.borderColor = 'rgba(251,191,36,0.3)';
+
+            try {
+                var res = await fetch('/api/retry-position', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ positionId: positionId }),
+                });
+                var result = await res.json();
+
+                if (result.success) {
+                    btnEl.innerHTML = '\u2705 ' + result.shares + ' shares filled';
+                    btnEl.style.background = 'rgba(16,185,129,0.2)';
+                    btnEl.style.color = '#34d399';
+                    btnEl.style.borderColor = 'rgba(16,185,129,0.3)';
+                    // Refresh trade log after 2s to show updated data
+                    setTimeout(fetchTradeLog, 2000);
+                } else {
+                    btnEl.innerHTML = '\u274c ' + (result.error || 'Failed').substring(0, 30);
+                    btnEl.style.background = 'rgba(239,68,68,0.15)';
+                    btnEl.style.color = '#f87171';
+                    btnEl.style.borderColor = 'rgba(239,68,68,0.3)';
+                    // Re-enable after 5s
+                    setTimeout(function() {
+                        btnEl.disabled = false;
+                        btnEl.innerHTML = origHtml;
+                        btnEl.style.background = 'rgba(59,130,246,0.2)';
+                        btnEl.style.color = '#60a5fa';
+                        btnEl.style.borderColor = 'rgba(59,130,246,0.3)';
+                    }, 5000);
+                }
+            } catch (err) {
+                btnEl.innerHTML = '\u274c Network error';
+                btnEl.style.background = 'rgba(239,68,68,0.15)';
+                btnEl.style.color = '#f87171';
+                setTimeout(function() {
+                    btnEl.disabled = false;
+                    btnEl.innerHTML = origHtml;
+                    btnEl.style.background = 'rgba(59,130,246,0.2)';
+                    btnEl.style.color = '#60a5fa';
+                }, 5000);
+            }
+        }
+
         function renderTradeLog(data) {
             const body = document.getElementById('tradeLogBody');
             const countEl = document.getElementById('tradeLogCount');
@@ -2099,6 +2239,10 @@ function getDashboardHTML(defaultDate) {
                     var label = icon + ' ' + p.label + ' @' + priceStr + shares + extraInfo;
                     if (tipText) {
                         label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
+                    }
+                    // Add retry button for failed live positions
+                    if (p.status === 'failed' && t.mode === 'live' && p.positionId) {
+                        label += ' <button onclick="retryPosition(' + p.positionId + ', this)" class="retry-btn" title="Retry this failed order">\ud83d\udd04 Retry</button>';
                     }
                     return label;
                 }).join('<br>');
