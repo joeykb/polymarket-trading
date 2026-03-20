@@ -91,6 +91,7 @@ const SCHEMA = {
     'dashboard.port':              { key: 'DASHBOARD_PORT',          default: 3000,  description: 'Dashboard HTTP port', requiresRestart: true },
     'dashboard.refreshInterval':   { key: 'DASHBOARD_REFRESH_MS',    default: 10000, description: 'Card refresh interval (ms)' },
     'dashboard.liquidityPollMs':   { key: 'DASHBOARD_LIQUIDITY_MS',  default: 5000,  description: 'Liquidity panel poll interval (ms)' },
+    'dashboard.manualSellEnabled': { key: 'MANUAL_SELL_ENABLED',     default: 0,     description: 'Show manual sell buttons on positions (1/0)' },
 
     // Phase thresholds
     'phases.buyDaysMin':      { key: 'PHASE_BUY_DAYS_MIN',   default: 2, description: 'Days before target = buy phase' },

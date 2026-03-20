@@ -15,7 +15,7 @@ import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from 
 import { config, getConfigSnapshot, updateConfig, resetConfigValue, resetAllOverrides } from './config.js';
 import { getDb } from './db/index.js';
 import { getAllTrades, getPositionsForTrade, getAllSessions, getSession, insertTrade, insertPositions } from './db/queries.js';
-import { retrySinglePosition } from './services/trading.js';
+import { retrySinglePosition, executeSellOrder } from './services/trading.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -180,6 +180,39 @@ function overlayLivePrices(snapshot, liveData) {
 }
 
 /**
+ * Enrich buyOrder positions with database position IDs.
+ * The session JSON doesn't store DB IDs, so we look them up by trade/question.
+ */
+function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
+    if (!buyOrder || !buyOrder.positions) return buyOrder || null;
+    try {
+        const db = getDb();
+        // Find the buy trade for this date
+        const trade = db.prepare(`SELECT id FROM trades WHERE target_date = ? AND type = 'buy' ORDER BY id DESC LIMIT 1`).get(targetDate);
+        if (!trade) return buyOrder;
+
+        const dbPositions = db.prepare(`SELECT id, question, status, sold_at FROM positions WHERE trade_id = ?`).all(trade.id);
+        const posMap = {};
+        for (const p of dbPositions) {
+            posMap[p.question] = p;
+        }
+
+        buyOrder.positions = buyOrder.positions.map(p => {
+            const dbPos = posMap[p.question];
+            return {
+                ...p,
+                positionId: dbPos?.id || null,
+                soldAt: dbPos?.sold_at || p.soldAt || null,
+            };
+        });
+    } catch (err) {
+        // Silently fail — don't break the API response
+        console.warn(`  ⚠️  enrichBuyOrderWithDbIds: ${err.message}`);
+    }
+    return buyOrder;
+}
+
+/**
  * Compute P&L from buyOrder vs latest snapshot - runs on every API call.
  * Uses live CLOB bids from the liquidity microservice for accurate sell pricing.
  * @param {Object} buyOrder
@@ -296,7 +329,8 @@ const server = http.createServer(async (req, res) => {
                 forecastSource: session.forecastSource,
                 rebalanceThreshold: session.rebalanceThreshold,
                 resolution: session.resolution || null,
-                buyOrder: session.buyOrder || null,
+                buyOrder: enrichBuyOrderWithDbIds(session.buyOrder, date),
+                manualSellEnabled: !!config.dashboard.manualSellEnabled,
                 pnl: session.pnl,
                 redeemExecuted: session.redeemExecuted || false,
                 redeemResult: session.redeemResult || null,
@@ -364,7 +398,8 @@ const server = http.createServer(async (req, res) => {
                     snapshotCount: session.snapshots?.length || 0,
                     alertCount: session.alerts?.length || 0,
                     resolution: session.resolution || null,
-                    buyOrder: session.buyOrder || null,
+                    buyOrder: enrichBuyOrderWithDbIds(session.buyOrder, d.targetDate),
+                    manualSellEnabled: !!config.dashboard.manualSellEnabled,
                     pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
                 } : null,
                 latest: latest ? {
@@ -865,6 +900,131 @@ const server = http.createServer(async (req, res) => {
                 res.end(JSON.stringify(result));
             } catch (err) {
                 console.error(`  ❌ Retry error: ${err.message}`);
+                res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify({ success: false, error: err.message }));
+            }
+        });
+        return;
+    }
+
+    // Manual sell — sell a specific owned position from the dashboard
+    if (url.pathname === '/api/sell-position' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+            try {
+                // Feature flag check
+                if (!config.dashboard.manualSellEnabled) {
+                    res.writeHead(403, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Manual sell is disabled. Enable it in Admin → dashboard.manualSellEnabled' }));
+                    return;
+                }
+
+                const { positionId, targetDate } = JSON.parse(body);
+                if (!positionId) throw new Error('positionId is required');
+
+                const db = getDb();
+
+                // Look up the owned position (must be filled, not already sold)
+                const pos = db.prepare(`
+                    SELECT p.*, t.target_date, t.session_id, t.market_id, t.id as trade_id
+                    FROM positions p
+                    JOIN trades t ON p.trade_id = t.id
+                    WHERE p.id = ? AND t.type = 'buy' AND (p.status = 'placed' OR p.status = 'filled')
+                    AND p.sold_at IS NULL AND p.redeemed_at IS NULL
+                `).get(positionId);
+
+                if (!pos) {
+                    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Position not found, already sold, or not in filled status' }));
+                    return;
+                }
+
+                console.log(`\n  🏷️  MANUAL SELL: position #${positionId} — ${pos.label} for ${pos.target_date}`);
+                console.log(`     ${pos.question}`);
+                console.log(`     ${pos.shares} shares, bought at $${pos.price}`);
+
+                // Resolve clobTokenId and conditionId
+                let conditionId = pos.condition_id;
+                let clobTokenIds = pos.clob_token_ids;
+                let tokenId = pos.token_id;
+
+                if (!conditionId || !clobTokenIds) {
+                    const session = loadSessionData(pos.target_date);
+                    if (session) {
+                        const latestSnap = session.snapshots?.[session.snapshots.length - 1];
+                        if (latestSnap) {
+                            for (const rangeKey of ['target', 'below', 'above']) {
+                                const range = latestSnap[rangeKey];
+                                if (range && range.question === pos.question) {
+                                    conditionId = conditionId || range.conditionId;
+                                    clobTokenIds = clobTokenIds || (range.clobTokenIds ? JSON.stringify(range.clobTokenIds) : null);
+                                    tokenId = tokenId || range.clobTokenIds?.[0];
+                                    console.log(`  📡 Resolved from session: conditionId=${conditionId}, tokenId=${tokenId}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!tokenId && clobTokenIds) {
+                    try {
+                        tokenId = JSON.parse(clobTokenIds)[0];
+                    } catch { }
+                }
+
+                if (!tokenId || !conditionId) {
+                    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Cannot resolve market data (tokenId/conditionId) for this position' }));
+                    return;
+                }
+
+                // Execute sell via trading service
+                const sellPositions = [{
+                    label: pos.label,
+                    question: pos.question,
+                    clobTokenId: tokenId,
+                    conditionId,
+                    shares: pos.shares || 1,
+                }];
+
+                const sessionCtx = {
+                    sessionId: pos.session_id,
+                    targetDate: pos.target_date,
+                    marketId: pos.market_id || 'nyc',
+                };
+
+                const sellResult = await executeSellOrder(sellPositions, sessionCtx);
+
+                if (sellResult && sellResult.positions?.length > 0) {
+                    const soldPos = sellResult.positions[0];
+                    if (soldPos.status === 'filled' || soldPos.status === 'placed') {
+                        // Mark the buy position as sold
+                        db.prepare(`
+                            UPDATE positions SET sold_at = ?, sell_price = ?, sell_order_id = ?
+                            WHERE id = ?
+                        `).run(new Date().toISOString(), soldPos.sellPrice, soldPos.orderId, positionId);
+
+                        console.log(`  ✅ MANUAL SELL completed: ${pos.shares} shares of ${pos.label} at $${soldPos.sellPrice?.toFixed(4)}`);
+
+                        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                        res.end(JSON.stringify({
+                            success: true,
+                            sellPrice: soldPos.sellPrice,
+                            proceeds: sellResult.totalProceeds,
+                            orderId: soldPos.orderId,
+                        }));
+                    } else {
+                        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                        res.end(JSON.stringify({ success: false, error: soldPos.error || 'Sell order did not fill' }));
+                    }
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'executeSellOrder returned null' }));
+                }
+            } catch (err) {
+                console.error(`  ❌ Manual sell error: ${err.message}`);
                 res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                 res.end(JSON.stringify({ success: false, error: err.message }));
             }
@@ -1766,6 +1926,7 @@ function getDashboardHTML(defaultDate) {
                 portfolioEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">' +
                     portfolio.plays.map(p => renderPortfolioCard(p)).join('') + '</div>';
                 currentPlay = portfolio.plays.find(p => p.date === currentDate) || null;
+                if (currentPlay && currentPlay.session) manualSellEnabled = !!currentPlay.session.manualSellEnabled;
             }
 
             if (vm.snapshotCount !== lastRenderState.snapshotCount) {
@@ -2437,6 +2598,18 @@ function getDashboardHTML(defaultDate) {
                 html += '<div style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600;color:' + scoreColor + ';width:35px;text-align:right;">' + scorePct + '%</div>';
                 html += '</div>';
 
+
+                // Manual sell button (feature-flagged)
+                if (manualSellEnabled && hasFilled) {
+                    // Find matching owned position from buyOrder
+                    var ownedPos = hasBuyOrder && hasBuyOrder.positions ? hasBuyOrder.positions.find(function(p) { return p.question === token.question && !p.soldAt && p.status !== 'failed'; }) : null;
+                    if (ownedPos) {
+                        html += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;">';
+                        html += '<span style="font-size:11px;color:var(--text-muted);">' + (ownedPos.shares || '?') + ' shares @ $' + (ownedPos.buyPrice ? ownedPos.buyPrice.toFixed(2) : '?.??') + '</span>';
+                        html += '<button onclick="sellPosition(' + ownedPos.positionId + ', this)" class="sell-btn" title="Sell this position at market bid price">SELL</button>';
+                        html += '</div>';
+                    }
+                }
                 html += '</div>';
             }
 
