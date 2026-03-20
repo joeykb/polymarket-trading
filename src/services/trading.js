@@ -122,6 +122,90 @@ function recordSpend(amount, orderDetails) {
     writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
+// ── Post-Trade Fill Verification ────────────────────────────────────────
+
+/**
+ * Verify the actual fill price/size of an order by polling the CLOB API.
+ * The price we send to the exchange (bestAsk/bestBid) may differ from
+ * the actual execution price. This function resolves the real fill data.
+ *
+ * @param {string} orderId - The order ID returned from CLOB
+ * @param {string} side - 'BUY' or 'SELL'
+ * @param {number} intendedPrice - The price we sent to the exchange
+ * @param {number} intendedSize - The size we sent to the exchange
+ * @param {string} label - Position label for logging
+ * @returns {Promise<{fillPrice: number, fillSize: number, fillCost: number, verified: boolean}>}
+ */
+async function verifyOrderFill(orderId, side, intendedPrice, intendedSize, label) {
+    const result = {
+        fillPrice: intendedPrice,
+        fillSize: intendedSize,
+        fillCost: parseFloat((intendedPrice * intendedSize).toFixed(4)),
+        verified: false,
+    };
+
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await new Promise(r => setTimeout(r, attempt === 1 ? 3000 : 5000));
+            const client = await getClient();
+            const orderInfo = await client.getOrder(orderId);
+            if (!orderInfo) continue;
+
+            // Method 1: average_price field (most reliable)
+            if (orderInfo.average_price && parseFloat(orderInfo.average_price) > 0) {
+                result.fillPrice = parseFloat(orderInfo.average_price);
+                const matched = parseFloat(orderInfo.size_matched || intendedSize);
+                result.fillSize = matched > 0 ? matched : intendedSize;
+                result.fillCost = parseFloat((result.fillPrice * result.fillSize).toFixed(4));
+                result.verified = true;
+                console.log(`  ✅ ${label} ${side} VERIFIED (avg_price): $${result.fillPrice.toFixed(4)} × ${result.fillSize} = $${result.fillCost.toFixed(4)}`);
+                if (Math.abs(result.fillPrice - intendedPrice) > 0.005) {
+                    console.log(`     ⚠️  Fill differs from intended: $${intendedPrice.toFixed(4)} → $${result.fillPrice.toFixed(4)} (Δ$${(result.fillPrice - intendedPrice).toFixed(4)})`);
+                }
+                break;
+            }
+
+            // Method 2: Calculate from associate_trades
+            if (orderInfo.associate_trades?.length > 0) {
+                const totalFillValue = orderInfo.associate_trades.reduce(
+                    (acc, t) => acc + parseFloat(t.price || 0) * parseFloat(t.size || 0), 0
+                );
+                const totalFillSize = orderInfo.associate_trades.reduce(
+                    (acc, t) => acc + parseFloat(t.size || 0), 0
+                );
+                if (totalFillSize > 0) {
+                    result.fillPrice = totalFillValue / totalFillSize;
+                    result.fillSize = totalFillSize;
+                    result.fillCost = parseFloat(totalFillValue.toFixed(4));
+                    result.verified = true;
+                    console.log(`  ✅ ${label} ${side} VERIFIED (trades): $${result.fillPrice.toFixed(4)} × ${result.fillSize} = $${result.fillCost.toFixed(4)}`);
+                    if (Math.abs(result.fillPrice - intendedPrice) > 0.005) {
+                        console.log(`     ⚠️  Fill differs from intended: $${intendedPrice.toFixed(4)} → $${result.fillPrice.toFixed(4)} (Δ$${(result.fillPrice - intendedPrice).toFixed(4)})`);
+                    }
+                    break;
+                }
+            }
+
+            // Method 3: Check if partially matched but no trade details yet
+            const matched = parseFloat(orderInfo.size_matched || 0);
+            if (matched > 0 && attempt < maxRetries) {
+                console.log(`  ⏳ ${label}: ${matched} shares matched but no trade details yet (attempt ${attempt}/${maxRetries})`);
+                continue;
+            }
+        } catch (err) {
+            console.log(`  ℹ️  ${label} fill verification attempt ${attempt} failed: ${err.message}`);
+        }
+    }
+
+    if (!result.verified) {
+        console.log(`  ⚠️  ${label}: Could not verify fill — recording intended price $${intendedPrice.toFixed(4)}`);
+        console.log(`     Check Polymarket activity for order ${orderId}`);
+    }
+
+    return result;
+}
+
 // ── Order Placement ─────────────────────────────────────────────────────
 
 /**
@@ -307,14 +391,23 @@ async function placeSingleOrder(position, tradingCfg, liqTokenData = null) {
 
         console.log(`  ✅ Order placed: ${response.orderID} (status: ${response.status})`);
 
-        // Record spend
-        recordSpend(cost, {
+        // Verify actual fill price — the CLOB may fill at a different price than our limit
+        const fill = await verifyOrderFill(response.orderID, 'BUY', price, size, position.label);
+
+        // Use verified fill data if available, otherwise fall back to intended
+        const actualPrice = fill.fillPrice;
+        const actualSize = fill.fillSize;
+        const actualCost = fill.fillCost;
+
+        // Record spend with verified amounts
+        recordSpend(actualCost, {
             orderId: response.orderID,
             label: position.label,
             question: position.question,
             tokenId,
-            price,
-            size,
+            price: actualPrice,
+            size: actualSize,
+            verified: fill.verified,
         });
 
         return {
@@ -322,10 +415,11 @@ async function placeSingleOrder(position, tradingCfg, liqTokenData = null) {
             dryRun: false,
             orderId: response.orderID,
             status: response.status,
-            price,
-            size,
-            cost,
+            price: actualPrice,
+            size: actualSize,
+            cost: actualCost,
             tokenId,
+            verified: fill.verified,
         };
     } catch (err) {
         const detail = err.response?.data || err.data || '';
@@ -706,68 +800,19 @@ async function placeSellOrder(position, tradingCfg) {
 
         console.log(`  ✅ Sell order placed: ${orderID}`);
 
-        // Poll for actual fill price (GTC orders may fill at better than limit price)
-        // The CLOB fills GTC sells at the best available bid, which may be much higher
-        // than our limit. We must capture the real fill to record accurate P&L.
-        let fillPrice = price;
-        let fillProceeds = proceeds;
-        const maxRetries = 3;
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                await new Promise(r => setTimeout(r, attempt === 1 ? 3000 : 5000));
-                const orderInfo = await client.getOrder(orderID);
-                if (!orderInfo) continue;
-
-                // Method 1: average_price field (direct from CLOB)
-                if (orderInfo.average_price && parseFloat(orderInfo.average_price) > 0) {
-                    fillPrice = parseFloat(orderInfo.average_price);
-                    fillProceeds = parseFloat((fillPrice * size).toFixed(4));
-                    console.log(`  💰 Fill price (avg_price): $${fillPrice.toFixed(4)} (limit was $${price.toFixed(4)})`);
-                    break;
-                }
-
-                // Method 2: Calculate from associate_trades
-                if (orderInfo.associate_trades?.length > 0) {
-                    const totalFillValue = orderInfo.associate_trades.reduce(
-                        (acc, t) => acc + parseFloat(t.price || 0) * parseFloat(t.size || 0), 0
-                    );
-                    const totalFillSize = orderInfo.associate_trades.reduce(
-                        (acc, t) => acc + parseFloat(t.size || 0), 0
-                    );
-                    if (totalFillSize > 0) {
-                        fillPrice = totalFillValue / totalFillSize;
-                        fillProceeds = parseFloat((fillPrice * size).toFixed(4));
-                        console.log(`  💰 Fill price (trades): $${fillPrice.toFixed(4)} (limit was $${price.toFixed(4)})`);
-                        break;
-                    }
-                }
-
-                // Method 3: Check if size was matched but no trade details yet
-                const matched = parseFloat(orderInfo.size_matched || 0);
-                if (matched > 0 && attempt < maxRetries) {
-                    console.log(`  ⏳ ${matched} shares matched but no trade details yet (attempt ${attempt}/${maxRetries})`);
-                    continue; // Retry — trades may populate shortly
-                }
-            } catch (fillErr) {
-                console.log(`  ℹ️  Fill price check attempt ${attempt} failed: ${fillErr.message}`);
-            }
-        }
-
-        // Warn if we're still using the limit price (likely inaccurate)
-        if (fillPrice === price) {
-            console.log(`  ⚠️  Could not determine actual fill price — recording limit price $${price.toFixed(4)}`);
-            console.log(`     The actual fill may have been higher. Check Polymarket activity for order ${orderID}`);
-        }
+        // Verify actual fill price using shared validator
+        const fill = await verifyOrderFill(orderID, 'SELL', price, size, position.label);
 
         return {
             success: true,
             dryRun: false,
             orderId: orderID,
             status: response.status,
-            price: fillPrice,
-            size,
-            proceeds: fillProceeds,
+            price: fill.fillPrice,
+            size: fill.fillSize,
+            proceeds: fill.fillCost,
             tokenId,
+            verified: fill.verified,
         };
     } catch (err) {
         const detail = err.response?.data || err.data || '';
