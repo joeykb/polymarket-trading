@@ -2279,8 +2279,8 @@ function getDashboardHTML(defaultDate) {
                         tipText = p.error || '';
                     }
                     // Extract range from question (e.g., "54-55°F" from "...between 54-55°F on March 20?")
-                    var rangeMatch = p.question ? p.question.match(/between\s+(\d+-\d+°F)/i) : null;
-                    var displayLabel = rangeMatch ? rangeMatch[1] : p.label;
+                    var rangeMatch = p.question ? p.question.match(/between[ ]+([0-9]+-[0-9]+)[^a-zA-Z0-9]*F/i) : null;
+                    var displayLabel = rangeMatch ? rangeMatch[1] + '\\u00b0F' : p.label;
                     // Add role as a subtle tag: (target), (below), (above)
                     var roleTag = (p.label && p.label !== displayLabel) ? ' <span style="color:var(--text-muted);font-size:10px;opacity:0.7;">(' + p.label + ')</span>' : '';
                     var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
