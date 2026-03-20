@@ -1990,6 +1990,7 @@ function getDashboardHTML(defaultDate) {
                     portfolio.plays.map(p => renderPortfolioCard(p)).join('') +
                     '</div></div></div>';
                 currentPlay = portfolio.plays.find(p => p.date === currentDate) || null;
+                if (currentPlay && currentPlay.session) manualSellEnabled = !!currentPlay.session.manualSellEnabled;
             }
 
             if (!session && !observation) {
