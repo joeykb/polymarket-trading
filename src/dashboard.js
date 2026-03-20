@@ -533,11 +533,11 @@ const server = http.createServer(async (req, res) => {
                                 question: p.question,
                                 buyPrice: p.price,
                                 shares: p.shares,
-                                status: redeemed ? 'redeemed' : (sold ? 'sold' : (p.status || 'placed')),
+                                status: redeemed ? 'redeemed' : (sold || p.sold_at ? 'sold' : (p.status || 'placed')),
                                 orderId: p.order_id || null,
                                 error: p.error || null,
-                                soldAt: sold ? sold.price : null,
-                                soldStatus: sold ? 'placed' : null,
+                                soldAt: sold ? sold.price : (p.sold_at || null),
+                                soldStatus: sold ? 'placed' : (p.sold_at ? 'placed' : null),
                                 sellPrice: sold ? sold.price : null,
                                 redeemedAt: p.redeemed_at || null,
                                 redeemedValue: p.redeemed_value || null,
@@ -2456,6 +2456,10 @@ function getDashboardHTML(defaultDate) {
                     // Add retry button for failed live positions (only on active sessions)
                     if (p.status === 'failed' && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
                         label += ' <button onclick="retryPosition(' + p.positionId + ', this)" class="retry-btn" title="Retry this failed order">\ud83d\udd04 Retry</button>';
+                    }
+                    // Add sell button for active positions (feature-flagged)
+                    if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
+                        label += ' <button onclick="sellPosition(' + p.positionId + ', this)" class="sell-btn" title="Sell this position at market price">SELL</button>';
                     }
                     return label;
                 }).join('<br>');
