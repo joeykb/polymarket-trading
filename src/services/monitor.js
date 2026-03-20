@@ -126,6 +126,17 @@ async function tryPlaceBuyOrder(snapshot, liqTokens = []) {
     return null;
 }
 
+/**
+ * Stamp a buyOrder with session context for DB writes.
+ * Without these fields, the DB insert fails with NOT NULL constraint.
+ */
+function attachSessionContext(order, session) {
+    if (!order) return;
+    order._sessionId = session.id;
+    order._targetDate = session.targetDate;
+    order._marketId = 'nyc';
+}
+
 // ── Auto-Redemption ─────────────────────────────────────────────────────
 
 /**
@@ -752,6 +763,7 @@ function startLiquidityGatedBuy(session, snapshot) {
                 console.warn('  ⚠️  Deadline buy failed — will retry next cycle');
                 return;
             }
+            attachSessionContext(order, session);
             order.liquidityWait = waitStr;
             order.forcedByDeadline = true;
             session.buyOrder = order;
@@ -828,6 +840,7 @@ function startLiquidityGatedBuy(session, snapshot) {
             session.awaitingLiquidity = false;
             return;
         }
+        attachSessionContext(order, session);
         order.liquidityWait = waitStr;
         order.liquiditySnapshot = {
             liquidCount,
@@ -947,8 +960,18 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
     }
 
     /** @type {import('../models/types.js').MonitoringSession} */
+    const sessionId = crypto.randomUUID();
+    
+    // Attach session context to buyOrder BEFORE constructing the session
+    // so the DB write in trading.js has the required target_date / session_id
+    if (buyOrder) {
+        buyOrder._sessionId = sessionId;
+        buyOrder._targetDate = targetDate;
+        buyOrder._marketId = 'nyc';
+    }
+
     const session = {
-        id: crypto.randomUUID(),
+        id: sessionId,
         targetDate,
         startedAt: nowISO(),
         status: 'active',
@@ -1051,6 +1074,7 @@ export async function runMonitoringCycle(session) {
         // Immediate buy — fetch WS liquidity data for accurate spread checks
         const immLiq = await fetchLiquidityFromService(session.targetDate);
         session.buyOrder = await tryPlaceBuyOrder(snapshot, immLiq?.tokens || []);
+        attachSessionContext(session.buyOrder, session);
     } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
         // Start liquidity-gated buy flow
         startLiquidityGatedBuy(session, snapshot);
