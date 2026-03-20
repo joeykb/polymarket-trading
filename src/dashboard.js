@@ -345,6 +345,31 @@ const server = http.createServer(async (req, res) => {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
         });
+        // Current temp is a single real-time value — grab the freshest across all sessions
+        const allDates = listAvailableDates();
+        let freshestCurrentTempF = latestSnap?.currentTempF;
+        let freshestConditions = latestSnap?.currentConditions;
+        let freshestMaxToday = latestSnap?.maxTodayF;
+        let freshestTs = latestSnap?.timestamp || '';
+        for (const d of allDates) {
+            if (d === date) continue;
+            const s = loadSessionData(d);
+            const snap = s?.snapshots?.[s.snapshots.length - 1];
+            if (snap && snap.timestamp > freshestTs && snap.currentTempF != null) {
+                freshestTs = snap.timestamp;
+                freshestCurrentTempF = snap.currentTempF;
+                freshestConditions = snap.currentConditions;
+                freshestMaxToday = snap.maxTodayF;
+            }
+        }
+        // Override the latest snapshot's current temp with the freshest value
+        if (sessionLight && sessionLight.snapshots && sessionLight.snapshots.length > 0 && freshestCurrentTempF != null) {
+            const lastSnap = sessionLight.snapshots[sessionLight.snapshots.length - 1];
+            lastSnap.currentTempF = freshestCurrentTempF;
+            lastSnap.currentConditions = freshestConditions;
+            lastSnap.maxTodayF = freshestMaxToday;
+        }
+
         res.end(JSON.stringify({
             targetDate: date,
             session: sessionLight,
