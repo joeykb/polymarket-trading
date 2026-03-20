@@ -398,7 +398,7 @@ const server = http.createServer(async (req, res) => {
                     snapshotCount: session.snapshots?.length || 0,
                     alertCount: session.alerts?.length || 0,
                     resolution: session.resolution || null,
-                    buyOrder: enrichBuyOrderWithDbIds(session.buyOrder, d.targetDate),
+                    buyOrder: enrichBuyOrderWithDbIds(session.buyOrder, date),
                     manualSellEnabled: !!config.dashboard.manualSellEnabled,
                     pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
                 } : null,
