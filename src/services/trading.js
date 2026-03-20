@@ -784,7 +784,7 @@ async function placeSellOrder(position, tradingCfg) {
  * @param {Array<Object>} positions - positions to sell, each { label, question, clobTokenId, shares, conditionId }
  * @returns {Promise<Object>} - sellOrder result
  */
-export async function executeSellOrder(positions) {
+export async function executeSellOrder(positions, sessionContext = {}) {
     const tradingCfg = getConfig();
 
     if (tradingCfg.mode === 'disabled') {
@@ -829,9 +829,9 @@ export async function executeSellOrder(positions) {
     // ── Persist to Database ─────────────────────────────────────────
     try {
         const { id: dbTradeId } = insertTrade({
-            sessionId: sellOrder._sessionId || null,
-            marketId: sellOrder._marketId || 'nyc',
-            targetDate: sellOrder._targetDate || null,
+            sessionId: sessionContext.sessionId || sellOrder._sessionId || null,
+            marketId: sessionContext.marketId || sellOrder._marketId || 'nyc',
+            targetDate: sessionContext.targetDate || sellOrder._targetDate || null,
             type: 'sell',
             mode: tradingCfg.mode,
             placedAt: sellOrder.executedAt,

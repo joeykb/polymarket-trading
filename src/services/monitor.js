@@ -1133,7 +1133,8 @@ export async function runMonitoringCycle(session) {
                         console.log(`     📉 ${p.label}: "${p.question.substring(55, 80)}" (${p.shares} shares)`);
                     }
 
-                    const sellResult = await executeSellOrder(positionsToSell);
+                    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
+                    const sellResult = await executeSellOrder(positionsToSell, sellCtx);
                     if (sellResult) {
                         if (!session.sellOrders) session.sellOrders = [];
                         session.sellOrders.push(sellResult);
@@ -1226,7 +1227,8 @@ export async function runMonitoringCycle(session) {
                         console.log(`     • ${p.label}: "${p.question}"`);
                     }
 
-                    const sellResult = await executeSellOrder(positionsToSell);
+                    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
+                    const sellResult = await executeSellOrder(positionsToSell, sellCtx);
                     if (sellResult) {
                         if (!session.sellOrders) session.sellOrders = [];
                         session.sellOrders.push(sellResult);
