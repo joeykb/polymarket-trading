@@ -2473,7 +2473,7 @@ function getDashboardHTML(defaultDate) {
                 // Position details with clear icons
                 const posLabels = t.positions.map(function(p) {
                     var icon, tipText = '', extraInfo = '', sellBtn = '';
-                    if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
+                    if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId) {
                         sellBtn = '<button onclick="sellPosition(' + p.positionId + ', this)" class="sell-btn" title="Sell at market">SELL</button> ';
                     }
                     if (p.soldAt && p.soldStatus === 'placed') {
