@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from '../config.js';
+import { insertTrade, insertPositions, updateTrade } from '../db/queries.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -442,6 +443,31 @@ export async function executeRealBuyOrder(snapshot, liqTokens = []) {
         await verifyOrderFills(buyOrder);
     }
 
+    // ── Persist to Database ─────────────────────────────────────────
+    // Dual-write: DB trade record alongside JSON session (append-only, survives restarts)
+    try {
+        const { id: dbTradeId } = insertTrade({
+            sessionId: buyOrder._sessionId || null,
+            marketId: buyOrder._marketId || 'nyc',
+            targetDate: buyOrder._targetDate || null,
+            type: 'buy',
+            mode: tradingCfg.mode,
+            placedAt: buyOrder.placedAt,
+            totalCost: buyOrder.actualTotalCost || buyOrder.totalCost,
+            totalProceeds: 0,
+            status: buyOrder.allUnfilled ? 'failed' : 'filled',
+            metadata: {
+                maxProfit: buyOrder.maxProfit,
+                fillSummary: buyOrder.fillSummary,
+            },
+        });
+        insertPositions(dbTradeId, buyOrder.positions);
+        buyOrder.dbTradeId = dbTradeId;
+        console.log(`  📦 DB: buy trade #${dbTradeId} saved (${buyOrder.positions.length} positions)`);
+    } catch (dbErr) {
+        console.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
+    }
+
     return buyOrder;
 }
 
@@ -799,6 +825,34 @@ export async function executeSellOrder(positions) {
 
     console.log(`\n  📋 Sell Summary: ${successCount}/${positions.length} succeeded`);
     console.log(`  💰 Total proceeds: $${sellOrder.totalProceeds.toFixed(4)}`);
+
+    // ── Persist to Database ─────────────────────────────────────────
+    try {
+        const { id: dbTradeId } = insertTrade({
+            sessionId: sellOrder._sessionId || null,
+            marketId: sellOrder._marketId || 'nyc',
+            targetDate: sellOrder._targetDate || null,
+            type: 'sell',
+            mode: tradingCfg.mode,
+            placedAt: sellOrder.executedAt,
+            totalCost: 0,
+            totalProceeds: sellOrder.totalProceeds,
+            status: successCount > 0 ? 'filled' : 'failed',
+        });
+        insertPositions(dbTradeId, sellOrder.positions.map(p => ({
+            label: p.label,
+            question: p.question,
+            price: p.sellPrice,
+            shares: p.shares,
+            orderId: p.orderId,
+            status: p.status,
+            error: p.error,
+        })));
+        sellOrder.dbTradeId = dbTradeId;
+        console.log(`  📦 DB: sell trade #${dbTradeId} saved`);
+    } catch (dbErr) {
+        console.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
+    }
 
     return sellOrder;
 }

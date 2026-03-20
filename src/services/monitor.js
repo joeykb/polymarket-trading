@@ -22,6 +22,7 @@ import { executeSellOrder } from './trading.js';
 import nodeHttp from 'http';
 import { ethers } from 'ethers';
 import { nowISO, daysUntil, getPhase, getTodayET } from '../utils/dateUtils.js';
+import { upsertSession as dbUpsertSession, insertSnapshot as dbInsertSnapshot, insertAlert as dbInsertAlert } from '../db/queries.js';
 
 // ── On-chain redemption constants ───────────────────────────────────────
 const CTF_CONTRACT_ADDR = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
@@ -965,6 +966,25 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
 
     saveSession(session);
 
+    // ── Persist session to database ─────────────────────────────────
+    try {
+        dbUpsertSession({
+            id: session.id,
+            marketId: 'nyc',
+            targetDate,
+            status: session.status,
+            phase,
+            initialForecastTemp: snapshot.forecastTempF,
+            initialTargetRange: snapshot.target?.question,
+            forecastSource: snapshot.forecastSource,
+            intervalMinutes,
+            rebalanceThreshold: config.monitor.rebalanceThreshold,
+        });
+        dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+    } catch (dbErr) {
+        console.warn(`  ⚠️  DB session write failed (non-fatal): ${dbErr.message}`);
+    }
+
     // Liquidity microservice auto-discovers sessions from output dir.
     // The buy will be handled by shouldPlaceBuy() -> startLiquidityGatedBuy()
     // during the first monitoring cycle, NOT here (avoids bypassing the gate).
@@ -1013,6 +1033,15 @@ export async function runMonitoringCycle(session) {
         session.snapshots.push(snapshot);
         session.alerts = [...(session.alerts || []), ...alerts];
         saveSession(session);
+
+        // DB: write snapshot + alerts
+        try {
+            dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+            for (const a of alerts) {
+                dbInsertAlert({ sessionId: session.id, ...a });
+            }
+        } catch { /* non-fatal */ }
+
         return { snapshot, alerts };
     }
 
@@ -1253,6 +1282,26 @@ export async function runMonitoringCycle(session) {
 
     // Persist
     saveSession(session);
+
+    // DB: write snapshot + alerts + session status
+    try {
+        dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+        for (const a of alerts) {
+            dbInsertAlert({ sessionId: session.id, ...a });
+        }
+        dbUpsertSession({
+            id: session.id,
+            marketId: 'nyc',
+            targetDate: session.targetDate,
+            status: session.status,
+            phase: session.phase,
+            initialForecastTemp: session.initialForecastTempF,
+            initialTargetRange: session.initialTargetRange,
+            forecastSource: session.forecastSource,
+            intervalMinutes: session.intervalMinutes,
+            rebalanceThreshold: session.rebalanceThreshold,
+        });
+    } catch { /* non-fatal */ }
 
     return { snapshot, alerts, resolution };
 }
