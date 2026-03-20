@@ -1655,6 +1655,7 @@ function getDashboardHTML(defaultDate) {
         let refreshTimer = null;
         let lastRenderState = null;  // Tracks what was last rendered for incremental updates
         let currentPlay = null;     // Current portfolio play for phase-aware rendering
+        let manualSellEnabled = ${config.dashboard.manualSellEnabled ? 'true' : 'false'};
 
         // ── Data Fetching ─────────────────────────
         async function fetchStatus(date) {
