@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TempEdge Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <span class="logo">🌡️ TempEdge</span>
+            <span id="statusBadge" class="status-badge status-none">
+                <span class="status-dot"></span>
+                <span id="statusText">Loading...</span>
+            </span>
+        </div>
+        <div class="header-right">
+            <a href="/admin" class="admin-link">⚙️ Admin</a>
+            <span class="refresh-indicator"><span class="dot"></span>Auto-refresh</span>
+            <select id="dateSelect" onchange="switchDate(this.value)">
+                <!-- Populated by JS -->
+            </select>
+        </div>
+    </header>
+
+    <main class="container" id="app">
+        <div class="no-data" id="loadingState">
+            <h2>Loading...</h2>
+            <p>Connecting to TempEdge monitor data</p>
+        </div>
+    </main>
+
+    <!--
+        Server-injected config values. The server replaces the placeholder
+        markers when serving this file so the client JS has access to
+        runtime configuration without an extra API round-trip.
+    -->
+    <script>
+        window.__TEMPEDGE_CONFIG__ = {
+            defaultDate: '{{DEFAULT_DATE}}',
+            refreshInterval: {{REFRESH_INTERVAL}},
+            liquidityPollMs: {{LIQUIDITY_POLL_MS}},
+            manualSellEnabled: {{MANUAL_SELL_ENABLED}},
+        };
+    </script>
+    <script src="/static/js/dashboard.js"></script>
+    <script src="/static/js/dashboard-renderers.js"></script>
+    <script src="/static/js/dashboard-panels.js"></script>
+</body>
+</html>

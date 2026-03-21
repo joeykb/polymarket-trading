@@ -124,6 +124,26 @@ function saveOverrides(overrides) {
 
 /** @type {Record<string, Record<string, any>>} */
 let _overrides = loadOverrides();
+let _overridesMtimeMs = 0;
+
+/**
+ * Re-read overrides from disk if the file has changed.
+ * This ensures ALL processes (monitor, dashboard, liquidity) pick up
+ * admin config changes without needing a restart.
+ */
+function refreshOverrides() {
+    try {
+        if (fs.existsSync(OVERRIDES_PATH)) {
+            const stat = fs.statSync(OVERRIDES_PATH);
+            if (stat.mtimeMs !== _overridesMtimeMs) {
+                _overrides = JSON.parse(fs.readFileSync(OVERRIDES_PATH, 'utf-8'));
+                _overridesMtimeMs = stat.mtimeMs;
+            }
+        }
+    } catch {
+        // Non-fatal — keep existing overrides
+    }
+}
 
 function resolveValue(path, schemaDef) {
     const { key, default: def } = schemaDef;
@@ -148,6 +168,9 @@ function resolveValue(path, schemaDef) {
 }
 
 function buildConfig() {
+    // Re-read overrides from disk (mtime-cached — cheap if unchanged)
+    refreshOverrides();
+
     const cfg = {};
     for (const [p, schema] of Object.entries(SCHEMA)) {
         const [section, field] = p.split('.');
@@ -160,10 +183,34 @@ function buildConfig() {
 }
 
 /**
- * The live config object. Mutable — gets rebuilt on updateConfig().
- * Services should read from this at call time rather than caching at module load.
+ * The live config object. Auto-refreshes from the overrides file on disk
+ * so that ALL processes (monitor, dashboard, liquidity) see admin changes
+ * without requiring a restart.
+ *
+ * Throttled to rebuild at most once every 5 seconds to avoid excessive I/O.
  */
-export let config = buildConfig();
+let _configCache = buildConfig();
+let _configLastRefreshMs = Date.now();
+const CONFIG_REFRESH_INTERVAL_MS = 5000;
+
+export const config = new Proxy({}, {
+    get(_target, section) {
+        const now = Date.now();
+        if (now - _configLastRefreshMs > CONFIG_REFRESH_INTERVAL_MS) {
+            _configCache = buildConfig();
+            _configLastRefreshMs = now;
+        }
+        return _configCache[section];
+    },
+    ownKeys() {
+        return Object.keys(_configCache);
+    },
+    getOwnPropertyDescriptor(_target, section) {
+        if (section in _configCache) {
+            return { configurable: true, enumerable: true, value: _configCache[section] };
+        }
+    },
+});
 
 // ── Mutations ───────────────────────────────────────────────────────────
 
@@ -221,8 +268,9 @@ export function updateConfig(updates) {
     // Persist
     saveOverrides(_overrides);
 
-    // Hot-reload
-    config = buildConfig();
+    // Hot-reload (update the cache backing the Proxy immediately)
+    _configCache = buildConfig();
+    _configLastRefreshMs = Date.now();
 
     return { applied, skipped, requiresRestart };
 }
@@ -239,7 +287,8 @@ export function resetConfigValue(section, field) {
             delete _overrides[section];
         }
         saveOverrides(_overrides);
-        config = buildConfig();
+        _configCache = buildConfig();
+        _configLastRefreshMs = Date.now();
     }
 }
 
@@ -249,7 +298,8 @@ export function resetConfigValue(section, field) {
 export function resetAllOverrides() {
     _overrides = {};
     saveOverrides(_overrides);
-    config = buildConfig();
+    _configCache = buildConfig();
+    _configLastRefreshMs = Date.now();
 }
 
 // ── Introspection (for /api/config and admin page) ──────────────────────

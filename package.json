@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "monitor": "node src/monitor.js",
-    "dashboard": "node src/dashboard.js",
+    "dashboard": "node src/dashboard/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
