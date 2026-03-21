@@ -1,0 +1,89 @@
+# TempEdge Data Service
+# Sole owner of SQLite DB, session files, config overrides, and spend tracking
+# All other services read/write through this HTTP API
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-svc
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: data-svc
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # SQLite needs exclusive access
+  selector:
+    matchLabels:
+      app: tempedge
+      component: data-svc
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: data-svc
+    spec:
+      containers:
+        - name: data-svc
+          image: tempedge-data-svc:latest
+          imagePullPolicy: Never
+          env:
+            - name: OUTPUT_DIR
+              value: "/app/output"
+            - name: DATA_SVC_PORT
+              value: "3005"
+          volumeMounts:
+            - name: output
+              mountPath: /app/output
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          ports:
+            - name: http
+              containerPort: 3005
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3005
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+      volumes:
+        - name: output
+          persistentVolumeClaim:
+            claimName: tempedge-output
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-svc
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: data-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: data-svc
+  ports:
+    - name: http
+      port: 3005
+      targetPort: 3005
+      protocol: TCP
