@@ -1,0 +1,49 @@
+# TempEdge Monitor — Orchestrator
+# No exposed port — pure timer loop that calls other services
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+      component: monitor
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: monitor
+    spec:
+      containers:
+        - name: monitor
+          image: tempedge-monitor:latest
+          imagePullPolicy: Never
+          env:
+            - name: WEATHER_SVC_URL
+              value: "http://weather-svc:3002"
+            - name: MARKET_SVC_URL
+              value: "http://market-svc:3003"
+            - name: TRADING_SVC_URL
+              value: "http://trading-svc:3004"
+            - name: DATA_SVC_URL
+              value: "http://data-svc:3005"
+            - name: LIQUIDITY_SVC_URL
+              value: "http://liquidity-svc:3001"
+          envFrom:
+            - configMapRef:
+                name: tempedge-config
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+# No Service needed — monitor doesn't expose any port

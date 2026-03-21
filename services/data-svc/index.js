@@ -358,6 +358,63 @@ async function handleRequest(req, res) {
             return json(res, { resetAll: true });
         }
 
+        // ── Full Config (defaults + overrides) ──────────
+        if (pathname === '/api/config' && method === 'GET') {
+            const overrides = loadConfigOverrides();
+            // Merge overrides on top of defaults
+            const defaults = {
+                monitor: {
+                    intervalMinutes: 15,
+                    rebalanceThreshold: 3,
+                    forecastShiftThreshold: 2,
+                    priceSpikeThreshold: 0.05,
+                    buyHourEST: 7,
+                },
+                liquidity: {
+                    wsEnabled: true,
+                    checkIntervalSecs: 30,
+                    buyDeadlineHour: 10.5,
+                    requireAllLiquid: false,
+                },
+                phases: {
+                    scoutDaysMax: 4,
+                    trendThreshold: 2,
+                },
+                trading: {},
+            };
+            for (const section of Object.keys(overrides)) {
+                if (!defaults[section]) defaults[section] = {};
+                Object.assign(defaults[section], overrides[section]);
+            }
+            return json(res, defaults);
+        }
+
+        // ── DB Sessions (upsert via POST) ───────────────
+        if (pathname === '/api/db/sessions' && method === 'POST') {
+            const body = await readBody(req);
+            queries.upsertSession(body);
+            return json(res, { upserted: true }, 201);
+        }
+
+        // ── Restart Signal ──────────────────────────────
+        if (pathname === '/api/restart-signal' && method === 'GET') {
+            const signalPath = path.join(OUTPUT_DIR, '.restart-requested');
+            const requested = fs.existsSync(signalPath);
+            return json(res, { requested });
+        }
+        if (pathname === '/api/restart-signal' && method === 'DELETE') {
+            const signalPath = path.join(OUTPUT_DIR, '.restart-requested');
+            if (fs.existsSync(signalPath)) {
+                try { fs.unlinkSync(signalPath); } catch { }
+            }
+            return json(res, { cleared: true });
+        }
+        if (pathname === '/api/restart-signal' && method === 'POST') {
+            const signalPath = path.join(OUTPUT_DIR, '.restart-requested');
+            fs.writeFileSync(signalPath, new Date().toISOString());
+            return json(res, { signaled: true }, 201);
+        }
+
         // ── Markets ─────────────────────────────────────
         if (pathname === '/api/markets' && method === 'GET') {
             return json(res, queries.getActiveMarkets());
