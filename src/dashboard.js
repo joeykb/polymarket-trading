@@ -15,7 +15,7 @@ import { getTodayET, getTomorrowET, getTargetDateET, daysUntil, getPhase } from 
 import { config, getConfigSnapshot, updateConfig, resetConfigValue, resetAllOverrides } from './config.js';
 import { getDb } from './db/index.js';
 import { getAllTrades, getPositionsForTrade, getAllSessions, getSession, insertTrade, insertPositions } from './db/queries.js';
-import { retrySinglePosition } from './services/trading.js';
+import { retrySinglePosition, executeSellOrder } from './services/trading.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,33 +43,40 @@ if (!targetDate) {
     targetDate = getTargetDateET();
 }
 
-// ── Data Loading ────────────────────────────────────────────────────────
+// ── Data Loading & Caching ───────────────────────────────────────────────
 
-/** @type {Map<string, {data: Object, mtime: number, cachedAt: number}>} */
-const sessionCache = new Map();
-const SESSION_CACHE_TTL_MS = 60_000; // 60s — session files update every 15 min
+/** Mtime-based in-memory cache for session JSON files */
+const sessionCache = new Map();   // date → { data, mtimeMs }
+const observationCache = new Map(); // date → { data, mtimeMs }
+
+/** Global current-temp cache — updated whenever any session is loaded */
+let globalCurrentTemp = { tempF: null, conditions: null, maxTodayF: null, timestamp: '' };
 
 function loadSessionData(date) {
     const sessionPath = path.join(OUTPUT_DIR, `monitor-${date}.json`);
-    if (!fs.existsSync(sessionPath)) return null;
-
     try {
         const stat = fs.statSync(sessionPath);
-        const mtime = stat.mtimeMs;
         const cached = sessionCache.get(date);
-
-        // Return cached if file hasn't changed and cache is fresh
-        if (cached && cached.mtime === mtime && (Date.now() - cached.cachedAt) < SESSION_CACHE_TTL_MS) {
-            return cached.data;
-        }
+        if (cached && cached.mtimeMs === stat.mtimeMs) return cached.data;
 
         const data = JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
-        sessionCache.set(date, { data, mtime, cachedAt: Date.now() });
+        sessionCache.set(date, { data, mtimeMs: stat.mtimeMs });
 
-        // Evict old cache entries to prevent memory leak
+        // Update global current temp if this session's latest snapshot is newer
+        const snap = data.snapshots?.[data.snapshots.length - 1];
+        if (snap && snap.timestamp > globalCurrentTemp.timestamp && snap.currentTempF != null) {
+            globalCurrentTemp = {
+                tempF: snap.currentTempF,
+                conditions: snap.currentConditions,
+                maxTodayF: snap.maxTodayF,
+                timestamp: snap.timestamp,
+            };
+        }
+
+        // Evict old cache entries (keep max 10)
         if (sessionCache.size > 10) {
-            const oldest = [...sessionCache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt)[0];
-            if (oldest) sessionCache.delete(oldest[0]);
+            const oldest = [...sessionCache.keys()].sort()[0];
+            sessionCache.delete(oldest);
         }
 
         return data;
@@ -80,14 +87,23 @@ function loadSessionData(date) {
 
 function loadObservationData(date) {
     const obsPath = path.join(OUTPUT_DIR, `${date}.json`);
-    if (fs.existsSync(obsPath)) {
-        try {
-            return JSON.parse(fs.readFileSync(obsPath, 'utf-8'));
-        } catch {
-            return null;
+    try {
+        const stat = fs.statSync(obsPath);
+        const cached = observationCache.get(date);
+        if (cached && cached.mtimeMs === stat.mtimeMs) return cached.data;
+
+        const data = JSON.parse(fs.readFileSync(obsPath, 'utf-8'));
+        observationCache.set(date, { data, mtimeMs: stat.mtimeMs });
+
+        if (observationCache.size > 10) {
+            const oldest = [...observationCache.keys()].sort()[0];
+            observationCache.delete(oldest);
         }
+
+        return data;
+    } catch {
+        return null;
     }
-    return null;
 }
 
 function listAvailableDates() {
@@ -177,6 +193,39 @@ function overlayLivePrices(snapshot, liveData) {
     snapshot._liveOverlay = true;
 
     return snapshot;
+}
+
+/**
+ * Enrich buyOrder positions with database position IDs.
+ * The session JSON doesn't store DB IDs, so we look them up by trade/question.
+ */
+function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
+    if (!buyOrder || !buyOrder.positions) return buyOrder || null;
+    try {
+        const db = getDb();
+        // Find the buy trade for this date
+        const trade = db.prepare(`SELECT id FROM trades WHERE target_date = ? AND type = 'buy' ORDER BY id DESC LIMIT 1`).get(targetDate);
+        if (!trade) return buyOrder;
+
+        const dbPositions = db.prepare(`SELECT id, question, status, sold_at FROM positions WHERE trade_id = ?`).all(trade.id);
+        const posMap = {};
+        for (const p of dbPositions) {
+            posMap[p.question] = p;
+        }
+
+        buyOrder.positions = buyOrder.positions.map(p => {
+            const dbPos = posMap[p.question];
+            return {
+                ...p,
+                positionId: dbPos?.id || null,
+                soldAt: dbPos?.sold_at || p.soldAt || null,
+            };
+        });
+    } catch (err) {
+        // Silently fail — don't break the API response
+        console.warn(`  ⚠️  enrichBuyOrderWithDbIds: ${err.message}`);
+    }
+    return buyOrder;
 }
 
 /**
@@ -296,7 +345,8 @@ const server = http.createServer(async (req, res) => {
                 forecastSource: session.forecastSource,
                 rebalanceThreshold: session.rebalanceThreshold,
                 resolution: session.resolution || null,
-                buyOrder: session.buyOrder || null,
+                buyOrder: enrichBuyOrderWithDbIds(session.buyOrder, date),
+                manualSellEnabled: !!config.dashboard.manualSellEnabled,
                 pnl: session.pnl,
                 redeemExecuted: session.redeemExecuted || false,
                 redeemResult: session.redeemResult || null,
@@ -311,6 +361,14 @@ const server = http.createServer(async (req, res) => {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
         });
+        // Use cached global current temp (updated automatically when sessions are loaded)
+        if (sessionLight && sessionLight.snapshots && sessionLight.snapshots.length > 0 && globalCurrentTemp.tempF != null) {
+            const lastSnap = sessionLight.snapshots[sessionLight.snapshots.length - 1];
+            lastSnap.currentTempF = globalCurrentTemp.tempF;
+            lastSnap.currentConditions = globalCurrentTemp.conditions;
+            lastSnap.maxTodayF = globalCurrentTemp.maxTodayF;
+        }
+
         res.end(JSON.stringify({
             targetDate: date,
             session: sessionLight,
@@ -364,7 +422,8 @@ const server = http.createServer(async (req, res) => {
                     snapshotCount: session.snapshots?.length || 0,
                     alertCount: session.alerts?.length || 0,
                     resolution: session.resolution || null,
-                    buyOrder: session.buyOrder || null,
+                    buyOrder: enrichBuyOrderWithDbIds(session.buyOrder, date),
+                    manualSellEnabled: !!config.dashboard.manualSellEnabled,
                     pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
                 } : null,
                 latest: latest ? {
@@ -387,6 +446,17 @@ const server = http.createServer(async (req, res) => {
                 hasData: !!session || !!loadObservationData(date),
             };
         }));
+
+        // Use cached global current temp across all portfolio cards
+        if (globalCurrentTemp.tempF != null) {
+            for (const play of plays) {
+                if (play.latest) {
+                    play.latest.currentTempF = globalCurrentTemp.tempF;
+                    play.latest.currentConditions = globalCurrentTemp.conditions;
+                    play.latest.maxTodayF = globalCurrentTemp.maxTodayF;
+                }
+            }
+        }
 
         res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -498,11 +568,11 @@ const server = http.createServer(async (req, res) => {
                                 question: p.question,
                                 buyPrice: p.price,
                                 shares: p.shares,
-                                status: redeemed ? 'redeemed' : (sold ? 'sold' : (p.status || 'placed')),
+                                status: redeemed ? 'redeemed' : (sold || p.sold_at ? 'sold' : (p.status || 'placed')),
                                 orderId: p.order_id || null,
                                 error: p.error || null,
-                                soldAt: sold ? sold.price : null,
-                                soldStatus: sold ? 'placed' : null,
+                                soldAt: sold ? sold.price : (p.sold_at || null),
+                                soldStatus: sold ? 'placed' : (p.sold_at ? 'placed' : null),
                                 sellPrice: sold ? sold.price : null,
                                 redeemedAt: p.redeemed_at || null,
                                 redeemedValue: p.redeemed_value || null,
@@ -865,6 +935,131 @@ const server = http.createServer(async (req, res) => {
                 res.end(JSON.stringify(result));
             } catch (err) {
                 console.error(`  ❌ Retry error: ${err.message}`);
+                res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify({ success: false, error: err.message }));
+            }
+        });
+        return;
+    }
+
+    // Manual sell — sell a specific owned position from the dashboard
+    if (url.pathname === '/api/sell-position' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+            try {
+                // Feature flag check
+                if (!config.dashboard.manualSellEnabled) {
+                    res.writeHead(403, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Manual sell is disabled. Enable it in Admin → dashboard.manualSellEnabled' }));
+                    return;
+                }
+
+                const { positionId, targetDate } = JSON.parse(body);
+                if (!positionId) throw new Error('positionId is required');
+
+                const db = getDb();
+
+                // Look up the owned position (must be filled, not already sold)
+                const pos = db.prepare(`
+                    SELECT p.*, t.target_date, t.session_id, t.market_id, t.id as trade_id
+                    FROM positions p
+                    JOIN trades t ON p.trade_id = t.id
+                    WHERE p.id = ? AND t.type = 'buy' AND (p.status = 'placed' OR p.status = 'filled')
+                    AND p.sold_at IS NULL AND p.redeemed_at IS NULL
+                `).get(positionId);
+
+                if (!pos) {
+                    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Position not found, already sold, or not in filled status' }));
+                    return;
+                }
+
+                console.log(`\n  🏷️  MANUAL SELL: position #${positionId} — ${pos.label} for ${pos.target_date}`);
+                console.log(`     ${pos.question}`);
+                console.log(`     ${pos.shares} shares, bought at $${pos.price}`);
+
+                // Resolve clobTokenId and conditionId
+                let conditionId = pos.condition_id;
+                let clobTokenIds = pos.clob_token_ids;
+                let tokenId = pos.token_id;
+
+                if (!conditionId || !clobTokenIds) {
+                    const session = loadSessionData(pos.target_date);
+                    if (session) {
+                        const latestSnap = session.snapshots?.[session.snapshots.length - 1];
+                        if (latestSnap) {
+                            for (const rangeKey of ['target', 'below', 'above']) {
+                                const range = latestSnap[rangeKey];
+                                if (range && range.question === pos.question) {
+                                    conditionId = conditionId || range.conditionId;
+                                    clobTokenIds = clobTokenIds || (range.clobTokenIds ? JSON.stringify(range.clobTokenIds) : null);
+                                    tokenId = tokenId || range.clobTokenIds?.[0];
+                                    console.log(`  📡 Resolved from session: conditionId=${conditionId}, tokenId=${tokenId}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!tokenId && clobTokenIds) {
+                    try {
+                        tokenId = JSON.parse(clobTokenIds)[0];
+                    } catch { }
+                }
+
+                if (!tokenId || !conditionId) {
+                    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'Cannot resolve market data (tokenId/conditionId) for this position' }));
+                    return;
+                }
+
+                // Execute sell via trading service
+                const sellPositions = [{
+                    label: pos.label,
+                    question: pos.question,
+                    clobTokenId: tokenId,
+                    conditionId,
+                    shares: pos.shares || 1,
+                }];
+
+                const sessionCtx = {
+                    sessionId: pos.session_id,
+                    targetDate: pos.target_date,
+                    marketId: pos.market_id || 'nyc',
+                };
+
+                const sellResult = await executeSellOrder(sellPositions, sessionCtx);
+
+                if (sellResult && sellResult.positions?.length > 0) {
+                    const soldPos = sellResult.positions[0];
+                    if (soldPos.status === 'filled' || soldPos.status === 'placed') {
+                        // Mark the buy position as sold
+                        db.prepare(`
+                            UPDATE positions SET sold_at = ?, sell_price = ?, sell_order_id = ?
+                            WHERE id = ?
+                        `).run(new Date().toISOString(), soldPos.sellPrice, soldPos.orderId, positionId);
+
+                        console.log(`  ✅ MANUAL SELL completed: ${pos.shares} shares of ${pos.label} at $${soldPos.sellPrice?.toFixed(4)}`);
+
+                        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                        res.end(JSON.stringify({
+                            success: true,
+                            sellPrice: soldPos.sellPrice,
+                            proceeds: sellResult.totalProceeds,
+                            orderId: soldPos.orderId,
+                        }));
+                    } else {
+                        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                        res.end(JSON.stringify({ success: false, error: soldPos.error || 'Sell order did not fill' }));
+                    }
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ success: false, error: 'executeSellOrder returned null' }));
+                }
+            } catch (err) {
+                console.error(`  ❌ Manual sell error: ${err.message}`);
                 res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                 res.end(JSON.stringify({ success: false, error: err.message }));
             }
@@ -1463,6 +1658,26 @@ function getDashboardHTML(defaultDate) {
             cursor: wait;
             opacity: 0.7;
         }
+        .sell-btn {
+            background: rgba(239,68,68,0.15);
+            color: #f87171;
+            border: 1px solid rgba(239,68,68,0.3);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-right: 4px;
+            transition: all 0.2s;
+        }
+        .sell-btn:hover {
+            background: rgba(239,68,68,0.35);
+            border-color: rgba(239,68,68,0.5);
+        }
+        .sell-btn:disabled {
+            cursor: wait;
+            opacity: 0.5;
+        }
     </style>
 </head>
 <body>
@@ -1495,6 +1710,7 @@ function getDashboardHTML(defaultDate) {
         let refreshTimer = null;
         let lastRenderState = null;  // Tracks what was last rendered for incremental updates
         let currentPlay = null;     // Current portfolio play for phase-aware rendering
+        let manualSellEnabled = ${config.dashboard.manualSellEnabled ? 'true' : 'false'};
 
         // ── Data Fetching ─────────────────────────
         async function fetchStatus(date) {
@@ -1766,6 +1982,7 @@ function getDashboardHTML(defaultDate) {
                 portfolioEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">' +
                     portfolio.plays.map(p => renderPortfolioCard(p)).join('') + '</div>';
                 currentPlay = portfolio.plays.find(p => p.date === currentDate) || null;
+                if (currentPlay && currentPlay.session) manualSellEnabled = !!currentPlay.session.manualSellEnabled;
             }
 
             if (vm.snapshotCount !== lastRenderState.snapshotCount) {
@@ -1828,6 +2045,7 @@ function getDashboardHTML(defaultDate) {
                     portfolio.plays.map(p => renderPortfolioCard(p)).join('') +
                     '</div></div></div>';
                 currentPlay = portfolio.plays.find(p => p.date === currentDate) || null;
+                if (currentPlay && currentPlay.session) manualSellEnabled = !!currentPlay.session.manualSellEnabled;
             }
 
             if (!session && !observation) {
@@ -2202,6 +2420,36 @@ function getDashboardHTML(defaultDate) {
             }
         }
 
+        async function sellPosition(positionId, btnEl) {
+            if (!positionId) return;
+            if (!confirm("Sell this position at market price? This cannot be undone.")) return;
+            btnEl.disabled = true;
+            btnEl.textContent = "Selling...";
+            try {
+                const res = await fetch("/api/sell-position", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ positionId: positionId, targetDate: currentDate }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    btnEl.textContent = "Sold $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
+                    btnEl.style.background = "rgba(16,185,129,0.2)";
+                    btnEl.style.color = "#34d399";
+                    btnEl.style.borderColor = "rgba(16,185,129,0.3)";
+                    setTimeout(function() { fetchTradeLog(); }, 2000);
+                } else {
+                    alert("Sell failed: " + (data.error || "Unknown error"));
+                    btnEl.textContent = "SELL";
+                    btnEl.disabled = false;
+                }
+            } catch (err) {
+                alert("Sell error: " + err.message);
+                btnEl.textContent = "SELL";
+                btnEl.disabled = false;
+            }
+        }
+
         function renderTradeLog(data) {
             const body = document.getElementById('tradeLogBody');
             const countEl = document.getElementById('tradeLogCount');
@@ -2259,7 +2507,10 @@ function getDashboardHTML(defaultDate) {
 
                 // Position details with clear icons
                 const posLabels = t.positions.map(function(p) {
-                    var icon, tipText = '', extraInfo = '';
+                    var icon, tipText = '', extraInfo = '', sellBtn = '';
+                    if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId) {
+                        sellBtn = '<button onclick="sellPosition(' + p.positionId + ', this)" class="sell-btn" title="Sell at market">SELL</button> ';
+                    }
                     if (p.soldAt && p.soldStatus === 'placed') {
                         // Sold position
                         icon = '\\ud83d\\udcb5';  // money = sold
@@ -2286,7 +2537,7 @@ function getDashboardHTML(defaultDate) {
                     var roleTag = (p.label && p.label !== displayLabel) ? ' <span style="color:var(--text-muted);font-size:10px;opacity:0.7;">(' + p.label + ')</span>' : '';
                     var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
                     var shares = p.shares ? ' \\u00d7' + p.shares : '';
-                    var label = icon + ' ' + displayLabel + roleTag + ' @' + priceStr + shares + extraInfo;
+                    var label = sellBtn + icon + ' ' + displayLabel + roleTag + ' @' + priceStr + shares + extraInfo;
                     if (tipText) {
                         label += ' <span style="color:var(--text-muted);font-size:11px;" title="' + escapeHtml(tipText) + '">(' + escapeHtml(tipText.substring(0, 25)) + ')</span>';
                     }
@@ -2294,6 +2545,7 @@ function getDashboardHTML(defaultDate) {
                     if (p.status === 'failed' && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') {
                         label += ' <button onclick="retryPosition(' + p.positionId + ', this)" class="retry-btn" title="Retry this failed order">\ud83d\udd04 Retry</button>';
                     }
+                    // Sell button handled via sellBtn prepended to label
                     return label;
                 }).join('<br>');
 
@@ -2362,7 +2614,33 @@ function getDashboardHTML(defaultDate) {
             const labelColors = { target: 'var(--accent-blue)', below: 'var(--accent-orange)', above: 'var(--accent-green)' };
             const labelIcons = { target: '🎯', below: '⬇️', above: '⬆️' };
 
-            for (const token of data.tokens) {
+            // Filter to strategy tokens (target/below/above) + owned positions not already shown
+            const ownedQuestions = new Set();
+            if (hasBuyOrder && hasBuyOrder.positions) {
+                hasBuyOrder.positions.forEach(function(p) {
+                    if (p.question && p.status !== 'failed' && p.status !== 'rejected') ownedQuestions.add(p.question);
+                });
+            }
+            // Strategy tokens are exactly: target, below, above
+            const strategyQuestions = new Set();
+            const relevantTokens = [];
+            // First pass: add the 3 strategy tokens
+            for (var ti = 0; ti < data.tokens.length; ti++) {
+                var t = data.tokens[ti];
+                if (t.label === 'target' || t.label === 'below' || t.label === 'above') {
+                    relevantTokens.push(t);
+                    strategyQuestions.add(t.question);
+                }
+            }
+            // Second pass: add owned tokens not already included
+            for (var ti = 0; ti < data.tokens.length; ti++) {
+                var t = data.tokens[ti];
+                if (!strategyQuestions.has(t.question) && ownedQuestions.has(t.question)) {
+                    relevantTokens.push(t);
+                }
+            }
+
+            for (const token of relevantTokens) {
                 // Determine display label based on phase
                 let displayLabel, displayIcon, displayColor;
                 if (hasFilled) {
@@ -2437,6 +2715,18 @@ function getDashboardHTML(defaultDate) {
                 html += '<div style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600;color:' + scoreColor + ';width:35px;text-align:right;">' + scorePct + '%</div>';
                 html += '</div>';
 
+
+                // Manual sell button (feature-flagged)
+                if (manualSellEnabled && hasFilled) {
+                    // Find matching owned position from buyOrder
+                    var ownedPos = hasBuyOrder && hasBuyOrder.positions ? hasBuyOrder.positions.find(function(p) { return p.question === token.question && !p.soldAt && p.status !== 'failed'; }) : null;
+                    if (ownedPos) {
+                        html += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;">';
+                        html += '<span style="font-size:11px;color:var(--text-muted);">' + (ownedPos.shares || '?') + ' shares @ $' + (ownedPos.buyPrice ? ownedPos.buyPrice.toFixed(2) : '?.??') + '</span>';
+                        html += '<button onclick="sellPosition(' + ownedPos.positionId + ', this)" class="sell-btn" title="Sell this position at market bid price">SELL</button>';
+                        html += '</div>';
+                    }
+                }
                 html += '</div>';
             }
 
