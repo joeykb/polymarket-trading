@@ -1,0 +1,16 @@
+{
+  "name": "tempedge-trading-svc",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TempEdge Trading Service — buy, sell, redeem via Polymarket CLOB API (VPN-protected)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^4.0.0",
+    "dotenv": "^16.0.0",
+    "ethers": "^5.7.2"
+  }
+}
