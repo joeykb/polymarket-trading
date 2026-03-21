@@ -2614,7 +2614,33 @@ function getDashboardHTML(defaultDate) {
             const labelColors = { target: 'var(--accent-blue)', below: 'var(--accent-orange)', above: 'var(--accent-green)' };
             const labelIcons = { target: '🎯', below: '⬇️', above: '⬆️' };
 
-            for (const token of data.tokens) {
+            // Filter to strategy tokens (target/below/above) + owned positions not already shown
+            const ownedQuestions = new Set();
+            if (hasBuyOrder && hasBuyOrder.positions) {
+                hasBuyOrder.positions.forEach(function(p) {
+                    if (p.question && p.status !== 'failed' && p.status !== 'rejected') ownedQuestions.add(p.question);
+                });
+            }
+            // Strategy tokens are exactly: target, below, above
+            const strategyQuestions = new Set();
+            const relevantTokens = [];
+            // First pass: add the 3 strategy tokens
+            for (var ti = 0; ti < data.tokens.length; ti++) {
+                var t = data.tokens[ti];
+                if (t.label === 'target' || t.label === 'below' || t.label === 'above') {
+                    relevantTokens.push(t);
+                    strategyQuestions.add(t.question);
+                }
+            }
+            // Second pass: add owned tokens not already included
+            for (var ti = 0; ti < data.tokens.length; ti++) {
+                var t = data.tokens[ti];
+                if (!strategyQuestions.has(t.question) && ownedQuestions.has(t.question)) {
+                    relevantTokens.push(t);
+                }
+            }
+
+            for (const token of relevantTokens) {
                 // Determine display label based on phase
                 let displayLabel, displayIcon, displayColor;
                 if (hasFilled) {
