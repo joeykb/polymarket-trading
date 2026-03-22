@@ -671,7 +671,7 @@ async function handleRequest(req, res) {
                 'weather.stationLat':   { key: 'WEATHER_LAT',     default: 40.7769,  description: 'Station latitude' },
                 'weather.stationLon':   { key: 'WEATHER_LON',     default: -73.8740, description: 'Station longitude' },
                 'weather.stationName':  { key: 'WEATHER_STATION', default: 'KLGA',   description: 'Weather station ID' },
-                'weather.wcApiKey':     { key: 'WC_API_KEY',      default: 'e1f10a1e78da46f5b10a1e78da96f525', description: 'Weather Company API key', sensitive: true },
+                'weather.wcApiKey':     { key: 'WC_API_KEY',      default: '', description: 'Weather Company API key', sensitive: true },
                 'weather.wcBaseUrl':    { key: 'WC_BASE_URL',     default: 'https://api.weather.com/v3/wx',    description: 'Weather Company base URL', requiresRestart: true },
                 'weather.openMeteoUrl': { key: 'OPEN_METEO_URL',  default: 'https://api.open-meteo.com/v1/forecast', description: 'Open-Meteo fallback URL', requiresRestart: true },
                 'weather.retries':      { key: 'WEATHER_RETRIES', default: 2,        description: 'Retries per weather source' },
