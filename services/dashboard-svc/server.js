@@ -296,7 +296,7 @@ const server = http.createServer(requestLogger(createLogger('dashboard-svc-http'
                             orderId: p.orderId || null, error: p.error || null,
                             positionId: p.positionId || p.dbPositionId || null,
                             soldAt: p.soldAt || null, soldStatus: p.soldStatus || null,
-                            sellPrice: (p.soldAt && p.soldStatus === 'placed') ? (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0) : null,
+                            sellPrice: p.sellPrice || ((p.sellProceeds && p.shares) ? p.sellProceeds / p.shares : null),
                         })),
                         totalCost: bo.totalCost, maxProfit: bo.maxProfit,
                         pnl: pnl ? { totalPnL: pnl.totalPnL, totalPnLPct: pnl.totalPnLPct, totalBuyCost: pnl.totalBuyCost, totalCurrentValue: pnl.totalCurrentValue } : null,

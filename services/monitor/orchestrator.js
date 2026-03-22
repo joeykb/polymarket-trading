@@ -532,6 +532,11 @@ function startLiquidityGatedBuy(session, snapshot) {
 export async function createOrResumeSession(targetDate, intervalMinutes) {
     const existing = await loadSession(targetDate);
 
+    if (existing && existing.status === 'completed') {
+        console.log(`  ✅ Session ${targetDate} already completed — skipping`);
+        return existing;
+    }
+
     if (existing && (existing.status === 'active' || existing.status === 'stopped')) {
         existing.status = 'active';
         existing.phase = getPhase(targetDate);
