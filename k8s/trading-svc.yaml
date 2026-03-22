@@ -44,6 +44,12 @@ spec:
               value: "off"
             - name: HEALTH_TARGET_ADDRESS
               value: "gamma-api.polymarket.com:443"
+            # Allow K8s internal traffic to bypass the VPN tunnel
+            - name: FIREWALL_OUTBOUND_SUBNETS
+              value: "10.42.0.0/16,10.43.0.0/16"
+            # Keep K8s CoreDNS so service names (data-svc, etc.) resolve
+            - name: DNS_KEEP_NAMESERVER
+              value: "on"
           envFrom:
             - secretRef:
                 name: nordvpn-credentials
