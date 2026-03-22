@@ -129,25 +129,26 @@ function renderTradeLog(data) {
         const anyPlaced = t.positions.some(function(p) { return p.status === 'placed' || p.status === 'filled'; });
         const anyPartial = t.positions.some(function(p) { return p.status === 'partial'; });
         let execBadge = '';
-        if (t.mode === 'dry-run') execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\ud83e\uddea DRY RUN</span>';
-        else if (allFailed) { const firstErr = t.positions[0]?.error || 'unknown'; execBadge = '<span style="background:rgba(239,68,68,0.15);color:#f87171;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="' + escapeHtml(firstErr) + '">\u274c FAILED</span>'; }
-        else if (anyPlaced) execBadge = '<span style="background:rgba(16,185,129,0.15);color:#34d399;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\ud83d\udfe2 LIVE</span>';
-        else if (anyPartial) execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\ud83d\udfe1 PARTIAL</span>';
-        else execBadge = '<span style="background:rgba(107,114,128,0.15);color:#9ca3af;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">\u2753 Unknown</span>';
+        if (t.mode === 'dry-run') execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="Simulated trade — no real money spent">\ud83e\uddea DRY RUN</span>';
+        else if (allFailed) { const firstErr = t.positions[0]?.error || 'unknown'; execBadge = '<span style="background:rgba(239,68,68,0.15);color:#f87171;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="All orders failed: ' + escapeHtml(firstErr) + '">\u274c FAILED</span>'; }
+        else if (anyPlaced) execBadge = '<span style="background:rgba(16,185,129,0.15);color:#34d399;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="Live trade — real orders placed on-chain">\ud83d\udfe2 LIVE</span>';
+        else if (anyPartial) execBadge = '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="Some orders filled, some pending or failed">\ud83d\udfe1 PARTIAL</span>';
+        else execBadge = '<span style="background:rgba(107,114,128,0.15);color:#9ca3af;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:help;" title="Unknown execution status">\u2753 Unknown</span>';
 
         const posLabels = t.positions.map(function(p) {
             var icon, tipText = '', extraInfo = '', sellBtn = '';
             if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') { var sd = escapeHtml(JSON.stringify({ positionId: p.positionId, question: p.question, label: p.label, targetDate: t.date, shares: p.shares })); sellBtn = '<button class="sell-btn" data-sell="' + sd + '" title="Sell at market">SELL</button> '; }
             if (p.soldAt && p.soldStatus === 'placed') {
-                icon = '\ud83d\udcb5'; var sp = p.sellPrice || (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0); var posShares = p.shares || 1; var realizedPnl = (sp - p.buyPrice) * posShares; var pnlSign = realizedPnl >= 0 ? '+' : ''; var pnlColor = realizedPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                icon = '<span title="SOLD — Position has been sold" style="cursor:help;">\ud83d\udcb5</span>'; var sp = p.sellPrice || (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0); var posShares = p.shares || 1; var realizedPnl = (sp - p.buyPrice) * posShares; var pnlSign = realizedPnl >= 0 ? '+' : ''; var pnlColor = realizedPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
                 extraInfo = ' <span style="background:rgba(107,114,128,0.25);color:#9ca3af;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">SOLD @$' + sp.toFixed(2) + '</span> <span style="color:' + pnlColor + ';font-size:11px;font-weight:600;">' + pnlSign + '$' + realizedPnl.toFixed(3) + '</span>';
-            } else if ((p.status === 'placed' || p.status === 'filled') && t.mode !== 'dry-run') icon = '\ud83d\udfe2';
-            else if (t.mode === 'dry-run') icon = '\ud83e\uddea';
-            else { icon = '\u274c'; tipText = p.error || ''; }
+            } else if ((p.status === 'placed' || p.status === 'filled') && t.mode !== 'dry-run') icon = '<span title="FILLED — Live order placed on-chain" style="cursor:help;">\ud83d\udfe2</span>';
+            else if (t.mode === 'dry-run') icon = '<span title="SIMULATED — Dry-run mode (no real trade)" style="cursor:help;">\ud83e\uddea</span>';
+            else { icon = '<span title="FAILED — ' + escapeHtml(p.error || 'Order rejected') + '" style="cursor:help;">\u274c</span>'; tipText = p.error || ''; }
             var rangeMatch = p.question ? p.question.match(/between[ ]+([0-9]+-[0-9]+)[^a-zA-Z0-9]*F/i) : null;
             var edgeMatch = !rangeMatch && p.question ? p.question.match(/be[ ]+([0-9]+)[^a-zA-Z0-9]*F[ ]+(or[ ]+)(below|higher|above)/i) : null;
             var displayLabel = rangeMatch ? rangeMatch[1] + '\u00b0F' : edgeMatch ? edgeMatch[1] + '\u00b0F ' + edgeMatch[3] : p.label;
-            var roleTag = (p.label && p.label !== displayLabel) ? ' <span style="color:var(--text-muted);font-size:10px;opacity:0.7;">(' + p.label + ')</span>' : '';
+            var roleTips = { 'target': 'Primary position — matches the forecast range', 'below': 'Hedge — one range below the forecast', 'above': 'Hedge — one range above the forecast', 'chain': 'Chain-backfilled — imported from on-chain data' };
+            var roleTag = (p.label && p.label !== displayLabel) ? ' <span style="color:var(--text-muted);font-size:10px;opacity:0.7;cursor:help;" title="' + escapeHtml(roleTips[p.label] || p.label) + '">(' + p.label + ')</span>' : '';
             var priceStr = p.buyPrice ? '$' + p.buyPrice.toFixed(2) : '--';
             var shares = p.shares ? ' \u00d7' + p.shares : '';
             var label = sellBtn + icon + ' ' + displayLabel + roleTag + ' @' + priceStr + shares + extraInfo;
@@ -160,7 +161,7 @@ function renderTradeLog(data) {
         const hasCost = t.totalCost > 0;
         const pnlColor = !hasCost ? 'var(--text-muted)' : pnlVal >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
         const pnlStr = hasCost && pnlVal !== null ? (pnlVal >= 0 ? '+' : '') + '$' + pnlVal.toFixed(3) + ' (' + (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%)' : (allFailed ? 'N/A' : '--');
-        const statusMap = { active: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', text: '\ud83d\udfe2 Active' }, completed: { bg: 'rgba(16,185,129,0.15)', color: '#34d399', text: '\u2705 Done' }, stopped: { bg: 'rgba(107,114,128,0.15)', color: '#9ca3af', text: '\u23f9 Stopped' } };
+        const statusMap = { active: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', text: '\ud83d\udfe2 Active', tip: 'Session is actively monitoring this market' }, completed: { bg: 'rgba(16,185,129,0.15)', color: '#34d399', text: '\u2705 Done', tip: 'Market resolved — session completed' }, stopped: { bg: 'rgba(107,114,128,0.15)', color: '#9ca3af', text: '\u23f9 Stopped', tip: 'Session was manually stopped' } };
         const st = statusMap[t.sessionStatus] || statusMap.active;
         const costStr = hasCost ? '$' + t.totalCost.toFixed(3) : (allFailed ? '$0 (rejected)' : '$0');
 
@@ -171,7 +172,7 @@ function renderTradeLog(data) {
         html += '<td style="padding:10px 8px;line-height:1.6;">' + posLabels + '</td>';
         html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;' + (allFailed ? 'color:var(--text-muted);' : '') + '">' + costStr + '</td>';
         html += '<td style="padding:10px 8px;text-align:right;font-family:JetBrains Mono,monospace;font-weight:600;color:' + pnlColor + ';">' + pnlStr + '</td>';
-        html += '<td style="padding:10px 14px;text-align:center;"><span style="background:' + st.bg + ';color:' + st.color + ';padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;">' + st.text + '</span></td></tr>';
+        html += '<td style="padding:10px 14px;text-align:center;"><span style="background:' + st.bg + ';color:' + st.color + ';padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:help;" title="' + escapeHtml(st.tip || '') + '">' + st.text + '</span></td></tr>';
     }
     html += '</tbody></table>';
     body.innerHTML = html;
