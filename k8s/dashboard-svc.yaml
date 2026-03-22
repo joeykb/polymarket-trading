@@ -41,11 +41,11 @@ spec:
               value: "http://liquidity-svc:3001"
           resources:
             requests:
-              cpu: 25m
-              memory: 64Mi
+              cpu: 50m
+              memory: 128Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 256Mi
           readinessProbe:
             httpGet:
               path: /api/dates
@@ -65,11 +65,13 @@ metadata:
   name: dashboard-svc
   namespace: tempedge
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: tempedge
     component: dashboard-svc
   ports:
-    - port: 3000
+    - name: http
+      port: 3000
       targetPort: 3000
+      nodePort: 30301  # Accessible at http://localhost:30301
       protocol: TCP

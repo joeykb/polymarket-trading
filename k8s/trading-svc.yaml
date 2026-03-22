@@ -1,6 +1,6 @@
 # TempEdge Trading Service
-# The ONLY service that routes through the VPN gateway.
-# Handles all buy/sell/redeem CLOB operations.
+# The ONLY service that routes through the VPN.
+# VPN runs as a sidecar container so trade traffic is tunnelled within the pod.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -23,6 +23,68 @@ spec:
         component: trading-svc
     spec:
       containers:
+        # ── VPN Sidecar ──────────────────────────────────────
+        - name: vpn
+          image: qmcgaw/gluetun:latest
+          env:
+            - name: VPN_SERVICE_PROVIDER
+              value: "custom"
+            - name: VPN_TYPE
+              value: "openvpn"
+            - name: OPENVPN_CUSTOM_CONFIG
+              value: "/gluetun/custom/nordvpn.ovpn"
+            - name: HTTPPROXY
+              value: "on"
+            - name: HTTPPROXY_LOG
+              value: "off"
+            - name: HEALTH_TARGET_ADDRESS
+              value: "gamma-api.polymarket.com:443"
+          envFrom:
+            - secretRef:
+                name: nordvpn-credentials
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: tun-device
+              mountPath: /dev/net/tun
+            - name: ovpn-config
+              mountPath: /gluetun/custom
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          ports:
+            - name: proxy
+              containerPort: 8888
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "wget -qO- --timeout=5 https://gamma-api.polymarket.com > /dev/null 2>&1"
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "wget -qO- --timeout=5 https://gamma-api.polymarket.com > /dev/null 2>&1"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+
+        # ── Trading Service ──────────────────────────────────
         - name: trading-svc
           image: tempedge-trading-svc:latest
           imagePullPolicy: Never
@@ -31,13 +93,13 @@ spec:
               value: "3004"
             - name: DATA_SVC_URL
               value: "http://data-svc:3005"
-            # Route CLOB API calls through the VPN gateway
+            # Route CLOB API calls through the VPN sidecar (localhost within the pod)
             - name: NODE_USE_ENV_PROXY
               value: "1"
             - name: HTTP_PROXY
-              value: "http://tempedge-vpn.tempedge.svc.cluster.local:8888"
+              value: "http://localhost:8888"
             - name: HTTPS_PROXY
-              value: "http://tempedge-vpn.tempedge.svc.cluster.local:8888"
+              value: "http://localhost:8888"
             # Don't proxy internal service traffic
             - name: NO_PROXY
               value: "localhost,127.0.0.1,.svc.cluster.local,data-svc,weather-svc,market-svc"
@@ -61,7 +123,7 @@ spec:
             httpGet:
               path: /health
               port: 3004
-            initialDelaySeconds: 5
+            initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -69,10 +131,19 @@ spec:
             httpGet:
               path: /health
               port: 3004
-            initialDelaySeconds: 10
+            initialDelaySeconds: 20
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 5
+
+      volumes:
+        - name: tun-device
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: ovpn-config
+          configMap:
+            name: nordvpn-ovpn
 
 ---
 apiVersion: v1
