@@ -14,13 +14,19 @@ import { getDb } from './db.js';
  */
 export function upsertSession({ id, marketId, targetDate, status, phase, initialForecastTemp, initialTargetRange, forecastSource, intervalMinutes, rebalanceThreshold }) {
     const db = getDb();
+    // Try by id first, then by (market_id, target_date) — handles monitor restarts with new UUIDs
+    const existing = db.prepare('SELECT id FROM sessions WHERE market_id = ? AND target_date = ?').get(marketId || 'nyc', targetDate);
+    if (existing) {
+        // Update existing session (keep original ID)
+        db.prepare(`
+            UPDATE sessions SET status = ?, phase = ?, updated_at = datetime('now')
+            WHERE id = ?
+        `).run(status, phase, existing.id);
+        return { changes: 1, existingId: existing.id };
+    }
     return db.prepare(`
         INSERT INTO sessions (id, market_id, target_date, status, phase, initial_forecast_temp, initial_target_range, forecast_source, interval_minutes, rebalance_threshold)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            status = excluded.status,
-            phase = excluded.phase,
-            updated_at = datetime('now')
     `).run(id, marketId || 'nyc', targetDate, status, phase, initialForecastTemp, initialTargetRange, forecastSource, intervalMinutes || 15, rebalanceThreshold || 3.0);
 }
 
@@ -47,6 +53,14 @@ export function updateSession(id, updates) {
 export function getSession(marketId, targetDate) {
     const db = getDb();
     return db.prepare('SELECT * FROM sessions WHERE market_id = ? AND target_date = ?').get(marketId, targetDate);
+}
+
+/**
+ * Get session by ID
+ */
+export function getSessionById(id) {
+    const db = getDb();
+    return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
 }
 
 /**

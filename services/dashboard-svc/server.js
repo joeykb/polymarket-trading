@@ -266,47 +266,49 @@ const server = http.createServer(async (req, res) => {
 
         // ─── API: GET /api/trades ───────────────────────────────────
         if (url.pathname === '/api/trades') {
-            let trades = [];
             try {
-                // Try data-svc trade log first
-                const tradeLog = await fetch(`${DATA_SVC}/api/trades/log?limit=30`, { signal: AbortSignal.timeout(10000) });
-                if (tradeLog.ok) {
-                    const dbTrades = await tradeLog.json();
-                    if (Array.isArray(dbTrades) && dbTrades.length > 0) {
-                        trades = dbTrades;
-                    }
-                }
-            } catch { }
+                // Single call to data-svc for lightweight trade summaries
+                const summaryRes = await fetch(`${DATA_SVC}/api/trade-summary?limit=15`, { signal: AbortSignal.timeout(15000) });
+                if (!summaryRes.ok) throw new Error('trade-summary failed');
+                const { trades: summaries } = await summaryRes.json();
 
-            // Fallback to session JSON files
-            if (trades.length === 0) {
-                const dates = await listAvailableDates();
-                for (const date of dates) {
-                    const session = await loadSessionData(date);
-                    if (!session?.buyOrder) continue;
-                    const bo = session.buyOrder;
-                    const latest = session.snapshots?.[session.snapshots.length - 1];
-                    const liquidityBids = await fetchLiquidityBids(date);
-                    const pnl = computeLivePnL(bo, latest, liquidityBids);
+                const trades = [];
+                for (const s of summaries) {
+                    const bo = s.buyOrder;
+                    if (!bo) continue;
+
+                    // Only fetch live liquidity for active sessions
+                    let pnl = null;
+                    if (s.status === 'active') {
+                        try {
+                            const liquidityBids = await fetchLiquidityBids(s.date);
+                            pnl = computeLivePnL(bo, s.latestSnapshot, liquidityBids);
+                        } catch { }
+                    }
+
                     trades.push({
-                        date, placedAt: bo.placedAt,
+                        date: s.date, placedAt: bo.placedAt,
                         mode: bo.mode || (bo.simulated ? 'dry-run' : 'live'),
                         positions: (bo.positions || []).map(p => ({
                             label: p.label, question: p.question, buyPrice: p.buyPrice,
                             shares: p.shares, status: p.status || 'placed',
                             orderId: p.orderId || null, error: p.error || null,
+                            positionId: p.positionId || p.dbPositionId || null,
                             soldAt: p.soldAt || null, soldStatus: p.soldStatus || null,
                             sellPrice: (p.soldAt && p.soldStatus === 'placed') ? (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0) : null,
                         })),
                         totalCost: bo.totalCost, maxProfit: bo.maxProfit,
                         pnl: pnl ? { totalPnL: pnl.totalPnL, totalPnLPct: pnl.totalPnLPct, totalBuyCost: pnl.totalBuyCost, totalCurrentValue: pnl.totalCurrentValue } : null,
-                        sessionStatus: session.status, phase: session.phase || getPhase(date),
-                        resolution: session.resolution ? { keep: session.resolution.keep, discardLabels: session.resolution.discardLabels } : null,
+                        sessionStatus: s.status, phase: s.phase || getPhase(s.date),
+                        resolution: s.resolution ? { keep: s.resolution.keep, discardLabels: s.resolution.discardLabels } : null,
                     });
                 }
-            }
 
-            return json(res, { trades, count: trades.length, serverTime: new Date().toISOString(), source: trades.length > 0 ? 'db' : 'json' });
+                return json(res, { trades, count: trades.length, serverTime: new Date().toISOString(), source: 'session' });
+            } catch (err) {
+                console.error('❌ /api/trades error:', err.message);
+                return json(res, { trades: [], count: 0, serverTime: new Date().toISOString(), error: err.message });
+            }
         }
 
         // ─── API: GET /api/analytics ────────────────────────────────

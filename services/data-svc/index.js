@@ -88,10 +88,66 @@ function getSessionFilePath(date) {
     return path.join(OUTPUT_DIR, `monitor-${date}.json`);
 }
 
+// ── Delta Compression ───────────────────────────────────────────────────
+// Snapshots are 99% identical between entries (only timestamp changes).
+// Delta format: { _deltaCompressed: true, base: {...}, deltas: [{...changed fields...}] }
+// This reduces 16MB files to ~1-2MB.
+
+function compressSnapshots(snapshots) {
+    if (!snapshots || snapshots.length === 0) return snapshots;
+    const base = snapshots[0];
+    const deltas = [];
+    for (let i = 1; i < snapshots.length; i++) {
+        const delta = {};
+        let hasChanges = false;
+        for (const key of Object.keys(snapshots[i])) {
+            if (JSON.stringify(snapshots[i][key]) !== JSON.stringify(snapshots[i - 1][key])) {
+                delta[key] = snapshots[i][key];
+                hasChanges = true;
+            }
+        }
+        // Check for removed keys
+        for (const key of Object.keys(snapshots[i - 1])) {
+            if (!(key in snapshots[i])) {
+                delta[key] = null;
+                hasChanges = true;
+            }
+        }
+        deltas.push(hasChanges ? delta : { timestamp: snapshots[i].timestamp });
+    }
+    return { _deltaCompressed: true, base, deltas };
+}
+
+function decompressSnapshots(compressed) {
+    if (!compressed || !compressed._deltaCompressed) return compressed; // already full
+    const { base, deltas } = compressed;
+    const snapshots = [base];
+    let current = { ...base };
+    for (const delta of deltas) {
+        current = { ...current };
+        for (const [key, val] of Object.entries(delta)) {
+            if (val === null) {
+                delete current[key];
+            } else {
+                current[key] = val;
+            }
+        }
+        snapshots.push(current);
+    }
+    return snapshots;
+}
+
 function loadSessionFile(date) {
     const filePath = getSessionFilePath(date);
     if (!fs.existsSync(filePath)) return null;
-    try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
+    try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        // Decompress snapshots if delta-compressed
+        if (data.snapshots && data.snapshots._deltaCompressed) {
+            data.snapshots = decompressSnapshots(data.snapshots);
+        }
+        return data;
+    }
     catch { return null; }
 }
 
@@ -108,7 +164,12 @@ function saveSessionFile(date, data) {
             console.warn(`  ⚠️  Patch failed: ${err.message}`);
         }
     }
-    fs.writeFileSync(getSessionFilePath(date), JSON.stringify(data, null, 2), 'utf-8');
+    // Delta-compress snapshots before writing
+    const writeData = { ...data };
+    if (writeData.snapshots && Array.isArray(writeData.snapshots) && writeData.snapshots.length > 1) {
+        writeData.snapshots = compressSnapshots(writeData.snapshots);
+    }
+    fs.writeFileSync(getSessionFilePath(date), JSON.stringify(writeData, null, 2), 'utf-8');
 }
 
 function listSessionFiles() {
@@ -117,6 +178,31 @@ function listSessionFiles() {
         .filter(f => f.startsWith('monitor-') && f.endsWith('.json'))
         .map(f => f.replace('monitor-', '').replace('.json', ''))
         .sort();
+}
+
+// Auto-compress existing session files on startup
+function compressExistingFiles() {
+    const dates = listSessionFiles();
+    let compressed = 0;
+    for (const date of dates) {
+        const filePath = getSessionFilePath(date);
+        try {
+            const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            // Skip if already compressed or no snapshots
+            if (!raw.snapshots || !Array.isArray(raw.snapshots) || raw.snapshots.length < 2) continue;
+            const beforeSize = fs.statSync(filePath).size;
+            const writeData = { ...raw };
+            writeData.snapshots = compressSnapshots(raw.snapshots);
+            fs.writeFileSync(filePath, JSON.stringify(writeData, null, 2), 'utf-8');
+            const afterSize = fs.statSync(filePath).size;
+            const pct = ((1 - afterSize / beforeSize) * 100).toFixed(0);
+            console.log(`  📦 Compressed ${date}: ${(beforeSize/1024/1024).toFixed(1)}MB → ${(afterSize/1024/1024).toFixed(1)}MB (${pct}% reduction)`);
+            compressed++;
+        } catch (err) {
+            console.warn(`  ⚠️  Failed to compress ${date}: ${err.message}`);
+        }
+    }
+    if (compressed > 0) console.log(`  📦 Compressed ${compressed} session files`);
 }
 
 // ── Spend Tracking ──────────────────────────────────────────────────────
@@ -176,11 +262,55 @@ async function handleRequest(req, res) {
             return json(res, { dates: listSessionFiles() });
         }
 
+        // ── Trade Summary (lightweight — no snapshots) ──
+        if (pathname === '/api/trade-summary' && method === 'GET') {
+            const dates = listSessionFiles();
+            const limit = parseInt(query.limit || '15');
+            const recent = dates.slice(-limit).reverse();
+            const trades = [];
+            for (const date of recent) {
+                const data = loadSessionFile(date);
+                if (!data?.buyOrder) continue;
+                const latest = data.snapshots?.[data.snapshots.length - 1];
+                trades.push({
+                    date: data.targetDate || date,
+                    buyOrder: data.buyOrder,
+                    status: data.status,
+                    phase: data.phase,
+                    resolution: data.resolution || null,
+                    latestSnapshot: latest ? {
+                        timestamp: latest.timestamp,
+                        target: latest.target, below: latest.below, above: latest.above,
+                        forecastTempF: latest.forecastTempF,
+                    } : null,
+                });
+            }
+            return json(res, { trades });
+        }
+
         {
             const m = matchRoute('/api/session-files/:date', pathname);
             if (m.match && method === 'GET') {
                 const data = loadSessionFile(m.params.date);
                 if (!data) return error(res, 'Session file not found', 404);
+
+                // slim mode: only return the last N snapshots (avoids 16MB responses)
+                if (query.slim) {
+                    const limit = parseInt(query.slim) || 20;
+                    if (data.snapshots && data.snapshots.length > limit) {
+                        const lastSnaps = data.snapshots.slice(-limit);
+                        // Strip allRanges from older snapshots to save bandwidth
+                        for (const snap of lastSnaps) {
+                            if (snap.allRanges && lastSnaps.indexOf(snap) < lastSnaps.length - 1) {
+                                delete snap.allRanges;
+                            }
+                        }
+                        data.snapshots = lastSnaps;
+                        data._slimmed = true;
+                        data._totalSnapshots = data.snapshots.length + (data.snapshots.length - limit);
+                    }
+                }
+
                 return json(res, data);
             }
             if (m.match && method === 'PUT') {
@@ -313,7 +443,22 @@ async function handleRequest(req, res) {
         // ── Snapshots ───────────────────────────────────
         if (pathname === '/api/snapshots' && method === 'POST') {
             const body = await readBody(req);
-            queries.insertSnapshot(body);
+            try {
+                queries.insertSnapshot(body);
+            } catch (err) {
+                if (err.message.includes('FOREIGN KEY') && body.sessionId) {
+                    // Session ID mismatch — resolve to existing session
+                    const existing = queries.getSession('nyc', body.targetDate || '');
+                    if (existing) {
+                        body.sessionId = existing.id;
+                        queries.insertSnapshot(body);
+                    } else {
+                        return error(res, err.message, 409);
+                    }
+                } else {
+                    return error(res, err.message, 409);
+                }
+            }
             return json(res, { inserted: true }, 201);
         }
 
@@ -328,7 +473,21 @@ async function handleRequest(req, res) {
         // ── Alerts ──────────────────────────────────────
         if (pathname === '/api/alerts' && method === 'POST') {
             const body = await readBody(req);
-            queries.insertAlert(body);
+            try {
+                queries.insertAlert(body);
+            } catch (err) {
+                if (err.message.includes('FOREIGN KEY') && body.sessionId) {
+                    const existing = queries.getSession('nyc', body.targetDate || '');
+                    if (existing) {
+                        body.sessionId = existing.id;
+                        queries.insertAlert(body);
+                    } else {
+                        return error(res, err.message, 409);
+                    }
+                } else {
+                    return error(res, err.message, 409);
+                }
+            }
             return json(res, { inserted: true }, 201);
         }
 
@@ -409,8 +568,13 @@ async function handleRequest(req, res) {
         // ── DB Sessions (upsert via POST) ───────────────
         if (pathname === '/api/db/sessions' && method === 'POST') {
             const body = await readBody(req);
-            queries.upsertSession(body);
-            return json(res, { upserted: true }, 201);
+            try {
+                const result = queries.upsertSession(body);
+                return json(res, { upserted: true, existingId: result?.existingId || null }, 201);
+            } catch (err) {
+                console.error(`❌ POST /api/db/sessions: ${err.message}`);
+                return error(res, err.message, 409);
+            }
         }
 
         // ── Restart Signal ──────────────────────────────
@@ -460,6 +624,7 @@ server.listen(PORT, () => {
     console.log(`   Port:       ${PORT}`);
     console.log(`   Output dir: ${OUTPUT_DIR}`);
     console.log(`   Sessions:   ${listSessionFiles().length} files`);
+    compressExistingFiles();
     console.log(`   Ready.\n`);
 });
 

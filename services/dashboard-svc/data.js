@@ -19,10 +19,22 @@ export let globalCurrentTemp = { tempF: null, conditions: null, maxTodayF: null,
 
 // ── data-svc clients ────────────────────────────────────────────────────
 
-async function svcGet(base, path) {
-    const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-    return res.json();
+let _lastSvcError = 0;  // throttle error logging
+
+async function svcGet(base, urlPath) {
+    try {
+        const res = await fetch(`${base}${urlPath}`, { signal: AbortSignal.timeout(15000) });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (err) {
+        // Throttle noisy logs during outages — log at most once per 30s
+        const now = Date.now();
+        if (now - _lastSvcError > 30000) {
+            console.warn(`⚠️ svcGet ${urlPath}: ${err.message}`);
+            _lastSvcError = now;
+        }
+        return null;
+    }
 }
 
 export async function loadSessionData(date) {
@@ -30,26 +42,30 @@ export async function loadSessionData(date) {
     const cached = sessionCache.get(date);
     if (cached && (now - cached.fetchedAt) < CACHE_TTL_MS) return cached.data;
 
-    const data = await svcGet(DATA_SVC, `/api/session-files/${date}`);
-    if (data) {
-        sessionCache.set(date, { data, fetchedAt: now });
-        // Update global current temp
-        const snap = data.snapshots?.[data.snapshots.length - 1];
-        if (snap && snap.timestamp > globalCurrentTemp.timestamp && snap.currentTempF != null) {
-            globalCurrentTemp = {
-                tempF: snap.currentTempF,
-                conditions: snap.currentConditions,
-                maxTodayF: snap.maxTodayF,
-                timestamp: snap.timestamp,
-            };
+    try {
+        const data = await svcGet(DATA_SVC, `/api/session-files/${date}?slim=20`);
+        if (data) {
+            sessionCache.set(date, { data, fetchedAt: now });
+            // Update global current temp
+            const snap = data.snapshots?.[data.snapshots.length - 1];
+            if (snap && snap.timestamp > globalCurrentTemp.timestamp && snap.currentTempF != null) {
+                globalCurrentTemp = {
+                    tempF: snap.currentTempF,
+                    conditions: snap.currentConditions,
+                    maxTodayF: snap.maxTodayF,
+                    timestamp: snap.timestamp,
+                };
+            }
+            // Evict old cache entries
+            if (sessionCache.size > 10) {
+                const oldest = [...sessionCache.keys()].sort()[0];
+                sessionCache.delete(oldest);
+            }
         }
-        // Evict old cache entries
-        if (sessionCache.size > 10) {
-            const oldest = [...sessionCache.keys()].sort()[0];
-            sessionCache.delete(oldest);
-        }
+        return data;
+    } catch {
+        return null;
     }
-    return data;
 }
 
 export async function listAvailableDates() {
@@ -103,34 +119,50 @@ export async function getConfigSnapshot() {
 }
 
 export async function updateConfig(updates) {
-    const overrides = await svcGet(DATA_SVC, '/api/config/overrides');
-    const merged = { ...(overrides || {}), ...updates };
-    const res = await fetch(`${DATA_SVC}/api/config/overrides`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(merged),
-        signal: AbortSignal.timeout(5000),
-    });
-    return res.ok ? await res.json() : { error: 'Update failed' };
+    try {
+        const overrides = await svcGet(DATA_SVC, '/api/config/overrides');
+        const merged = { ...(overrides || {}), ...updates };
+        const res = await fetch(`${DATA_SVC}/api/config/overrides`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(merged),
+            signal: AbortSignal.timeout(5000),
+        });
+        return res.ok ? await res.json() : { error: 'Update failed' };
+    } catch (err) {
+        return { error: err.message };
+    }
 }
 
 export async function resetConfigValue(section, field) {
-    const res = await fetch(`${DATA_SVC}/api/config/overrides/${section}/${field}`, {
-        method: 'DELETE', signal: AbortSignal.timeout(5000),
-    });
-    return res.ok;
+    try {
+        const res = await fetch(`${DATA_SVC}/api/config/overrides/${section}/${field}`, {
+            method: 'DELETE', signal: AbortSignal.timeout(5000),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
 }
 
 export async function resetAllOverrides() {
-    const res = await fetch(`${DATA_SVC}/api/config/overrides`, {
-        method: 'DELETE', signal: AbortSignal.timeout(5000),
-    });
-    return res.ok;
+    try {
+        const res = await fetch(`${DATA_SVC}/api/config/overrides`, {
+            method: 'DELETE', signal: AbortSignal.timeout(5000),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
 }
 
 export async function signalRestart() {
-    const res = await fetch(`${DATA_SVC}/api/restart-signal`, {
-        method: 'POST', signal: AbortSignal.timeout(5000),
-    });
-    return res.ok;
+    try {
+        const res = await fetch(`${DATA_SVC}/api/restart-signal`, {
+            method: 'POST', signal: AbortSignal.timeout(5000),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
 }
