@@ -188,8 +188,27 @@ async function sellPosition(posDataStr, btnEl) {
         posData = {};
     }
     if (!posData || (!posData.positionId && !posData.question)) return;
-    if (!confirm("Sell this position at market price? This cannot be undone.")) return;
-    btnEl.disabled = true; btnEl.textContent = "Selling...";
+
+    var totalShares = posData.shares || 1;
+    var rangeMatch = posData.question ? posData.question.match(/between[ ]+([0-9]+-[0-9]+)[^\x00]*?F/i) : null;
+    var displayName = rangeMatch ? rangeMatch[1] + '°F' : (posData.label || 'position');
+
+    var sharesToSell = prompt(
+        'Sell ' + displayName + ' at market price.\n\n' +
+        'You own ' + totalShares + ' share(s).\n' +
+        'How many shares to sell? (Enter amount or "all")',
+        String(totalShares)
+    );
+    if (sharesToSell === null) return; // Cancelled
+    sharesToSell = sharesToSell.trim().toLowerCase();
+    if (sharesToSell === 'all' || sharesToSell === '') sharesToSell = totalShares;
+    else sharesToSell = parseFloat(sharesToSell);
+    if (isNaN(sharesToSell) || sharesToSell <= 0) { alert('Invalid share count'); return; }
+    if (sharesToSell > totalShares) { alert('Cannot sell more than ' + totalShares + ' shares'); return; }
+
+    if (!confirm('Confirm: Sell ' + sharesToSell + ' share(s) of ' + displayName + ' at market price?\n\nThis cannot be undone.')) return;
+
+    btnEl.disabled = true; btnEl.textContent = "Selling " + sharesToSell + "...";
     try {
         const payload = {
             positionId: posData.positionId || null,
@@ -197,13 +216,16 @@ async function sellPosition(posDataStr, btnEl) {
             label: posData.label || null,
             targetDate: posData.targetDate || currentDate,
             target_date: posData.targetDate || currentDate,
+            shares: sharesToSell,
         };
         const res = await fetch("/api/sell-position", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         if (data.success) {
-            btnEl.textContent = "Sold $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
+            btnEl.textContent = "Sold " + sharesToSell + " @ $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
             btnEl.style.background = "rgba(16,185,129,0.2)"; btnEl.style.color = "#34d399"; btnEl.style.borderColor = "rgba(16,185,129,0.3)";
-            setTimeout(function() { fetchTradeLog(); }, 2000);
+            // Refresh trade log and full dashboard
+            setTimeout(function() { fetchTradeLog(); }, 1000);
+            setTimeout(function() { refresh(); }, 2000);
         } else { alert("Sell failed: " + (data.error || "Unknown error")); btnEl.textContent = "SELL"; btnEl.disabled = false; }
     } catch (err) { alert("Sell error: " + err.message); btnEl.textContent = "SELL"; btnEl.disabled = false; }
 }
