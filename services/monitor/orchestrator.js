@@ -31,7 +31,7 @@ let _config = {
         rebalanceThreshold: 3,
         forecastShiftThreshold: 2,
         priceSpikeThreshold: 0.05,
-        buyHourEST: 7,
+        buyHourEST: 9.5,
     },
     liquidity: {
         wsEnabled: true,
@@ -476,7 +476,10 @@ function startLiquidityGatedBuy(session, snapshot) {
             console.log(`\n  ⏰ DEADLINE — forcing buy after ${waitStr}`);
 
             const deadlineLiq = await fetchLiquidityFromService(targetDate);
-            const order = await tryPlaceBuyOrder(snapshot, deadlineLiq?.tokens || []);
+            // Take fresh snapshot so buy uses latest forecast
+            let freshSnapshot;
+            try { freshSnapshot = await takeSnapshot(targetDate, null); } catch { freshSnapshot = snapshot; }
+            const order = await tryPlaceBuyOrder(freshSnapshot, deadlineLiq?.tokens || []);
             if (!order) { console.warn('  ⚠️  Deadline buy failed'); return; }
             attachSessionContext(order, session);
             order.liquidityWait = waitStr;
@@ -509,7 +512,10 @@ function startLiquidityGatedBuy(session, snapshot) {
         const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
         console.log(`\n  ✅ LIQUIDITY MET — buying (${liquidCount}/${totalCount} liquid, waited ${waitStr})`);
 
-        const order = await tryPlaceBuyOrder(snapshot, liqData.tokens);
+        // Take fresh snapshot so buy uses latest forecast
+        let freshSnapshot;
+        try { freshSnapshot = await takeSnapshot(targetDate, null); } catch { freshSnapshot = snapshot; }
+        const order = await tryPlaceBuyOrder(freshSnapshot, liqData.tokens);
         if (!order) { console.warn('  ⚠️  Liquidity-gated buy failed'); return; }
         attachSessionContext(order, session);
         order.liquidityWait = waitStr;
@@ -539,7 +545,40 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
                 existing.pnl = null;
             }
         }
-        if (!existing.buyOrder) console.log(`  ⏳ No buy order yet — will trigger via normal buy flow`);
+        if (!existing.buyOrder) {
+            // Try to hydrate buyOrder from chain-backfilled DB data
+            try {
+                const dbPositions = await svcGet(DATA_SVC, `/api/positions/active?date=${targetDate}`);
+                if (dbPositions && dbPositions.length > 0) {
+                    const positions = dbPositions.map(p => ({
+                        question: p.question,
+                        label: p.label || 'chain',
+                        buyPrice: p.price,
+                        shares: p.shares,
+                        tokenId: p.token_id,
+                        conditionId: p.condition_id,
+                        clobTokenIds: p.clob_token_ids ? JSON.parse(p.clob_token_ids) : undefined,
+                        positionId: p.id,
+                        status: p.status || 'filled',
+                        soldAt: p.sold_at || null,
+                    }));
+                    const totalCost = positions.reduce((sum, p) => sum + (p.buyPrice || 0) * (p.shares || 0), 0);
+                    existing.buyOrder = {
+                        positions,
+                        totalCost: parseFloat(totalCost.toFixed(4)),
+                        mode: 'live',
+                        source: 'chain-backfill',
+                        placedAt: dbPositions[0].created_at,
+                    };
+                    console.log(`  🔗 Hydrated buyOrder from chain data: ${positions.length} positions, $${totalCost.toFixed(3)}`);
+                } else {
+                    console.log(`  ⏳ No buy order yet — will trigger via normal buy flow`);
+                }
+            } catch (err) {
+                console.warn(`  ⚠️  Chain-backfill hydration failed: ${err.message}`);
+                console.log(`  ⏳ No buy order yet — will trigger via normal buy flow`);
+            }
+        }
         if (existing.awaitingLiquidity && !existing.buyOrder) {
             existing.awaitingLiquidity = false;
             console.log(`  🔄 Resetting liquidity wait`);
@@ -671,8 +710,12 @@ export async function runMonitoringCycle(session) {
 
     if (session.buyOrder && !snapshot.eventClosed) {
 
-        // RESOLVE DAY: sell hedge positions
-        if (snapshot.phase === 'resolve' && !session.resolveSellExecuted) {
+        // RESOLVE DAY: sell hedge positions (after 9:30am EST)
+        const resolveSellHour = _config.monitor.buyHourEST || 9.5; // Default 9:30am EST
+        const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+        const nowDate = new Date(nowET);
+        const currentHour = nowDate.getHours() + nowDate.getMinutes() / 60;
+        if (snapshot.phase === 'resolve' && !session.resolveSellExecuted && currentHour >= resolveSellHour) {
             const currentTargetQ = snapshot.target?.question;
             if (currentTargetQ) {
                 const positionsToSell = [];

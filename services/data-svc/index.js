@@ -681,6 +681,8 @@ async function handleRequest(req, res) {
                 'liquidity.windowMinutes':     { key: 'LIQUIDITY_WINDOW_MINS',   default: 60,          description: 'Minutes to track for best-window mode' },
                 'liquidity.buyDeadlineHour':   { key: 'LIQUIDITY_DEADLINE_HOUR', default: 10.5,        description: 'Deadline hour (ET, decimal) to buy if still illiquid (10.5 = 10:30am)' },
                 'liquidity.requireAllLiquid':  { key: 'LIQUIDITY_ALL_REQUIRED',  default: 1,           description: 'Require ALL tokens liquid or ANY', choices: [0, 1] },
+                'liquidity.spreadThreshold':   { key: 'LIQUIDITY_SPREAD_THRESHOLD', default: 0.20,     description: 'Max bid-ask spread % to be "liquid" (0.20 = 20%)' },
+                'liquidity.depthThreshold':    { key: 'LIQUIDITY_DEPTH_THRESHOLD',  default: 5,        description: 'Min shares at ask to be "liquid"' },
 
                 // Weather
                 'weather.stationLat':   { key: 'WEATHER_LAT',     default: 40.7769,  description: 'Station latitude' },
@@ -739,8 +741,8 @@ async function handleRequest(req, res) {
 
             // Standard flat config for services
             const defaults = {
-                monitor: { intervalMinutes: 15, rebalanceThreshold: 3, forecastShiftThreshold: 2, priceSpikeThreshold: 0.05, buyHourEST: 7 },
-                liquidity: { wsEnabled: true, checkIntervalSecs: 30, buyDeadlineHour: 10.5, requireAllLiquid: false },
+                monitor: { intervalMinutes: 15, rebalanceThreshold: 3, forecastShiftThreshold: 2, priceSpikeThreshold: 0.05, buyHourEST: 9.5 },
+                liquidity: { wsEnabled: true, checkIntervalSecs: 30, buyDeadlineHour: 10.5, requireAllLiquid: false, spreadThreshold: 0.20, depthThreshold: 5 },
                 phases: { scoutDaysMax: 4, trendThreshold: 2 },
                 trading: {},
             };

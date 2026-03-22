@@ -457,7 +457,7 @@ export async function executeRealBuyOrder(snapshot, liqTokens = []) {
 
     console.log(`\n  🏦 Trading Mode: ${tradingCfg.mode.toUpperCase()}`);
     console.log(`  💳 Max/position: $${tradingCfg.maxPositionCost} | Max/day: $${tradingCfg.maxDailySpend}`);
-    console.log(`  📊 Today's spend so far: $${getTodaySpend().toFixed(4)}`);
+    console.log(`  📊 Today's spend so far: $${(await getTodaySpend()).toFixed(4)}`);
 
     // Build liquidity lookup by question for matching
     const liqByQuestion = new Map();

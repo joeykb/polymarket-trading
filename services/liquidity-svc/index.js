@@ -57,14 +57,16 @@ const dateStreams = new Map();
 
 function liquidityScore(spreadPct, askDepth) {
     if (spreadPct >= 1 || askDepth <= 0) return 0;
-    const spreadFactor = Math.max(0, 1 - spreadPct / svcConfig.trading.maxSpreadPct);
-    const depthFactor = Math.min(askDepth / (svcConfig.trading.minAskDepth * 2), 1);
+    const maxSpread = svcConfig.liquidity?.spreadThreshold ?? svcConfig.trading.maxSpreadPct;
+    const minDepth = svcConfig.liquidity?.depthThreshold ?? svcConfig.trading.minAskDepth;
+    const spreadFactor = Math.max(0, 1 - spreadPct / maxSpread);
+    const depthFactor = Math.min(askDepth / (minDepth * 2), 1);
     return parseFloat((spreadFactor * 0.6 + depthFactor * 0.4).toFixed(3));
 }
 
 function assessLiquidity(entry) {
-    const maxSpread = svcConfig.trading.maxSpreadPct;
-    const minDepth = svcConfig.trading.minAskDepth;
+    const maxSpread = svcConfig.liquidity?.spreadThreshold ?? svcConfig.trading.maxSpreadPct;
+    const minDepth = svcConfig.liquidity?.depthThreshold ?? svcConfig.trading.minAskDepth;
 
     entry.isLiquid = entry.spreadPct <= maxSpread && entry.askDepth >= minDepth;
     entry.score = liquidityScore(entry.spreadPct, entry.askDepth);
