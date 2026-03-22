@@ -221,11 +221,21 @@ async function sellPosition(posDataStr, btnEl) {
         const res = await fetch("/api/sell-position", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         if (data.success) {
-            btnEl.textContent = "Sold " + sharesToSell + " @ $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
-            btnEl.style.background = "rgba(16,185,129,0.2)"; btnEl.style.color = "#34d399"; btnEl.style.borderColor = "rgba(16,185,129,0.3)";
+            if (data.verified) {
+                btnEl.textContent = "✅ Sold " + sharesToSell + " @ $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
+                btnEl.style.background = "rgba(16,185,129,0.2)"; btnEl.style.color = "#34d399"; btnEl.style.borderColor = "rgba(16,185,129,0.3)";
+            } else {
+                btnEl.textContent = "⏳ Verifying on-chain...";
+                btnEl.style.background = "rgba(251,191,36,0.2)"; btnEl.style.color = "#fbbf24"; btnEl.style.borderColor = "rgba(251,191,36,0.3)";
+            }
             // Refresh trade log and full dashboard
             setTimeout(function() { fetchTradeLog(); }, 1000);
             setTimeout(function() { refresh(); }, 2000);
+            // For pending verification, keep polling for updates
+            if (!data.verified) {
+                setTimeout(function() { fetchTradeLog(); }, 30000);
+                setTimeout(function() { refresh(); }, 60000);
+            }
         } else { alert("Sell failed: " + (data.error || "Unknown error")); btnEl.textContent = "SELL"; btnEl.disabled = false; }
     } catch (err) { alert("Sell error: " + err.message); btnEl.textContent = "SELL"; btnEl.disabled = false; }
 }

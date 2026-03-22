@@ -478,6 +478,7 @@ const server = http.createServer(requestLogger(createLogger('dashboard-svc-http'
                         clobTokenId: position.clobTokenId || position.token_id,
                         conditionId: position.conditionId || position.condition_id,
                         shares: position.shares || 1,
+                        buyPositionId: body.positionId || position.id || null,  // original buy position DB ID
                     }],
                     context: {
                         sessionId: position.session_id,
@@ -488,8 +489,19 @@ const server = http.createServer(requestLogger(createLogger('dashboard-svc-http'
 
                 if (sellResult?.positions?.length > 0) {
                     const soldPos = sellResult.positions[0];
-                    if (soldPos.status === 'filled' || soldPos.status === 'placed') {
-                        return json(res, { success: true, sellPrice: soldPos.sellPrice, proceeds: sellResult.totalProceeds, orderId: soldPos.orderId });
+                    if (soldPos.status === 'filled') {
+                        return json(res, {
+                            success: true, verified: true,
+                            sellPrice: soldPos.sellPrice, proceeds: sellResult.totalProceeds,
+                            orderId: soldPos.orderId,
+                        });
+                    }
+                    if (soldPos.status === 'pending_verification') {
+                        return json(res, {
+                            success: true, verified: false,
+                            message: 'Sell order placed — fill price being verified on-chain',
+                            orderId: soldPos.orderId,
+                        });
                     }
                     return json(res, { success: false, error: soldPos.error || 'Sell order did not fill' });
                 }

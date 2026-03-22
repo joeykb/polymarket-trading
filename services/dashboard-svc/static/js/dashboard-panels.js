@@ -139,8 +139,13 @@ function renderTradeLog(data) {
             var icon, tipText = '', extraInfo = '', sellBtn = '';
             if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId && t.sessionStatus === 'active') { var sd = escapeHtml(JSON.stringify({ positionId: p.positionId, question: p.question, label: p.label, targetDate: t.date, shares: p.shares })); sellBtn = '<button class="sell-btn" data-sell="' + sd + '" title="Sell at market">SELL</button> '; }
             if (p.soldAt && p.soldStatus === 'placed') {
-                icon = '<span title="SOLD — Position has been sold" style="cursor:help;">\ud83d\udcb5</span>'; var sp = p.sellPrice || (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0); var posShares = p.shares || 1; var realizedPnl = (sp - p.buyPrice) * posShares; var pnlSign = realizedPnl >= 0 ? '+' : ''; var pnlColor = realizedPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
-                extraInfo = ' <span style="background:rgba(107,114,128,0.25);color:#9ca3af;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">SOLD @$' + sp.toFixed(2) + '</span> <span style="color:' + pnlColor + ';font-size:11px;font-weight:600;">' + pnlSign + '$' + realizedPnl.toFixed(3) + '</span>';
+                icon = '<span title="SOLD — Position has been sold" style="cursor:help;">\ud83d\udcb5</span>'; var sp = p.sellPrice || 0; var posShares = p.shares || 1; var realizedPnl = sp > 0 ? (sp - p.buyPrice) * posShares : 0; var pnlSign = realizedPnl >= 0 ? '+' : ''; var pnlColor = realizedPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                extraInfo = sp > 0
+                    ? ' <span style="background:rgba(107,114,128,0.25);color:#9ca3af;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">SOLD @$' + sp.toFixed(2) + '</span> <span style="color:' + pnlColor + ';font-size:11px;font-weight:600;">' + pnlSign + '$' + realizedPnl.toFixed(3) + '</span>'
+                    : ' <span style="background:rgba(251,191,36,0.25);color:#fbbf24;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">VERIFYING SELL...</span>';
+            } else if (p.status === 'pending_verification') {
+                icon = '<span title="PENDING — Sell placed, verifying on-chain fill price" style="cursor:help;">\u23f3</span>';
+                extraInfo = ' <span style="background:rgba(251,191,36,0.25);color:#fbbf24;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">VERIFYING...</span>';
             } else if ((p.status === 'placed' || p.status === 'filled') && t.mode !== 'dry-run') icon = '<span title="FILLED — Live order placed on-chain" style="cursor:help;">\ud83d\udfe2</span>';
             else if (t.mode === 'dry-run') icon = '<span title="SIMULATED — Dry-run mode (no real trade)" style="cursor:help;">\ud83e\uddea</span>';
             else { icon = '<span title="FAILED — ' + escapeHtml(p.error || 'Order rejected') + '" style="cursor:help;">\u274c</span>'; tipText = p.error || ''; }

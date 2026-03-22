@@ -95,12 +95,22 @@ export function insertTrade({ sessionId, marketId, targetDate, type, mode, place
 /**
  * Update trade after verification
  */
-export function updateTrade(id, { status, verifiedAt, actualCost, fillSummary }) {
+export function updateTrade(id, updates) {
     const db = getDb();
-    return db.prepare(`
-        UPDATE trades SET status = ?, verified_at = ?, actual_cost = ?, fill_summary = ?
-        WHERE id = ?
-    `).run(status, verifiedAt, actualCost, fillSummary ? JSON.stringify(fillSummary) : null, id);
+    const fieldMap = {
+        status: 'status', verifiedAt: 'verified_at', actualCost: 'actual_cost',
+        fillSummary: 'fill_summary', totalProceeds: 'total_proceeds',
+    };
+    const fields = [];
+    const values = [];
+    for (const [key, val] of Object.entries(updates)) {
+        const col = fieldMap[key] || key.replace(/([A-Z])/g, '_$1').toLowerCase();
+        fields.push(`${col} = ?`);
+        values.push(key === 'fillSummary' && val ? JSON.stringify(val) : val);
+    }
+    if (fields.length === 0) return;
+    values.push(id);
+    return db.prepare(`UPDATE trades SET ${fields.join(', ')} WHERE id = ?`).run(...values);
 }
 
 /**
