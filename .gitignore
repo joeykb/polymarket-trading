@@ -8,8 +8,12 @@ output/
 # Environment & secrets
 .env
 .env.*
+!.env.example
 k8s/vpn-secret.yaml
 k8s/trading-secret.yaml
+k8s/weather-api-keys-secret.yaml
+k8s/secrets/*
+!k8s/secrets/*.example.yaml
 k8s/*.ovpn
 
 # OS files

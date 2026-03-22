@@ -1,0 +1,15 @@
+{
+  "name": "tempedge-data-svc",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TempEdge Data Service — centralized DB, session files, config, and spend tracking",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.0.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "tempedge-weather-svc",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TempEdge Weather Service — forecast + current conditions API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0"
+  }
+}

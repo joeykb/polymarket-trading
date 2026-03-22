@@ -1,0 +1,174 @@
+# TempEdge Trading Service
+# The ONLY service that routes through the VPN.
+# VPN runs as a sidecar container so trade traffic is tunnelled within the pod.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-svc
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: trading-svc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+      component: trading-svc
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: trading-svc
+    spec:
+      # Wait for data-svc to be ready before starting
+      initContainers:
+        - name: wait-for-data-svc
+          image: busybox:1.36
+          command: ['sh', '-c', 'until wget -qO- http://data-svc:3005/health > /dev/null 2>&1; do echo "Waiting for data-svc..."; sleep 2; done']
+      containers:
+        # ── VPN Sidecar ──────────────────────────────────────
+        - name: vpn
+          image: qmcgaw/gluetun:latest
+          env:
+            - name: VPN_SERVICE_PROVIDER
+              value: "custom"
+            - name: VPN_TYPE
+              value: "openvpn"
+            - name: OPENVPN_CUSTOM_CONFIG
+              value: "/gluetun/custom/nordvpn.ovpn"
+            - name: HTTPPROXY
+              value: "on"
+            - name: HTTPPROXY_LOG
+              value: "off"
+            - name: HEALTH_TARGET_ADDRESS
+              value: "gamma-api.polymarket.com:443"
+          envFrom:
+            - secretRef:
+                name: nordvpn-credentials
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: tun-device
+              mountPath: /dev/net/tun
+            - name: ovpn-config
+              mountPath: /gluetun/custom
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          ports:
+            - name: proxy
+              containerPort: 8888
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "wget -qO- --timeout=5 https://gamma-api.polymarket.com > /dev/null 2>&1"
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "wget -qO- --timeout=5 https://gamma-api.polymarket.com > /dev/null 2>&1"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+
+        # ── Trading Service ──────────────────────────────────
+        - name: trading-svc
+          image: tempedge-trading-svc:latest
+          imagePullPolicy: Never
+          env:
+            - name: TRADING_SVC_PORT
+              value: "3004"
+            - name: DATA_SVC_URL
+              value: "http://data-svc:3005"
+            # Polygon RPC for on-chain operations (redeem)
+            - name: POLYGON_RPC_URL
+              value: "https://polygon.drpc.org"
+            # Route CLOB API calls through the VPN sidecar (localhost within the pod)
+            - name: NODE_USE_ENV_PROXY
+              value: "1"
+            - name: HTTP_PROXY
+              value: "http://localhost:8888"
+            - name: HTTPS_PROXY
+              value: "http://localhost:8888"
+            # Don't proxy internal service traffic or Polygon RPC
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,.svc.cluster.local,data-svc,weather-svc,market-svc,polygon.drpc.org"
+          envFrom:
+            - configMapRef:
+                name: tempedge-config
+            - secretRef:
+                name: polymarket-trading
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          ports:
+            - name: http
+              containerPort: 3004
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3004
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3004
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+      volumes:
+        - name: tun-device
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: ovpn-config
+          configMap:
+            name: nordvpn-ovpn
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-svc
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: trading-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: trading-svc
+  ports:
+    - name: http
+      port: 3004
+      targetPort: 3004
+      protocol: TCP

@@ -1,7 +1,11 @@
-node_modules/
+**/node_modules/
 output/
 .env
 *.log
 .git/
 .gitignore
 .gemini/
+_deprecated/
+specs/
+src/
+*.md
