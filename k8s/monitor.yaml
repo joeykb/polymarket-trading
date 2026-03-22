@@ -41,9 +41,9 @@ spec:
                 name: tempedge-config
           resources:
             requests:
-              cpu: 25m
-              memory: 64Mi
-            limits:
-              cpu: 100m
+              cpu: 50m
               memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 512Mi
 # No Service needed — monitor doesn't expose any port
