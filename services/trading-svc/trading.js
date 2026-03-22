@@ -14,7 +14,7 @@
  */
 
 import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
-import { Wallet } from 'ethers';
+import { Wallet, Contract, providers, constants, utils } from 'ethers';
 
 const DATA_SVC_URL = process.env.DATA_SVC_URL || 'http://data-svc:3005';
 
@@ -955,5 +955,297 @@ export async function retrySinglePosition(position, liqTokenData = null) {
         cost: result.cost || 0,
         price: result.price || 0,
         error: result.error || null,
+    };
+}
+
+// ── On-Chain Redeem ─────────────────────────────────────────────────────
+
+// Polymarket contracts on Polygon
+const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
+
+const CTF_ABI = [
+    'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
+    'function balanceOf(address owner, uint256 id) view returns (uint256)',
+    'function isApprovedForAll(address owner, address operator) view returns (bool)',
+    'function setApprovalForAll(address operator, bool approved)',
+];
+
+const NEG_RISK_ADAPTER_ABI = [
+    'function redeemPositions(bytes32 conditionId, uint256[] amounts)',
+];
+
+const ERC20_ABI = [
+    'function balanceOf(address owner) view returns (uint256)',
+    'function decimals() view returns (uint8)',
+];
+
+const REDEEM_GAS_OVERRIDES = {
+    gasLimit: 300000,
+    maxFeePerGas: utils.parseUnits('200', 'gwei'),
+    maxPriorityFeePerGas: utils.parseUnits('30', 'gwei'),
+};
+
+/**
+ * Get a provider that bypasses the VPN proxy.
+ * Polygon RPC is not geo-blocked, and sending it through the VPN
+ * proxy can cause connection issues.
+ */
+function getPolygonProvider() {
+    const rpc = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
+    // Use a separate agent without proxy for RPC calls
+    return new providers.StaticJsonRpcProvider(rpc, 137);
+}
+
+/**
+ * Check market resolution via CLOB client
+ */
+async function checkMarketResolution(conditionId) {
+    try {
+        const client = await getClient();
+        const market = await client.getMarket(conditionId);
+
+        if (!market.closed) {
+            return { resolved: false, winner: null, negRisk: false, winnerTokenId: null };
+        }
+
+        const negRisk = market.neg_risk === true;
+        const winningToken = market.tokens?.find(t => t.winner === true);
+        const winner = winningToken ? winningToken.outcome?.toUpperCase() : null;
+        const winnerTokenId = winningToken?.token_id || null;
+
+        return { resolved: true, winner, negRisk, winnerTokenId };
+    } catch (err) {
+        console.log(`  ⚠️  Could not check market ${conditionId?.substring(0, 12)}: ${err.message}`);
+        return { resolved: false, winner: null, negRisk: false, winnerTokenId: null };
+    }
+}
+
+/**
+ * Redeem resolved winning positions on-chain.
+ * 
+ * Called by the monitor when a market closes (eventClosed === true).
+ * 
+ * Handles both:
+ *   - Neg-risk markets → NegRiskAdapter.redeemPositions(conditionId, [yesAmt, noAmt])
+ *   - Standard markets → CTF.redeemPositions(USDC_E, HashZero, conditionId, [1, 2])
+ * 
+ * @param {Object} session - The full monitoring session with buyOrder.positions[]
+ * @returns {Promise<Object>} - { redeemed, totalValue, positions[] }
+ */
+export async function redeemPositions(session) {
+    const tradingCfg = getConfig();
+
+    if (tradingCfg.mode === 'disabled') {
+        console.log('  ⚠️  Trading disabled — skipping redeem');
+        return null;
+    }
+
+    if (!session?.buyOrder?.positions?.length) {
+        console.log('  ⚠️  No positions in session to redeem');
+        return null;
+    }
+
+    const dryRun = tradingCfg.mode === 'dry-run';
+    const provider = getPolygonProvider();
+    const wallet = new Wallet(tradingCfg.privateKey, provider);
+    const ctf = new Contract(CTF_ADDRESS, CTF_ABI, wallet);
+    const adapter = new Contract(NEG_RISK_ADAPTER, NEG_RISK_ADAPTER_ABI, wallet);
+
+    console.log(`\n  🏆 Redeeming positions — ${dryRun ? '🧪 DRY RUN' : '💰 LIVE'}`);
+    console.log(`  Wallet: ${wallet.address}`);
+
+    // Check USDC.e balance before
+    let balBefore;
+    try {
+        const usdc = new Contract(USDC_E_ADDRESS, ERC20_ABI, provider);
+        balBefore = await usdc.balanceOf(wallet.address);
+        console.log(`  USDC.e before: $${utils.formatUnits(balBefore, 6)}`);
+    } catch (err) {
+        console.log(`  ⚠️  Could not check USDC balance: ${err.message}`);
+        balBefore = null;
+    }
+
+    // Ensure CTF approval for NegRiskAdapter
+    try {
+        const isApproved = await ctf.isApprovedForAll(wallet.address, NEG_RISK_ADAPTER);
+        if (!isApproved && !dryRun) {
+            console.log(`  🔐 Setting CTF approval for NegRiskAdapter...`);
+            const approveTx = await ctf.setApprovalForAll(NEG_RISK_ADAPTER, true, REDEEM_GAS_OVERRIDES);
+            await approveTx.wait();
+            console.log(`  ✅ CTF approval granted`);
+        }
+    } catch (err) {
+        console.log(`  ⚠️  CTF approval check failed: ${err.message}`);
+    }
+
+    // Group positions by conditionId
+    const byCondition = {};
+    for (const pos of session.buyOrder.positions) {
+        if (!pos.conditionId) continue;
+        if (pos.status === 'failed' || pos.status === 'rejected') continue;
+
+        // Parse clobTokenIds if needed
+        let tokenIds = pos.clobTokenIds;
+        if (typeof tokenIds === 'string') {
+            try { tokenIds = JSON.parse(tokenIds); } catch { tokenIds = []; }
+        }
+
+        if (!byCondition[pos.conditionId]) byCondition[pos.conditionId] = [];
+        byCondition[pos.conditionId].push({ ...pos, clobTokenIds: tokenIds || [] });
+    }
+
+    const results = [];
+    let totalRedeemed = 0;
+    let totalValue = 0;
+
+    for (const [conditionId, positions] of Object.entries(byCondition)) {
+        const pos0 = positions[0];
+        const rangeDesc = pos0.question?.substring(0, 60) || pos0.label || 'unknown';
+
+        // Check on-chain balance for YES token
+        const tokenId = pos0.clobTokenIds?.[0] || pos0.tokenId;
+        if (!tokenId) {
+            console.log(`  ⚠️  ${pos0.label}: No token ID, skipping redeem`);
+            results.push({ label: pos0.label, question: pos0.question, status: 'skipped', error: 'No token ID' });
+            continue;
+        }
+
+        let onChainBalance;
+        try {
+            const rawBal = await ctf.balanceOf(wallet.address, tokenId);
+            onChainBalance = parseFloat(utils.formatUnits(rawBal, 6));
+            console.log(`  📊 ${pos0.label}: On-chain balance = ${onChainBalance.toFixed(4)} tokens`);
+
+            if (onChainBalance < 0.001) {
+                console.log(`     No on-chain tokens to redeem`);
+                results.push({ label: pos0.label, question: pos0.question, status: 'no_balance', shares: 0 });
+                continue;
+            }
+        } catch (err) {
+            console.log(`  ⚠️  ${pos0.label}: Balance check failed: ${err.message}`);
+            results.push({ label: pos0.label, question: pos0.question, status: 'error', error: `Balance check: ${err.message}` });
+            continue;
+        }
+
+        // Check market resolution
+        const { resolved, winner, negRisk, winnerTokenId } = await checkMarketResolution(conditionId);
+
+        if (!resolved) {
+            console.log(`  ⏳ ${pos0.label}: Market not yet resolved — skipping`);
+            results.push({ label: pos0.label, question: pos0.question, status: 'not_resolved', shares: onChainBalance });
+            continue;
+        }
+
+        const isWinner = winner === 'YES' && (!winnerTokenId || winnerTokenId === tokenId);
+        const value = isWinner ? onChainBalance : 0;
+
+        console.log(`  ${isWinner ? '🏆' : '❌'} ${pos0.label}: Resolved ${winner || 'NO'} — ${isWinner ? `$${value.toFixed(2)} payout` : '$0 (losing)'}`);
+        console.log(`     conditionId: ${conditionId} | negRisk: ${negRisk}`);
+
+        if (dryRun) {
+            console.log(`     🧪 DRY RUN — would ${isWinner ? `redeem $${value.toFixed(2)}` : 'burn losing tokens'}`);
+            results.push({
+                label: pos0.label, question: pos0.question,
+                status: 'dry-run', winner: isWinner, value,
+                shares: onChainBalance, conditionId,
+            });
+            totalRedeemed++;
+            totalValue += value;
+            continue;
+        }
+
+        // Execute on-chain redeem
+        try {
+            let tx;
+            const rawBal = await ctf.balanceOf(wallet.address, tokenId);
+
+            if (negRisk) {
+                // NegRiskAdapter: amounts = [yesTokenAmount, noTokenAmount]
+                const amounts = isWinner ? [rawBal, 0] : [rawBal, 0];
+                console.log(`     📝 NegRiskAdapter.redeemPositions(${conditionId.substring(0, 12)}..., [${utils.formatUnits(rawBal, 6)}, 0])`);
+                tx = await adapter.redeemPositions(conditionId, amounts, REDEEM_GAS_OVERRIDES);
+            } else {
+                // Standard CTF: indexSets = [1, 2] (redeem both YES and NO, only winner pays)
+                console.log(`     📝 CTF.redeemPositions(${conditionId.substring(0, 12)}..., [1, 2])`);
+                tx = await ctf.redeemPositions(
+                    USDC_E_ADDRESS,
+                    constants.HashZero,
+                    conditionId,
+                    [1, 2],
+                    REDEEM_GAS_OVERRIDES,
+                );
+            }
+
+            console.log(`     TX: ${tx.hash}`);
+            const receipt = await tx.wait();
+
+            if (receipt.status === 0) {
+                console.log(`     ❌ Transaction reverted on-chain!`);
+                results.push({ label: pos0.label, question: pos0.question, status: 'reverted', txHash: tx.hash });
+                continue;
+            }
+
+            console.log(`     ✅ ${isWinner ? 'Redeemed' : 'Burned'}! Gas: ${receipt.gasUsed.toString()}`);
+            totalRedeemed++;
+            totalValue += value;
+
+            results.push({
+                label: pos0.label, question: pos0.question,
+                status: isWinner ? 'redeemed' : 'burned',
+                winner: isWinner, value,
+                shares: onChainBalance, conditionId,
+                txHash: tx.hash,
+                gasUsed: receipt.gasUsed.toString(),
+            });
+
+        } catch (err) {
+            console.log(`     ❌ Redeem failed: ${err.message}`);
+            if (err.error?.reason) console.log(`        Reason: ${err.error.reason}`);
+            results.push({
+                label: pos0.label, question: pos0.question,
+                status: 'failed', error: err.message, conditionId,
+            });
+        }
+    }
+
+    // Check USDC.e balance after
+    if (!dryRun && totalRedeemed > 0 && balBefore !== null) {
+        try {
+            const usdc = new Contract(USDC_E_ADDRESS, ERC20_ABI, provider);
+            const balAfter = await usdc.balanceOf(wallet.address);
+            const gained = balAfter.sub(balBefore);
+            console.log(`\n  💰 USDC.e: $${utils.formatUnits(balBefore, 6)} → $${utils.formatUnits(balAfter, 6)} (+$${utils.formatUnits(gained, 6)})`);
+        } catch {}
+    }
+
+    console.log(`\n  📋 Redeem Summary: ${totalRedeemed} position(s), $${totalValue.toFixed(2)} value`);
+
+    // Persist to database
+    if (totalRedeemed > 0) {
+        try {
+            await dataSvc('POST', '/api/trades', {
+                sessionId: session.id || null,
+                marketId: 'nyc',
+                targetDate: session.targetDate || null,
+                type: 'redeem',
+                mode: tradingCfg.mode,
+                placedAt: new Date().toISOString(),
+                totalCost: 0,
+                totalProceeds: totalValue,
+                status: 'filled',
+                metadata: { redeemed: totalRedeemed, results },
+            });
+        } catch (dbErr) {
+            console.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
+        }
+    }
+
+    return {
+        redeemed: totalRedeemed,
+        totalValue,
+        positions: results,
+        dryRun,
     };
 }

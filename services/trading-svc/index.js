@@ -18,7 +18,11 @@
 
 import 'dotenv/config';
 import http from 'http';
-import { executeRealBuyOrder, executeSellOrder, retrySinglePosition, getWalletBalance, getConfig } from './trading.js';
+import { healthResponse } from '../../shared/health.js';
+import { createLogger, requestLogger } from '../../shared/logger.js';
+import { executeRealBuyOrder, executeSellOrder, retrySinglePosition, redeemPositions, getWalletBalance, getConfig } from './trading.js';
+
+const log = createLogger('trading-svc');
 
 const PORT = parseInt(process.env.TRADING_SVC_PORT || '3004');
 const DATA_SVC_URL = process.env.DATA_SVC_URL || 'http://data-svc:3005';
@@ -56,11 +60,10 @@ async function handleRequest(req, res) {
     try {
         if (path === '/health' && method === 'GET') {
             const cfg = getConfig();
-            return jsonRes(res, {
-                status: 'ok',
+            return jsonRes(res, healthResponse('trading-svc', {
                 mode: cfg.mode,
                 walletConfigured: !!cfg.privateKey,
-            });
+            }));
         }
 
         if (path === '/api/buy' && method === 'POST') {
@@ -80,6 +83,14 @@ async function handleRequest(req, res) {
         if (path === '/api/retry' && method === 'POST') {
             const body = await readBody(req);
             const result = await retrySinglePosition(body.position, body.liqTokenData || null);
+            return jsonRes(res, result);
+        }
+
+        if (path === '/api/redeem' && method === 'POST') {
+            const body = await readBody(req);
+            if (!body.session) return errRes(res, 'session is required');
+            const result = await redeemPositions(body.session);
+            if (!result) return jsonRes(res, { success: false, error: 'Redeem skipped or no positions' });
             return jsonRes(res, result);
         }
 
@@ -104,15 +115,10 @@ async function handleRequest(req, res) {
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-const server = http.createServer(handleRequest);
+const server = http.createServer(requestLogger(log, handleRequest));
 server.listen(PORT, () => {
     const cfg = getConfig();
-    console.log(`\n💰 TempEdge Trading Service`);
-    console.log(`   Port:    ${PORT}`);
-    console.log(`   Mode:    ${cfg.mode}`);
-    console.log(`   Wallet:  ${cfg.privateKey ? '✅ configured' : '❌ missing'}`);
-    console.log(`   Data:    ${DATA_SVC_URL}`);
-    console.log(`   Ready.\n`);
+    log.info('started', { port: PORT, mode: cfg.mode, wallet: cfg.privateKey ? 'configured' : 'missing', dataSvc: DATA_SVC_URL });
 });
 
 process.on('SIGINT', () => { server.close(); process.exit(0); });
