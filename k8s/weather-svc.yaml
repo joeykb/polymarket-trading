@@ -31,6 +31,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: tempedge-config
+            - secretRef:
+                name: weather-api-keys
           resources:
             requests:
               cpu: 25m
