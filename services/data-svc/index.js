@@ -274,6 +274,9 @@ async function handleRequest(req, res) {
             const trades = [];
             const coveredDates = new Set();
 
+            // Helper: determine if a target date has passed (in ET timezone)
+            const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }); // YYYY-MM-DD
+
             // Source 1: Session files (primary source - has rich monitoring data)
             for (const date of recent) {
                 const data = loadSessionFile(date);
@@ -299,10 +302,17 @@ async function handleRequest(req, res) {
                     } catch { /* DB lookup optional — positions still work without IDs */ }
                 }
 
+                // Auto-correct stale session statuses: if date has passed but status is still 'active', mark completed
+                const sessionDate = data.targetDate || date;
+                let sessionStatus = data.status;
+                if (sessionStatus === 'active' && sessionDate < today) {
+                    sessionStatus = 'completed';
+                }
+
                 trades.push({
-                    date: data.targetDate || date,
+                    date: sessionDate,
                     buyOrder,
-                    status: data.status,
+                    status: sessionStatus,
                     phase: data.phase,
                     resolution: data.resolution || null,
                     latestSnapshot: latest ? {
@@ -311,7 +321,7 @@ async function handleRequest(req, res) {
                         forecastTempF: latest.forecastTempF,
                     } : null,
                 });
-                coveredDates.add(data.targetDate || date);
+                coveredDates.add(sessionDate);
             }
 
             // Source 2: DB trades that have no session file (chain-backfilled)
@@ -358,16 +368,21 @@ async function handleRequest(req, res) {
                         totalProceeds += st.total_proceeds || 0;
                     }
 
+                    // Determine status based on whether the target date has passed
+                    const isPast = targetDate < today;
+                    const isToday = targetDate === today;
+
                     trades.push({
                         date: targetDate,
                         buyOrder: {
                             placedAt: buyTrades[0].placed_at,
                             totalCost: parseFloat(totalCost.toFixed(4)),
                             positions: allPositions,
+                            mode: 'live', // chain-backfilled = real on-chain trades
                             source: 'chain-backfill',
                         },
-                        status: 'completed',
-                        phase: 'resolve',
+                        status: isPast ? 'completed' : 'active',
+                        phase: isPast ? 'resolve' : (isToday ? 'monitor' : 'buy'),
                         resolution: null,
                         latestSnapshot: null,
                         sellProceeds: totalProceeds > 0 ? parseFloat(totalProceeds.toFixed(4)) : undefined,
