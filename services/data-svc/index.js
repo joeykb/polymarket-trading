@@ -15,6 +15,8 @@
 
 import 'dotenv/config';
 import http from 'http';
+import { healthResponse } from '../../shared/health.js';
+import { createLogger, requestLogger } from '../../shared/logger.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -256,7 +258,7 @@ async function handleRequest(req, res) {
         if (pathname === '/health' && method === 'GET') {
             const dbPath = process.env.DB_PATH || path.join(OUTPUT_DIR, 'tempedge.db');
             const dbSize = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
-            return json(res, { status: 'ok', dbSizeBytes: dbSize, sessionFiles: listSessionFiles().length });
+            return json(res, healthResponse('data-svc', { dbSizeBytes: dbSize, sessionFiles: listSessionFiles().length }));
         }
 
         // ── Session Files ───────────────────────────────
@@ -270,6 +272,9 @@ async function handleRequest(req, res) {
             const limit = parseInt(query.limit || '15');
             const recent = dates.slice(-limit).reverse();
             const trades = [];
+            const coveredDates = new Set();
+
+            // Source 1: Session files (primary source - has rich monitoring data)
             for (const date of recent) {
                 const data = loadSessionFile(date);
                 if (!data?.buyOrder) continue;
@@ -306,8 +311,80 @@ async function handleRequest(req, res) {
                         forecastTempF: latest.forecastTempF,
                     } : null,
                 });
+                coveredDates.add(data.targetDate || date);
             }
-            return json(res, { trades });
+
+            // Source 2: DB trades that have no session file (chain-backfilled)
+            try {
+                const dbTrades = queries.getAllTrades(200);
+                // Group by target_date
+                const byDate = {};
+                for (const t of dbTrades) {
+                    if (coveredDates.has(t.target_date)) continue; // already covered by session file
+                    if (!byDate[t.target_date]) byDate[t.target_date] = [];
+                    byDate[t.target_date].push(t);
+                }
+
+                for (const [targetDate, dateTrades] of Object.entries(byDate)) {
+                    // Get the first BUY trade for this date
+                    const buyTrades = dateTrades.filter(t => t.type === 'buy');
+                    const sellTrades = dateTrades.filter(t => t.type === 'sell');
+                    if (buyTrades.length === 0) continue;
+
+                    // Aggregate all positions from all buy trades for this date
+                    const allPositions = [];
+                    let totalCost = 0;
+                    for (const bt of buyTrades) {
+                        totalCost += bt.total_cost || 0;
+                        const positions = queries.getPositionsForTrade(bt.id);
+                        for (const p of positions) {
+                            allPositions.push({
+                                question: p.question,
+                                label: p.label || 'chain',
+                                buyPrice: p.price,
+                                shares: p.shares,
+                                tokenId: p.token_id,
+                                conditionId: p.condition_id,
+                                positionId: p.id,
+                                status: p.status,
+                                soldAt: p.sold_at || null,
+                            });
+                        }
+                    }
+
+                    // Calculate proceeds from sell trades
+                    let totalProceeds = 0;
+                    for (const st of sellTrades) {
+                        totalProceeds += st.total_proceeds || 0;
+                    }
+
+                    trades.push({
+                        date: targetDate,
+                        buyOrder: {
+                            placedAt: buyTrades[0].placed_at,
+                            totalCost: parseFloat(totalCost.toFixed(4)),
+                            positions: allPositions,
+                            source: 'chain-backfill',
+                        },
+                        status: 'completed',
+                        phase: 'resolve',
+                        resolution: null,
+                        latestSnapshot: null,
+                        sellProceeds: totalProceeds > 0 ? parseFloat(totalProceeds.toFixed(4)) : undefined,
+                    });
+                }
+            } catch (err) {
+                // DB lookup is supplemental — don't fail the whole endpoint
+                log.warn('DB trade merge failed: ' + err.message);
+            }
+
+            // Sort by date descending
+            trades.sort((a, b) => b.date.localeCompare(a.date));
+
+            // Apply limit
+            const limited = trades.slice(0, limit);
+
+            return json(res, { trades: limited });
         }
 
         {
@@ -711,20 +788,17 @@ async function handleRequest(req, res) {
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-const server = http.createServer(handleRequest);
+const log = createLogger('data-svc');
+const server = http.createServer(requestLogger(log, handleRequest));
 
 server.listen(PORT, () => {
-    console.log(`\n📦 TempEdge Data Service`);
-    console.log(`   Port:       ${PORT}`);
-    console.log(`   Output dir: ${OUTPUT_DIR}`);
-    console.log(`   Sessions:   ${listSessionFiles().length} files`);
+    log.info('started', { port: PORT, outputDir: OUTPUT_DIR, sessions: listSessionFiles().length });
     compressExistingFiles();
-    console.log(`   Ready.\n`);
 });
 
 // Graceful shutdown
 function shutdown() {
-    console.log('\n📦 Shutting down data-svc...');
+    log.info('shutting down');
     closeDb();
     server.close();
     process.exit(0);

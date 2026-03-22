@@ -18,6 +18,10 @@
 
 import 'dotenv/config';
 import http from 'http';
+import { healthResponse } from '../../shared/health.js';
+import { createLogger, requestLogger } from '../../shared/logger.js';
+
+const log = createLogger('market-svc');
 
 const PORT = parseInt(process.env.MARKET_SVC_PORT || '3003');
 const GAMMA_BASE = process.env.GAMMA_BASE_URL || 'https://gamma-api.polymarket.com';
@@ -236,7 +240,7 @@ async function handleRequest(req, res) {
 
     try {
         if (path === '/health') {
-            return jsonRes(res, { status: 'ok', gammaBase: GAMMA_BASE });
+            return jsonRes(res, healthResponse('market-svc', { gammaBase: GAMMA_BASE }));
         }
 
         if (path === '/api/market') {
@@ -261,12 +265,9 @@ async function handleRequest(req, res) {
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-const server = http.createServer(handleRequest);
+const server = http.createServer(requestLogger(log, handleRequest));
 server.listen(PORT, () => {
-    console.log(`\n🔍 TempEdge Market Service`);
-    console.log(`   Port:  ${PORT}`);
-    console.log(`   Gamma: ${GAMMA_BASE}`);
-    console.log(`   Ready.\n`);
+    log.info('started', { port: PORT, gammaBase: GAMMA_BASE });
 });
 
 process.on('SIGINT', () => { server.close(); process.exit(0); });

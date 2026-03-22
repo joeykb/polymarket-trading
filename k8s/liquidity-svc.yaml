@@ -21,6 +21,11 @@ spec:
         app: tempedge
         component: liquidity-svc
     spec:
+      # Wait for data-svc to be ready (session discovery + config)
+      initContainers:
+        - name: wait-for-data-svc
+          image: busybox:1.36
+          command: ['sh', '-c', 'until wget -qO- http://data-svc:3005/health > /dev/null 2>&1; do echo "Waiting for data-svc..."; sleep 2; done']
       containers:
         - name: liquidity-svc
           image: tempedge-liquidity-svc:latest

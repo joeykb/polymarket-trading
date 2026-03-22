@@ -16,6 +16,10 @@
 
 import 'dotenv/config';
 import http from 'http';
+import { healthResponse } from '../../shared/health.js';
+import { createLogger, requestLogger } from '../../shared/logger.js';
+
+const log = createLogger('weather-svc');
 
 const PORT = parseInt(process.env.WEATHER_SVC_PORT || '3002');
 
@@ -182,7 +186,7 @@ async function handleRequest(req, res) {
 
     try {
         if (path === '/health') {
-            return jsonRes(res, { status: 'ok', sources: ['weather-company', 'open-meteo'] });
+            return jsonRes(res, healthResponse('weather-svc', { sources: ['weather-company', 'open-meteo'] }));
         }
 
         if (path === '/api/forecast') {
@@ -219,15 +223,11 @@ async function handleRequest(req, res) {
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-const server = http.createServer(handleRequest);
+const server = http.createServer(requestLogger(log, handleRequest));
 
 server.listen(PORT, () => {
     const c = cfg();
-    console.log(`\n🌤️  TempEdge Weather Service`);
-    console.log(`   Port:    ${PORT}`);
-    console.log(`   Station: KLGA (${c.lat}, ${c.lon})`);
-    console.log(`   WC key:  ${c.apiKey ? '✅ configured' : '❌ missing'}`);
-    console.log(`   Ready.\n`);
+    log.info('started', { port: PORT, station: 'KLGA', lat: c.lat, lon: c.lon, wcKey: c.apiKey ? 'configured' : 'missing' });
 });
 
 process.on('SIGINT', () => { server.close(); process.exit(0); });

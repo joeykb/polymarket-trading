@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { services } from '../../shared/services.js';
+import { createLogger, requestLogger } from '../../shared/logger.js';
 import {
     loadSessionData, listAvailableDates, fetchLiquidityData,
     fetchLiquidityBids, globalCurrentTemp,
@@ -153,7 +154,7 @@ async function serveStaticFile(filePath, res) {
 
 // ── HTTP Server ─────────────────────────────────────────────────────────
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer(requestLogger(createLogger('dashboard-svc-http'), async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
 
     try {
@@ -538,16 +539,10 @@ const server = http.createServer(async (req, res) => {
         console.error(`❌ ${req.method} ${url.pathname}:`, err.message);
         json(res, { error: err.message }, 500);
     }
-});
+}));
+
+const log = createLogger('dashboard-svc');
 
 server.listen(port, () => {
-    console.log(`\n🌡️  TempEdge Dashboard (Microservice Edition)`);
-    console.log('═══════════════════════════════════════');
-    console.log(`  URL:       http://localhost:${port}`);
-    console.log(`  Date:      ${targetDate}`);
-    console.log(`  Data:      ${DATA_SVC}`);
-    console.log(`  Trading:   ${TRADING_SVC}`);
-    console.log(`  Liquidity: ${LIQUIDITY_SVC}`);
-    console.log(`  Static:    ${STATIC_DIR}`);
-    console.log('═══════════════════════════════════════\n');
+    log.info('started', { port, date: targetDate, dataSvc: DATA_SVC, tradingSvc: TRADING_SVC, liquiditySvc: LIQUIDITY_SVC });
 });

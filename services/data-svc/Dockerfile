@@ -4,13 +4,19 @@ FROM node:20-alpine AS base
 RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
-COPY package.json package-lock.json* ./
+
+# Copy shared module
+COPY shared/ /app/shared/
+
+# Copy and install dependencies
+COPY services/data-svc/package.json services/data-svc/package-lock.json* ./services/data-svc/
+WORKDIR /app/services/data-svc
 RUN npm ci --production
 RUN apk del python3 make g++
 
-COPY . .
+# Copy service source
+COPY services/data-svc/ /app/services/data-svc/
 RUN mkdir -p /app/output
 
 EXPOSE 3005
-
 CMD ["node", "index.js"]

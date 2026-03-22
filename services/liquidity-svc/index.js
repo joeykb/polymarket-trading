@@ -20,6 +20,8 @@ import 'dotenv/config';
 import http from 'http';
 import WebSocket from 'ws';
 import { services } from '../../shared/services.js';
+import { healthResponse } from '../../shared/health.js';
+import { createLogger, requestLogger } from '../../shared/logger.js';
 
 const DATA_SVC = services.dataSvc;
 const PORT = parseInt(process.env.LIQUIDITY_PORT || '3001');
@@ -470,12 +472,14 @@ function getAllSnapshots() {
 
 // ── HTTP Server ─────────────────────────────────────────────────────────
 
-const server = http.createServer((req, res) => {
+const log = createLogger('liquidity-svc');
+
+const server = http.createServer(requestLogger(log, (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     if (url.pathname === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', streams: dateStreams.size, timestamp: new Date().toISOString() }));
+        res.end(JSON.stringify(healthResponse('liquidity-svc', { streams: dateStreams.size })));
         return;
     }
 
@@ -499,21 +503,14 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
-});
+}));
 
 // ── Main ────────────────────────────────────────────────────────────────
 
 async function main() {
     await refreshConfig();
 
-    console.log(`\n📡 TempEdge Liquidity Service (Microservice Edition)`);
-    console.log('═══════════════════════════════════════════');
-    console.log(`  Port:          ${PORT}`);
-    console.log(`  Data:          ${DATA_SVC}`);
-    console.log(`  Max spread:    ${(svcConfig.trading.maxSpreadPct * 100).toFixed(0)}%`);
-    console.log(`  Min depth:     ${svcConfig.trading.minAskDepth}`);
-    console.log(`  Assessment:    every ${svcConfig.liquidity?.checkIntervalSecs || 30}s`);
-    console.log('═══════════════════════════════════════════');
+    log.info('started', { port: PORT, dataSvc: DATA_SVC, maxSpread: svcConfig.trading.maxSpreadPct, minDepth: svcConfig.trading.minAskDepth });
 
     await syncStreams();
 
@@ -523,20 +520,19 @@ async function main() {
     }, RESCAN_INTERVAL_MS);
 
     server.listen(PORT, '0.0.0.0', () => {
-        console.log(`\n  🌐 Liquidity API: http://localhost:${PORT}/api/liquidity`);
-        console.log(`  ❤️  Health:        http://localhost:${PORT}/health`);
+        log.info('listening', { port: PORT });
     });
 }
 
 process.on('SIGINT', () => {
-    console.log('\n  🛑 Shutting down liquidity service...');
+    log.info('shutting down');
     for (const [date] of dateStreams) stopDateStream(date);
     server.close();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    console.log('  🛑 SIGTERM received, shutting down...');
+    log.info('SIGTERM received, shutting down');
     for (const [date] of dateStreams) stopDateStream(date);
     server.close();
     process.exit(0);
