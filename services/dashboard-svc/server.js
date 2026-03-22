@@ -422,11 +422,11 @@ const server = http.createServer(async (req, res) => {
             }
 
             const body = await readBody(req);
-            if (!body.positionId) return json(res, { success: false, error: 'positionId is required' }, 400);
+            if (!body.positionId && !body.question) return json(res, { success: false, error: 'positionId or question is required' }, 400);
 
-            // Get position details from session data
-            let position = body;
-            if (!position.question) {
+            // Get position details — try DB first, then session file
+            let position = { ...body };
+            if (body.positionId && !position.question) {
                 try {
                     const posRes = await fetch(`${DATA_SVC}/api/positions/${body.positionId}`, { signal: AbortSignal.timeout(5000) });
                     if (posRes.ok) position = { ...body, ...(await posRes.json()) };

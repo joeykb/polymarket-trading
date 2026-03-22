@@ -40,16 +40,8 @@ export function overlayLivePrices(snapshot, liveData) {
 export async function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
     if (!buyOrder || !buyOrder.positions) return buyOrder || null;
     try {
-        const res = await fetch(`${DATA_SVC}/api/trades?date=${targetDate}`, { signal: AbortSignal.timeout(5000) });
-        if (!res.ok) return buyOrder;
-        const trades = await res.json();
-        // Find the most recent buy trade
-        const buyTrades = (Array.isArray(trades) ? trades : []).filter(t => t.type === 'buy');
-        if (buyTrades.length === 0) return buyOrder;
-        const trade = buyTrades[buyTrades.length - 1];
-
-        // Get positions for that trade
-        const posRes = await fetch(`${DATA_SVC}/api/positions/active?date=${targetDate}`, { signal: AbortSignal.timeout(5000) });
+        // Single call to get active positions (already joined with trades in data-svc)
+        const posRes = await fetch(`${DATA_SVC}/api/positions/active?date=${targetDate}`, { signal: AbortSignal.timeout(3000) });
         if (!posRes.ok) return buyOrder;
         const positions = await posRes.json();
 
@@ -62,12 +54,12 @@ export async function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
             const dbPos = posMap[p.question];
             return {
                 ...p,
-                positionId: dbPos?.id || null,
+                positionId: dbPos?.id || p.positionId || null,
                 soldAt: dbPos?.sold_at || p.soldAt || null,
             };
         });
-    } catch (err) {
-        console.warn(`  ⚠️  enrichBuyOrderWithDbIds: ${err.message}`);
+    } catch {
+        // Silent — DB enrichment is optional, sell works via question+date fallback
     }
     return buyOrder;
 }

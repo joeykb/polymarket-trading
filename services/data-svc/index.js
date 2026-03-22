@@ -189,7 +189,9 @@ function compressExistingFiles() {
         try {
             const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
             // Skip if already compressed or no snapshots
-            if (!raw.snapshots || !Array.isArray(raw.snapshots) || raw.snapshots.length < 2) continue;
+            if (!raw.snapshots) continue;
+            if (raw.snapshots._deltaCompressed) continue; // already delta-compressed
+            if (!Array.isArray(raw.snapshots) || raw.snapshots.length < 2) continue;
             const beforeSize = fs.statSync(filePath).size;
             const writeData = { ...raw };
             writeData.snapshots = compressSnapshots(raw.snapshots);
@@ -272,9 +274,29 @@ async function handleRequest(req, res) {
                 const data = loadSessionFile(date);
                 if (!data?.buyOrder) continue;
                 const latest = data.snapshots?.[data.snapshots.length - 1];
+
+                // Enrich positions with DB position IDs (for SELL buttons)
+                const buyOrder = { ...data.buyOrder };
+                if (buyOrder.positions) {
+                    try {
+                        const dbPositions = queries.getActivePositions(data.targetDate || date);
+                        const posMap = {};
+                        for (const p of dbPositions) { posMap[p.question] = p; }
+                        buyOrder.positions = buyOrder.positions.map(p => {
+                            const dbPos = posMap[p.question];
+                            return {
+                                ...p,
+                                positionId: dbPos?.id || p.positionId || null,
+                                soldAt: dbPos?.sold_at || p.soldAt || null,
+                                soldStatus: dbPos?.status === 'sold' ? 'placed' : (p.soldStatus || null),
+                            };
+                        });
+                    } catch { /* DB lookup optional — positions still work without IDs */ }
+                }
+
                 trades.push({
                     date: data.targetDate || date,
-                    buyOrder: data.buyOrder,
+                    buyOrder,
                     status: data.status,
                     phase: data.phase,
                     resolution: data.resolution || null,

@@ -10,13 +10,55 @@ function renderAlertsFeed(alertsArr) {
     if (!alertsArr || alertsArr.length === 0) {
         return '<div class="alert-empty">No alerts yet. Monitoring will detect forecast shifts, range changes, and price spikes.</div>';
     }
-    const alertIcons = { forecast_shift: '\u26a0\ufe0f', range_shift: '\ud83d\udd34', price_spike: '\ud83d\udcca', market_closed: '\u2705' };
-    let h = '';
+    const alertIcons = { forecast_shift: '\u26a0\ufe0f', range_shift: '\ud83d\udd34', price_spike: '\ud83d\udcca', market_closed: '\u2705', phase_change: '\ud83d\udd04', buy_executed: '\ud83d\udcb0' };
+
+    // Dedup: group consecutive identical messages
+    const groups = [];
     for (let i = alertsArr.length - 1; i >= 0; i--) {
         const a = alertsArr[i];
-        h += '<div class="alert-item"><span class="alert-icon">' + (alertIcons[a.type] || '\u2753') + '</span><div class="alert-content"><div class="alert-message">' + escapeHtml(a.message) + '</div><div class="alert-time">' + formatTime(a.timestamp) + '</div></div></div>';
+        const last = groups[groups.length - 1];
+        if (last && last.message === a.message && last.type === a.type) {
+            last.count++;
+            last.lastTimestamp = last.lastTimestamp || last.timestamp;
+            last.firstTimestamp = a.timestamp;
+        } else {
+            groups.push({ ...a, count: 1, firstTimestamp: a.timestamp, lastTimestamp: null });
+        }
+    }
+
+    let h = '';
+    const maxShow = 50;
+    for (let i = 0; i < Math.min(groups.length, maxShow); i++) {
+        const g = groups[i];
+        const icon = alertIcons[g.type] || '\u2753';
+        const timeStr = formatAlertTime(g.timestamp);
+        const countBadge = g.count > 1
+            ? '<span style="background:rgba(251,191,36,0.2);color:#fbbf24;font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;margin-left:6px;">\u00d7' + g.count + '</span>'
+            : '';
+        const rangeStr = g.count > 1 && g.firstTimestamp
+            ? '<span style="color:var(--text-muted);font-size:10px;margin-left:4px;">(since ' + formatAlertTime(g.firstTimestamp) + ')</span>'
+            : '';
+        h += '<div class="alert-item"><span class="alert-icon">' + icon + '</span><div class="alert-content"><div class="alert-message">' + escapeHtml(g.message) + countBadge + '</div><div class="alert-time">' + timeStr + rangeStr + '</div></div></div>';
+    }
+    if (groups.length > maxShow) {
+        h += '<div class="alert-item" style="justify-content:center;color:var(--text-muted);font-size:12px;">+ ' + (groups.length - maxShow) + ' more alerts</div>';
     }
     return h;
+}
+
+function formatAlertTime(iso) {
+    try {
+        const d = new Date(iso);
+        const now = new Date();
+        const sameDay = d.toDateString() === now.toDateString();
+        if (sameDay) {
+            return 'Today ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+        }
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }) + ' ' +
+            d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+    } catch {
+        return iso;
+    }
 }
 
 // ── Ranges Table ──────────────────────────
@@ -134,12 +176,21 @@ async function retryPosition(positionId, btnEl) {
     }
 }
 
-async function sellPosition(positionId, btnEl) {
-    if (!positionId) return;
+async function sellPosition(posDataStr, btnEl) {
+    var posData;
+    try { posData = typeof posDataStr === 'string' ? JSON.parse(posDataStr) : posDataStr; } catch { posData = { positionId: posDataStr }; }
+    if (!posData || (!posData.positionId && !posData.question)) return;
     if (!confirm("Sell this position at market price? This cannot be undone.")) return;
     btnEl.disabled = true; btnEl.textContent = "Selling...";
     try {
-        const res = await fetch("/api/sell-position", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ positionId: positionId, targetDate: currentDate }) });
+        const payload = {
+            positionId: posData.positionId || null,
+            question: posData.question || null,
+            label: posData.label || null,
+            targetDate: posData.targetDate || currentDate,
+            target_date: posData.targetDate || currentDate,
+        };
+        const res = await fetch("/api/sell-position", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         if (data.success) {
             btnEl.textContent = "Sold $" + (data.sellPrice ? data.sellPrice.toFixed(2) : "?");
