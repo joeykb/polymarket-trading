@@ -559,25 +559,97 @@ async function handleRequest(req, res) {
         // ── Full Config (defaults + overrides) ──────────
         if (pathname === '/api/config' && method === 'GET') {
             const overrides = loadConfigOverrides();
-            // Merge overrides on top of defaults
+            const isAdmin = query.admin === '1';
+
+            // Schema with metadata for admin page — 1:1 copy from src/config.js
+            const SCHEMA = {
+                // Trading
+                'trading.mode':             { key: 'TRADING_MODE',           default: 'disabled',  description: 'Trading execution mode', choices: ['disabled', 'dry-run', 'live'] },
+                'trading.privateKey':       { key: 'POLYMARKET_PRIVATE_KEY', default: '',           description: 'Wallet private key', sensitive: true, readOnly: true },
+                'trading.maxPositionCost':  { key: 'MAX_POSITION_COST',      default: 2.00,         description: 'Max cost per position ($)' },
+                'trading.maxDailySpend':    { key: 'MAX_DAILY_SPEND',        default: 5.00,         description: 'Max total daily spend ($)' },
+                'trading.buySize':          { key: 'BUY_SIZE',               default: 0,            description: 'Share quantity (0 = auto)' },
+                'trading.minOrderValue':    { key: 'MIN_ORDER_VALUE',        default: 1.05,         description: 'Min order value buffer ($)' },
+                'trading.maxSpreadPct':     { key: 'MAX_SPREAD_PCT',         default: 0.20,         description: 'Max bid-ask spread before skip' },
+                'trading.minAskDepth':      { key: 'MIN_ASK_DEPTH',          default: 5,            description: 'Min shares at ask to fill' },
+                'trading.clobHost':         { key: 'CLOB_HOST',              default: 'https://clob.polymarket.com', description: 'CLOB API endpoint', requiresRestart: true },
+                'trading.chainId':          { key: 'CHAIN_ID',               default: 137,          description: 'Polygon chain ID', requiresRestart: true, choices: [137, 80002] },
+
+                // Monitoring
+                'monitor.intervalMinutes':        { key: 'MONITOR_INTERVAL',         default: 15,   description: 'Minutes between checks', requiresRestart: true },
+                'monitor.forecastShiftThreshold': { key: 'FORECAST_SHIFT_THRESHOLD', default: 1.0,  description: '°F change to trigger alert' },
+                'monitor.priceSpikeThreshold':    { key: 'PRICE_SPIKE_THRESHOLD',    default: 0.05, description: 'Price change (¢) to trigger alert' },
+                'monitor.rebalanceThreshold':     { key: 'REBALANCE_THRESHOLD',      default: 3.0,  description: '°F change to trigger auto-sell of out-of-range strikes' },
+                'monitor.buyHourEST':             { key: 'BUY_HOUR_EST',             default: 9.5,  description: 'Hour (ET, decimal) to trigger buy (9.5 = 9:30am)' },
+
+                // Liquidity streaming (WebSocket)
+                'liquidity.wsEnabled':         { key: 'WS_LIQUIDITY_ENABLED',    default: 1,           description: 'Enable WebSocket liquidity streaming', choices: [0, 1] },
+                'liquidity.buyMode':           { key: 'LIQUIDITY_BUY_MODE',      default: 'threshold', description: 'Buy trigger mode', choices: ['threshold', 'best-window'] },
+                'liquidity.checkIntervalSecs': { key: 'LIQUIDITY_CHECK_SECS',    default: 30,          description: 'Seconds between liquidity assessments' },
+                'liquidity.windowMinutes':     { key: 'LIQUIDITY_WINDOW_MINS',   default: 60,          description: 'Minutes to track for best-window mode' },
+                'liquidity.buyDeadlineHour':   { key: 'LIQUIDITY_DEADLINE_HOUR', default: 10.5,        description: 'Deadline hour (ET, decimal) to buy if still illiquid (10.5 = 10:30am)' },
+                'liquidity.requireAllLiquid':  { key: 'LIQUIDITY_ALL_REQUIRED',  default: 1,           description: 'Require ALL tokens liquid or ANY', choices: [0, 1] },
+
+                // Weather
+                'weather.stationLat':   { key: 'WEATHER_LAT',     default: 40.7769,  description: 'Station latitude' },
+                'weather.stationLon':   { key: 'WEATHER_LON',     default: -73.8740, description: 'Station longitude' },
+                'weather.stationName':  { key: 'WEATHER_STATION', default: 'KLGA',   description: 'Weather station ID' },
+                'weather.wcApiKey':     { key: 'WC_API_KEY',      default: 'e1f10a1e78da46f5b10a1e78da96f525', description: 'Weather Company API key', sensitive: true },
+                'weather.wcBaseUrl':    { key: 'WC_BASE_URL',     default: 'https://api.weather.com/v3/wx',    description: 'Weather Company base URL', requiresRestart: true },
+                'weather.openMeteoUrl': { key: 'OPEN_METEO_URL',  default: 'https://api.open-meteo.com/v1/forecast', description: 'Open-Meteo fallback URL', requiresRestart: true },
+                'weather.retries':      { key: 'WEATHER_RETRIES', default: 2,        description: 'Retries per weather source' },
+
+                // Polymarket
+                'polymarket.gammaBaseUrl':   { key: 'GAMMA_BASE_URL',   default: 'https://gamma-api.polymarket.com',     description: 'Gamma API base URL', requiresRestart: true },
+                'polymarket.slugTemplate':   { key: 'SLUG_TEMPLATE',    default: 'highest-temperature-in-nyc-on-{date}', description: 'Market slug pattern' },
+                'polymarket.maxSearchPages': { key: 'MAX_SEARCH_PAGES', default: 4,                                      description: 'Max event search pages' },
+                'polymarket.searchPageSize': { key: 'SEARCH_PAGE_SIZE', default: 50,                                     description: 'Events per search page' },
+
+                // Dashboard
+                'dashboard.port':              { key: 'DASHBOARD_PORT',         default: 3000,  description: 'Dashboard HTTP port', requiresRestart: true },
+                'dashboard.refreshInterval':   { key: 'DASHBOARD_REFRESH_MS',   default: 10000, description: 'Card refresh interval (ms)' },
+                'dashboard.liquidityPollMs':   { key: 'DASHBOARD_LIQUIDITY_MS', default: 5000,  description: 'Liquidity panel poll interval (ms)' },
+                'dashboard.manualSellEnabled': { key: 'MANUAL_SELL_ENABLED',    default: 0,     description: 'Show manual sell buttons on positions', choices: [0, 1] },
+
+                // Phase thresholds
+                'phases.buyDaysMin':      { key: 'PHASE_BUY_DAYS_MIN',   default: 2, description: 'Days before target = buy phase' },
+                'phases.scoutDaysMax':    { key: 'PHASE_SCOUT_DAYS_MAX', default: 4, description: 'How far ahead to start scouting forecasts' },
+                'phases.trendThreshold':  { key: 'TREND_THRESHOLD_F',    default: 2, description: '°F shift over scout window to declare a trend' },
+            };
+
+            if (isAdmin) {
+                // Return rich metadata for admin page
+                const result = {};
+                for (const [dotPath, schema] of Object.entries(SCHEMA)) {
+                    const [section, field] = dotPath.split('.');
+                    if (!result[section]) result[section] = {};
+                    const overrideVal = overrides[section]?.[field];
+                    const envVal = process.env[schema.key];
+                    let value = schema.default;
+                    let source = 'default';
+                    if (overrideVal !== undefined) { value = overrideVal; source = 'override'; }
+                    else if (envVal !== undefined && envVal !== '') { value = typeof schema.default === 'number' ? Number(envVal) : envVal; source = 'env'; }
+                    result[section][field] = {
+                        envKey: schema.key,
+                        value,
+                        default: schema.sensitive ? '(hidden)' : schema.default,
+                        source,
+                        description: schema.description || '',
+                        sensitive: schema.sensitive || false,
+                        requiresRestart: schema.requiresRestart || false,
+                        readOnly: schema.readOnly || false,
+                        lockedByEnv: source === 'env',
+                        choices: schema.choices || null,
+                    };
+                }
+                return json(res, result);
+            }
+
+            // Standard flat config for services
             const defaults = {
-                monitor: {
-                    intervalMinutes: 15,
-                    rebalanceThreshold: 3,
-                    forecastShiftThreshold: 2,
-                    priceSpikeThreshold: 0.05,
-                    buyHourEST: 7,
-                },
-                liquidity: {
-                    wsEnabled: true,
-                    checkIntervalSecs: 30,
-                    buyDeadlineHour: 10.5,
-                    requireAllLiquid: false,
-                },
-                phases: {
-                    scoutDaysMax: 4,
-                    trendThreshold: 2,
-                },
+                monitor: { intervalMinutes: 15, rebalanceThreshold: 3, forecastShiftThreshold: 2, priceSpikeThreshold: 0.05, buyHourEST: 7 },
+                liquidity: { wsEnabled: true, checkIntervalSecs: 30, buyDeadlineHour: 10.5, requireAllLiquid: false },
+                phases: { scoutDaysMax: 4, trendThreshold: 2 },
                 trading: {},
             };
             for (const section of Object.keys(overrides)) {

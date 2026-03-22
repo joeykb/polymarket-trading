@@ -356,7 +356,13 @@ const server = http.createServer(async (req, res) => {
 
         // ─── API: GET /api/config ───────────────────────────────────
         if (url.pathname === '/api/config' && req.method === 'GET') {
-            const config = await getConfigSnapshot();
+            const isAdmin = url.searchParams.get('admin') === '1';
+            const configUrl = isAdmin ? '/api/config?admin=1' : '/api/config';
+            let config = {};
+            try {
+                const cfgRes = await fetch(`${DATA_SVC}${configUrl}`, { signal: AbortSignal.timeout(5000) });
+                if (cfgRes.ok) config = await cfgRes.json();
+            } catch { }
             return json(res, { config, serverTime: new Date().toISOString() });
         }
 
@@ -365,7 +371,11 @@ const server = http.createServer(async (req, res) => {
             const body = await readBody(req);
             const result = await updateConfig(body);
             _cachedConfig = null; // bust cache
-            const config = await getConfigSnapshot();
+            let config = {};
+            try {
+                const cfgRes = await fetch(`${DATA_SVC}/api/config?admin=1`, { signal: AbortSignal.timeout(5000) });
+                if (cfgRes.ok) config = await cfgRes.json();
+            } catch { }
             return json(res, { success: true, ...result, config });
         }
 
@@ -375,7 +385,11 @@ const server = http.createServer(async (req, res) => {
             if (parts.length === 2) {
                 await resetConfigValue(parts[0], parts[1]);
                 _cachedConfig = null;
-                const config = await getConfigSnapshot();
+                let config = {};
+                try {
+                    const cfgRes = await fetch(`${DATA_SVC}/api/config?admin=1`, { signal: AbortSignal.timeout(5000) });
+                    if (cfgRes.ok) config = await cfgRes.json();
+                } catch { }
                 return json(res, { success: true, config });
             }
             return json(res, { error: 'Invalid path' }, 400);
@@ -385,7 +399,11 @@ const server = http.createServer(async (req, res) => {
         if (url.pathname === '/api/config/reset' && req.method === 'DELETE') {
             await resetAllOverrides();
             _cachedConfig = null;
-            const config = await getConfigSnapshot();
+            let config = {};
+            try {
+                const cfgRes = await fetch(`${DATA_SVC}/api/config?admin=1`, { signal: AbortSignal.timeout(5000) });
+                if (cfgRes.ok) config = await cfgRes.json();
+            } catch { }
             return json(res, { success: true, config });
         }
 

@@ -5,6 +5,7 @@
 const SECTION_META = {
     trading: { icon: '💰', label: 'Trading & Risk' },
     monitor: { icon: '👁️', label: 'Monitoring Thresholds' },
+    liquidity: { icon: '📡', label: 'Liquidity Streaming' },
     weather: { icon: '🌤️', label: 'Weather Service' },
     polymarket: { icon: '📈', label: 'Polymarket API' },
     dashboard: { icon: '📊', label: 'Dashboard' },
@@ -23,7 +24,7 @@ function toast(message, type = 'success') {
 }
 
 async function loadConfig() {
-    const res = await fetch('/api/config');
+    const res = await fetch('/api/config?admin=1');
     const data = await res.json();
     currentConfig = data.config;
     render(currentConfig);
@@ -137,13 +138,34 @@ function render(cfg) {
             }
 
             html += '<div class="config-input-row">';
-            html += '<input class="config-input" id="' + id + '" ';
-            html += 'value="' + esc(String(info.value)) + '" ';
-            if (isLocked) html += 'disabled ';
-            html += 'data-section="' + section + '" ';
-            html += 'data-field="' + field + '" ';
-            html += 'data-original="' + esc(String(info.value)) + '" ';
-            html += '/>';
+
+            if (info.choices && info.choices.length > 0 && !isLocked) {
+                // Dropdown for fields with defined choices
+                html += '<select class="config-input" id="' + id + '" ';
+                html += 'data-section="' + section + '" ';
+                html += 'data-field="' + field + '" ';
+                html += 'data-original="' + esc(String(info.value)) + '">';
+                for (var ci = 0; ci < info.choices.length; ci++) {
+                    var cv = info.choices[ci];
+                    var selected = String(cv) === String(info.value) ? ' selected' : '';
+                    var choiceLabel = cv;
+                    // Friendly labels for boolean choices
+                    if (info.choices.length === 2 && info.choices[0] === 0 && info.choices[1] === 1) {
+                        choiceLabel = cv === 0 ? '0 — Off' : '1 — On';
+                    }
+                    html += '<option value="' + esc(String(cv)) + '"' + selected + '>' + esc(String(choiceLabel)) + '</option>';
+                }
+                html += '</select>';
+            } else {
+                // Standard text input
+                html += '<input class="config-input" id="' + id + '" ';
+                html += 'value="' + esc(String(info.value)) + '" ';
+                if (isLocked) html += 'disabled ';
+                html += 'data-section="' + section + '" ';
+                html += 'data-field="' + field + '" ';
+                html += 'data-original="' + esc(String(info.value)) + '" ';
+                html += '/>';
+            }
 
             if (!isLocked) {
                 html += '<button class="btn-save" id="save_' + id + '" data-input-id="' + id + '">Save</button>';
@@ -174,6 +196,16 @@ function render(cfg) {
             el.classList.toggle('changed', isChanged);
             const saveBtn = document.getElementById('save_' + el.id);
             if (saveBtn) saveBtn.classList.toggle('visible', isChanged);
+        }
+    });
+
+    // Auto-save on select change (dropdowns)
+    root.addEventListener('change', function(e) {
+        if (e.target.tagName === 'SELECT' && e.target.classList.contains('config-input')) {
+            const el = e.target;
+            if (el.value !== el.dataset.original) {
+                saveValue(el.dataset.section, el.dataset.field, el.value);
+            }
         }
     });
 
