@@ -16,8 +16,9 @@ import {
     createOrResumeSession, runMonitoringCycle, stopSession, loadSession,
     getConfig, getPhase, getDateOffsetET, daysUntil, refreshConfig,
 } from './orchestrator.js';
+import { services } from '../../shared/services.js';
 
-const DATA_SVC = process.env.DATA_SVC_URL || 'http://data-svc:3005';
+const DATA_SVC = services.dataSvc;
 
 // ── CLI Argument Parsing ────────────────────────────────────────────────
 

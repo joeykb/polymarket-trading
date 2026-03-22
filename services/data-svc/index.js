@@ -268,11 +268,28 @@ async function handleRequest(req, res) {
 
         {
             const m = matchRoute('/api/positions/:id', pathname);
+            if (m.match && method === 'GET') {
+                const db = getDb();
+                const pos = db.prepare(`SELECT p.*, t.target_date, t.session_id, t.market_id, t.id as trade_id FROM positions p JOIN trades t ON p.trade_id = t.id WHERE p.id = ?`).get(parseInt(m.params.id));
+                if (!pos) return error(res, 'Position not found', 404);
+                return json(res, pos);
+            }
             if (m.match && method === 'PATCH') {
                 const body = await readBody(req);
                 queries.updatePosition(parseInt(m.params.id), body);
                 return json(res, { updated: true });
             }
+        }
+
+        // ── Analytics (for dashboard) ───────────────────
+        if (pathname === '/api/analytics' && method === 'GET') {
+            const db = getDb();
+            try {
+                const pnlByDate = db.prepare(`SELECT t.target_date, t.market_id, SUM(CASE WHEN t.type = 'buy' THEN COALESCE(t.actual_cost, t.total_cost) ELSE 0 END) as total_bought, SUM(CASE WHEN t.type = 'sell' THEN t.total_proceeds ELSE 0 END) as total_sold, SUM(CASE WHEN t.type = 'redeem' THEN t.total_proceeds ELSE 0 END) as total_redeemed, COUNT(DISTINCT t.id) as trade_count, COUNT(DISTINCT CASE WHEN t.type = 'buy' THEN t.id END) as buy_count, COUNT(DISTINCT CASE WHEN t.type = 'sell' THEN t.id END) as sell_count FROM trades t WHERE t.status != 'failed' GROUP BY t.target_date, t.market_id ORDER BY t.target_date DESC`).all();
+                const totals = { totalInvested: pnlByDate.reduce((s, r) => s + r.total_bought, 0), totalSold: pnlByDate.reduce((s, r) => s + r.total_sold, 0), totalRedeemed: pnlByDate.reduce((s, r) => s + r.total_redeemed, 0), tradingDays: pnlByDate.length, totalTrades: db.prepare("SELECT COUNT(*) as c FROM trades WHERE status != 'failed'").get().c };
+                totals.realizedPnL = (totals.totalSold + totals.totalRedeemed) - totals.totalInvested;
+                return json(res, { pnlByDate, totals, serverTime: new Date().toISOString() });
+            } catch (err) { return error(res, err.message, 500); }
         }
 
         {

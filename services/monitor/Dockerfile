@@ -1,9 +1,15 @@
 FROM node:20-alpine
 
 WORKDIR /app
-COPY package.json package-lock.json* ./
+
+# Copy shared module
+COPY shared/ /app/shared/
+
+# Copy service
+COPY services/monitor/package.json services/monitor/package-lock.json* ./services/monitor/
+WORKDIR /app/services/monitor
 RUN npm ci --production
 
-COPY . .
+COPY services/monitor/ /app/services/monitor/
 
 CMD ["node", "index.js"]

@@ -13,14 +13,15 @@
  */
 
 import 'dotenv/config';
+import { services } from '../../shared/services.js';
 
-// ── Service URLs (from env / K8s DNS) ───────────────────────────────────
+// ── Service URLs (from shared config) ───────────────────────────────────
 
-const WEATHER_SVC  = process.env.WEATHER_SVC_URL  || 'http://weather-svc:3002';
-const MARKET_SVC   = process.env.MARKET_SVC_URL   || 'http://market-svc:3003';
-const TRADING_SVC  = process.env.TRADING_SVC_URL   || 'http://trading-svc:3004';
-const DATA_SVC     = process.env.DATA_SVC_URL      || 'http://data-svc:3005';
-const LIQUIDITY_SVC = process.env.LIQUIDITY_SVC_URL || 'http://localhost:3001';
+const WEATHER_SVC  = services.weatherSvc;
+const MARKET_SVC   = services.marketSvc;
+const TRADING_SVC  = services.tradingSvc;
+const DATA_SVC     = services.dataSvc;
+const LIQUIDITY_SVC = services.liquiditySvc;
 
 // ── Config defaults (overridden by data-svc /api/config) ───────────────
 

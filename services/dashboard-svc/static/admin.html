@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TempEdge — Admin Configuration</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+    <header class="admin-header">
+        <div class="admin-header-left">
+            <span class="logo">⚙️ TempEdge Admin</span>
+            <span class="subtitle">Runtime Configuration</span>
+        </div>
+        <div class="admin-actions">
+            <a href="/" class="btn btn-ghost">← Dashboard</a>
+            <button class="btn" style="background:#f59e0b;color:#000;font-weight:700;" onclick="restartService()">🔄 Restart Service</button>
+            <button class="btn btn-danger" onclick="resetAll()">Reset All to Defaults</button>
+        </div>
+    </header>
+
+    <div class="admin-container" id="configRoot">
+        <div style="text-align:center;padding:60px;color:var(--text-muted);">Loading configuration...</div>
+    </div>
+
+    <div class="toast-container" id="toasts"></div>
+
+    <script src="/static/js/admin.js"></script>
+</body>
+</html>
