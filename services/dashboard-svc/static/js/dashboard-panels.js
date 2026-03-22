@@ -63,9 +63,10 @@ function renderLiquidity(data) {
         if (manualSellEnabled && hasFilled) {
             var ownedPos = hasBuyOrder && hasBuyOrder.positions ? hasBuyOrder.positions.find(function(p) { return p.question === token.question && !p.soldAt && p.status !== 'failed'; }) : null;
             if (ownedPos) {
+                var sellData = escapeHtml(JSON.stringify({ positionId: ownedPos.positionId, question: ownedPos.question, label: ownedPos.label, targetDate: currentDate, shares: ownedPos.shares }));
                 html += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;">';
                 html += '<span style="font-size:11px;color:var(--text-muted);">' + (ownedPos.shares || '?') + ' shares @ $' + (ownedPos.buyPrice ? ownedPos.buyPrice.toFixed(2) : '?.??') + '</span>';
-                html += '<button onclick="sellPosition(' + ownedPos.positionId + ', this)" class="sell-btn" title="Sell this position at market bid price">SELL</button></div>';
+                html += '<button class="sell-btn" data-sell="' + sellData + '" title="Sell this position at market bid price">SELL</button></div>';
             }
         }
         html += '</div>';
@@ -136,7 +137,7 @@ function renderTradeLog(data) {
 
         const posLabels = t.positions.map(function(p) {
             var icon, tipText = '', extraInfo = '', sellBtn = '';
-            if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId) sellBtn = '<button onclick="sellPosition(' + p.positionId + ', this)" class="sell-btn" title="Sell at market">SELL</button> ';
+            if (manualSellEnabled && (p.status === 'placed' || p.status === 'filled') && !p.soldAt && t.mode === 'live' && p.positionId) { var sd = escapeHtml(JSON.stringify({ positionId: p.positionId, question: p.question, label: p.label, targetDate: t.date, shares: p.shares })); sellBtn = '<button class="sell-btn" data-sell="' + sd + '" title="Sell at market">SELL</button> '; }
             if (p.soldAt && p.soldStatus === 'placed') {
                 icon = '\ud83d\udcb5'; var sp = p.sellPrice || (typeof p.soldAt === 'number' ? p.soldAt : parseFloat(p.soldAt) || 0); var posShares = p.shares || 1; var realizedPnl = (sp - p.buyPrice) * posShares; var pnlSign = realizedPnl >= 0 ? '+' : ''; var pnlColor = realizedPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
                 extraInfo = ' <span style="background:rgba(107,114,128,0.25);color:#9ca3af;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:4px;">SOLD @$' + sp.toFixed(2) + '</span> <span style="color:' + pnlColor + ';font-size:11px;font-weight:600;">' + pnlSign + '$' + realizedPnl.toFixed(3) + '</span>';

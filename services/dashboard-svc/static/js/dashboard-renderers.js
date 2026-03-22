@@ -178,7 +178,15 @@ async function retryPosition(positionId, btnEl) {
 
 async function sellPosition(posDataStr, btnEl) {
     var posData;
-    try { posData = typeof posDataStr === 'string' ? JSON.parse(posDataStr) : posDataStr; } catch { posData = { positionId: posDataStr }; }
+    if (typeof posDataStr === 'number') {
+        posData = { positionId: posDataStr };
+    } else if (typeof posDataStr === 'string') {
+        try { posData = JSON.parse(posDataStr); } catch { posData = { positionId: parseInt(posDataStr) || posDataStr }; }
+    } else if (typeof posDataStr === 'object' && posDataStr !== null) {
+        posData = posDataStr;
+    } else {
+        posData = {};
+    }
     if (!posData || (!posData.positionId && !posData.question)) return;
     if (!confirm("Sell this position at market price? This cannot be undone.")) return;
     btnEl.disabled = true; btnEl.textContent = "Selling...";
@@ -201,3 +209,14 @@ async function sellPosition(posDataStr, btnEl) {
 }
 
 // renderLiquidity, renderPipeline, renderTradeLog are large — loaded from dashboard-panels.js
+
+// ── Event delegation for sell/retry buttons ─────────
+document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.sell-btn');
+    if (!btn) return;
+    var raw = btn.getAttribute('data-sell');
+    if (!raw) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sellPosition(raw, btn);
+});
