@@ -13,6 +13,19 @@ import { healthResponse } from '../../shared/health.js';
 import { jsonResponse as json, errorResponse as error, readJsonBody as readBody, parseUrl } from '../../shared/httpServer.js';
 import { buildAdminConfig, buildFlatConfig } from '../../shared/configSchema.js';
 import { getDb } from './db.js';
+import {
+    sessionSchema,
+    sessionUpdateSchema,
+    tradeSchema,
+    tradeUpdateSchema,
+    positionsInsertSchema,
+    positionSoldSchema,
+    positionRedeemedSchema,
+    snapshotSchema,
+    alertSchema,
+    spendSchema,
+    validate,
+} from './schemas.js';
 import * as queries from './queries.js';
 import {
     OUTPUT_DIR,
@@ -84,12 +97,16 @@ export async function handleRequest(req, res) {
             }
             if (m.match && method === 'PUT') {
                 const body = await readBody(req);
-                queries.upsertSession(body);
+                const { data, error: validationError } = validate(sessionSchema, body);
+                if (validationError) return error(res, validationError, 400);
+                queries.upsertSession(data);
                 return json(res, { upserted: true });
             }
             if (m.match && method === 'PATCH') {
                 const body = await readBody(req);
-                queries.updateSession(m.params.id, body);
+                const { data, error: validationError } = validate(sessionUpdateSchema, body);
+                if (validationError) return error(res, validationError, 400);
+                queries.updateSession(m.params.id, data);
                 return json(res, { updated: true });
             }
         }
@@ -97,7 +114,9 @@ export async function handleRequest(req, res) {
         // ── Trades ──────────────────────────────────────
         if (pathname === '/api/trades' && method === 'POST') {
             const body = await readBody(req);
-            const result = queries.insertTrade(body);
+            const { data, error: validationError } = validate(tradeSchema, body);
+            if (validationError) return error(res, validationError, 400);
+            const result = queries.insertTrade(data);
             return json(res, result, 201);
         }
 
@@ -120,7 +139,9 @@ export async function handleRequest(req, res) {
             const m = matchRoute('/api/trades/:id', pathname);
             if (m.match && method === 'PATCH') {
                 const body = await readBody(req);
-                queries.updateTrade(parseInt(m.params.id), body);
+                const { data, error: validationError } = validate(tradeUpdateSchema, body);
+                if (validationError) return error(res, validationError, 400);
+                queries.updateTrade(parseInt(m.params.id), data);
                 return json(res, { updated: true });
             }
         }
@@ -128,8 +149,10 @@ export async function handleRequest(req, res) {
         // ── Positions ───────────────────────────────────
         if (pathname === '/api/positions' && method === 'POST') {
             const body = await readBody(req);
-            queries.insertPositions(body.tradeId, body.positions);
-            return json(res, { inserted: body.positions.length }, 201);
+            const { data, error: validationError } = validate(positionsInsertSchema, body);
+            if (validationError) return error(res, validationError, 400);
+            queries.insertPositions(data.tradeId, data.positions);
+            return json(res, { inserted: data.positions.length }, 201);
         }
 
         if (pathname === '/api/positions/active' && method === 'GET') {
@@ -165,7 +188,9 @@ export async function handleRequest(req, res) {
             const m = matchRoute('/api/positions/:id/sold', pathname);
             if (m.match && method === 'PATCH') {
                 const body = await readBody(req);
-                queries.markPositionSold(parseInt(m.params.id), body);
+                const { data, error: validationError } = validate(positionSoldSchema, body);
+                if (validationError) return error(res, validationError, 400);
+                queries.markPositionSold(parseInt(m.params.id), data);
                 return json(res, { sold: true });
             }
         }
@@ -174,14 +199,19 @@ export async function handleRequest(req, res) {
             const m = matchRoute('/api/positions/:id/redeemed', pathname);
             if (m.match && method === 'PATCH') {
                 const body = await readBody(req);
-                queries.markPositionRedeemed(parseInt(m.params.id), body);
+                const { data, error: validationError } = validate(positionRedeemedSchema, body);
+                if (validationError) return error(res, validationError, 400);
+                queries.markPositionRedeemed(parseInt(m.params.id), data);
                 return json(res, { redeemed: true });
             }
         }
 
         // ── Snapshots ───────────────────────────────────
         if (pathname === '/api/snapshots' && method === 'POST') {
-            const body = await readBody(req);
+            let body = await readBody(req);
+            const { data: validatedBody, error: validationError } = validate(snapshotSchema, body);
+            if (validationError) return error(res, validationError, 400);
+            body = validatedBody;
             try {
                 queries.insertSnapshot(body);
             } catch (err) {
@@ -210,7 +240,10 @@ export async function handleRequest(req, res) {
 
         // ── Alerts ──────────────────────────────────────
         if (pathname === '/api/alerts' && method === 'POST') {
-            const body = await readBody(req);
+            let body = await readBody(req);
+            const { data: validatedAlert, error: validationError } = validate(alertSchema, body);
+            if (validationError) return error(res, validationError, 400);
+            body = validatedAlert;
             try {
                 queries.insertAlert(body);
             } catch (err) {
@@ -237,7 +270,9 @@ export async function handleRequest(req, res) {
 
         if (pathname === '/api/spend' && method === 'POST') {
             const body = await readBody(req);
-            const result = recordSpend(body.date, body.amount, body.details || {});
+            const { data, error: validationError } = validate(spendSchema, body);
+            if (validationError) return error(res, validationError, 400);
+            const result = recordSpend(data.date, data.amount, data.details || {});
             return json(res, result, 201);
         }
 
@@ -285,8 +320,10 @@ export async function handleRequest(req, res) {
         // ── DB Sessions (upsert via POST) ───────────────
         if (pathname === '/api/db/sessions' && method === 'POST') {
             const body = await readBody(req);
+            const { data, error: validationError } = validate(sessionSchema, body);
+            if (validationError) return error(res, validationError, 400);
             try {
-                const result = queries.upsertSession(body);
+                const result = queries.upsertSession(data);
                 return json(res, { upserted: true, existingId: result?.existingId || null }, 201);
             } catch (err) {
                 console.error(`❌ POST /api/db/sessions: ${err.message}`);
