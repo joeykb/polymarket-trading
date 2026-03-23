@@ -18,7 +18,7 @@
 
 import 'dotenv/config';
 import http from 'http';
-import { healthResponse } from '../../shared/health.js';
+import { healthResponse, checkDependencies } from '../../shared/health.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
 import {
     executeRealBuyOrder,
@@ -49,11 +49,13 @@ async function handleRequest(req, res) {
     try {
         if (path === '/health' && method === 'GET') {
             const cfg = getConfig();
+            const deps = await checkDependencies({ dataSvc: cfg.dataSvcUrl || 'http://data-svc:3005' });
             return jsonRes(
                 res,
                 healthResponse('trading-svc', {
                     mode: cfg.mode,
                     walletConfigured: !!cfg.privateKey,
+                    dependencies: deps,
                 }),
             );
         }

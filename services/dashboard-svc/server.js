@@ -20,6 +20,7 @@ import { createLogger, requestLogger } from '../../shared/logger.js';
 import { getTodayET, getTargetDateET, getTomorrowET, daysUntil, getPhase } from '../../shared/dates.js';
 import { jsonResponse as json, readJsonBody as readBody, handleCors } from '../../shared/httpServer.js';
 import { createClient } from '../../shared/httpClient.js';
+import { healthResponse, checkDependencies } from '../../shared/health.js';
 import {
     loadSessionData,
     listAvailableDates,
@@ -126,6 +127,16 @@ const server = http.createServer(
         const url = new URL(req.url, `http://localhost:${port}`);
 
         try {
+            // ─── Health Check ──────────────────────────────────────────
+            if (url.pathname === '/health') {
+                const deps = await checkDependencies({
+                    dataSvc: DATA_SVC,
+                    tradingSvc: TRADING_SVC,
+                    liquiditySvc: LIQUIDITY_SVC,
+                });
+                return json(res, healthResponse('dashboard-svc', { dependencies: deps }));
+            }
+
             // ─── API: GET /api/status ───────────────────────────────────
             if (url.pathname === '/api/status') {
                 const date = url.searchParams.get('date') || targetDate;
