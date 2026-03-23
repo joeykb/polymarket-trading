@@ -120,7 +120,7 @@ function render(cfg) {
             const id = section + '__' + field;
             const isLocked = info.lockedByEnv || info.readOnly;
             const isOverride = info.source === 'override';
-            const cls = isLocked ? 'locked' : (isOverride ? 'modified' : '');
+            const cls = isLocked ? 'locked' : isOverride ? 'modified' : '';
 
             html += '<div class="config-item ' + cls + '">';
             html += '<div class="config-item-header">';
@@ -145,10 +145,10 @@ function render(cfg) {
                 html += 'data-section="' + section + '" ';
                 html += 'data-field="' + field + '" ';
                 html += 'data-original="' + esc(String(info.value)) + '">';
-                for (var ci = 0; ci < info.choices.length; ci++) {
-                    var cv = info.choices[ci];
-                    var selected = String(cv) === String(info.value) ? ' selected' : '';
-                    var choiceLabel = cv;
+                for (let ci = 0; ci < info.choices.length; ci++) {
+                    const cv = info.choices[ci];
+                    const selected = String(cv) === String(info.value) ? ' selected' : '';
+                    let choiceLabel = cv;
                     // Friendly labels for boolean choices
                     if (info.choices.length === 2 && info.choices[0] === 0 && info.choices[1] === 1) {
                         choiceLabel = cv === 0 ? '0 — Off' : '1 — On';
@@ -171,7 +171,12 @@ function render(cfg) {
                 html += '<button class="btn-save" id="save_' + id + '" data-input-id="' + id + '">Save</button>';
             }
             if (isOverride && !isLocked) {
-                html += '<button class="btn-reset-val visible" data-reset-section="' + section + '" data-reset-field="' + field + '">↺</button>';
+                html +=
+                    '<button class="btn-reset-val visible" data-reset-section="' +
+                    section +
+                    '" data-reset-field="' +
+                    field +
+                    '">↺</button>';
             }
 
             html += '</div>';
@@ -189,7 +194,7 @@ function render(cfg) {
     root.innerHTML = html;
 
     // Event delegation
-    root.addEventListener('input', function(e) {
+    root.addEventListener('input', function (e) {
         if (e.target.classList.contains('config-input')) {
             const el = e.target;
             const isChanged = el.value !== el.dataset.original;
@@ -200,7 +205,7 @@ function render(cfg) {
     });
 
     // Auto-save on select change (dropdowns)
-    root.addEventListener('change', function(e) {
+    root.addEventListener('change', function (e) {
         if (e.target.tagName === 'SELECT' && e.target.classList.contains('config-input')) {
             const el = e.target;
             if (el.value !== el.dataset.original) {
@@ -209,7 +214,7 @@ function render(cfg) {
         }
     });
 
-    root.addEventListener('keydown', function(e) {
+    root.addEventListener('keydown', function (e) {
         if (e.target.classList.contains('config-input') && e.key === 'Enter') {
             const el = e.target;
             if (el.value !== el.dataset.original) {
@@ -218,7 +223,7 @@ function render(cfg) {
         }
     });
 
-    root.addEventListener('click', function(e) {
+    root.addEventListener('click', function (e) {
         const saveBtn = e.target.closest('.btn-save');
         if (saveBtn) {
             const inputId = saveBtn.dataset.inputId;

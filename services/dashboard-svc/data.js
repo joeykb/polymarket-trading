@@ -6,41 +6,32 @@
  */
 
 import { services } from '../../shared/services.js';
+import { createSoftClient } from '../../shared/httpClient.js';
 
 const DATA_SVC = services.dataSvc;
 const LIQUIDITY_SVC = services.liquiditySvc;
 
 // ── In-memory caches ────────────────────────────────────────────────────
 
-const sessionCache = new Map();     // date → { data, fetchedAt }
-const CACHE_TTL_MS = 5000;         // 5s cache to avoid hammering data-svc
+const sessionCache = new Map(); // date → { data, fetchedAt }
+const CACHE_TTL_MS = 5000; // 5s cache to avoid hammering data-svc
 
 export let globalCurrentTemp = { tempF: null, conditions: null, maxTodayF: null, timestamp: '' };
 
-// ── data-svc clients ────────────────────────────────────────────────────
+// ── data-svc client (null-on-error via shared httpClient) ────────────
 
-let _lastSvcError = 0;  // throttle error logging
+const dataSvcClient = createSoftClient(DATA_SVC);
+const liquiditySvcClient = createSoftClient(LIQUIDITY_SVC);
 
 async function svcGet(base, urlPath) {
-    try {
-        const res = await fetch(`${base}${urlPath}`, { signal: AbortSignal.timeout(15000) });
-        if (!res.ok) return null;
-        return await res.json();
-    } catch (err) {
-        // Throttle noisy logs during outages — log at most once per 30s
-        const now = Date.now();
-        if (now - _lastSvcError > 30000) {
-            console.warn(`⚠️ svcGet ${urlPath}: ${err.message}`);
-            _lastSvcError = now;
-        }
-        return null;
-    }
+    const client = base === LIQUIDITY_SVC ? liquiditySvcClient : dataSvcClient;
+    return client.get(urlPath, { timeoutMs: 15000 });
 }
 
 export async function loadSessionData(date) {
     const now = Date.now();
     const cached = sessionCache.get(date);
-    if (cached && (now - cached.fetchedAt) < CACHE_TTL_MS) return cached.data;
+    if (cached && now - cached.fetchedAt < CACHE_TTL_MS) return cached.data;
 
     try {
         const data = await svcGet(DATA_SVC, `/api/session-files/${date}?slim=20`);
@@ -89,7 +80,9 @@ export async function fetchLiquidityData(date) {
             }
             result.live = result.tokens.length > 0;
         }
-    } catch { }
+    } catch {
+        /* intentional: liquidity-svc may be unavailable */
+    }
     return result;
 }
 
@@ -111,11 +104,11 @@ export async function getPositionsForTrade(tradeId) {
 }
 
 export async function getAnalytics() {
-    return await svcGet(DATA_SVC, '/api/analytics') || { pnlByDate: [], totals: {} };
+    return (await svcGet(DATA_SVC, '/api/analytics')) || { pnlByDate: [], totals: {} };
 }
 
 export async function getConfigSnapshot() {
-    return await svcGet(DATA_SVC, '/api/config') || {};
+    return (await svcGet(DATA_SVC, '/api/config')) || {};
 }
 
 export async function updateConfig(updates) {
@@ -137,7 +130,8 @@ export async function updateConfig(updates) {
 export async function resetConfigValue(section, field) {
     try {
         const res = await fetch(`${DATA_SVC}/api/config/overrides/${section}/${field}`, {
-            method: 'DELETE', signal: AbortSignal.timeout(5000),
+            method: 'DELETE',
+            signal: AbortSignal.timeout(5000),
         });
         return res.ok;
     } catch {
@@ -148,7 +142,8 @@ export async function resetConfigValue(section, field) {
 export async function resetAllOverrides() {
     try {
         const res = await fetch(`${DATA_SVC}/api/config/overrides`, {
-            method: 'DELETE', signal: AbortSignal.timeout(5000),
+            method: 'DELETE',
+            signal: AbortSignal.timeout(5000),
         });
         return res.ok;
     } catch {
@@ -159,7 +154,8 @@ export async function resetAllOverrides() {
 export async function signalRestart() {
     try {
         const res = await fetch(`${DATA_SVC}/api/restart-signal`, {
-            method: 'POST', signal: AbortSignal.timeout(5000),
+            method: 'POST',
+            signal: AbortSignal.timeout(5000),
         });
         return res.ok;
     } catch {

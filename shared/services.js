@@ -14,10 +14,10 @@
  */
 
 const services = {
-    weatherSvc:   process.env.WEATHER_SVC_URL   || 'http://weather-svc:3002',
-    marketSvc:    process.env.MARKET_SVC_URL    || 'http://market-svc:3003',
-    tradingSvc:   process.env.TRADING_SVC_URL   || 'http://trading-svc:3004',
-    dataSvc:      process.env.DATA_SVC_URL      || 'http://data-svc:3005',
+    weatherSvc: process.env.WEATHER_SVC_URL || 'http://weather-svc:3002',
+    marketSvc: process.env.MARKET_SVC_URL || 'http://market-svc:3003',
+    tradingSvc: process.env.TRADING_SVC_URL || 'http://trading-svc:3004',
+    dataSvc: process.env.DATA_SVC_URL || 'http://data-svc:3005',
     liquiditySvc: process.env.LIQUIDITY_SVC_URL || 'http://liquidity-svc:3001',
 };
 

@@ -20,6 +20,8 @@ import 'dotenv/config';
 import http from 'http';
 import { healthResponse } from '../../shared/health.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
+import { nowISO, formatDateForSlug, extractDateFromTitle } from '../../shared/dates.js';
+import { jsonResponse as jsonRes, errorResponse as errRes } from '../../shared/httpServer.js';
 
 const log = createLogger('market-svc');
 
@@ -28,8 +30,6 @@ const GAMMA_BASE = process.env.GAMMA_BASE_URL || 'https://gamma-api.polymarket.c
 const SLUG_TEMPLATE = process.env.SLUG_TEMPLATE || 'highest-temperature-in-nyc-on-{date}';
 const MAX_SEARCH_PAGES = parseInt(process.env.MAX_SEARCH_PAGES || '3');
 const SEARCH_PAGE_SIZE = parseInt(process.env.SEARCH_PAGE_SIZE || '100');
-
-function nowISO() { return new Date().toISOString(); }
 
 // ── Range Parsing ───────────────────────────────────────────────────────
 
@@ -51,47 +51,47 @@ function parseRange(question) {
 
 function transformMarket(market) {
     const range = parseRange(market.question);
-    let yesPrice = 0, noPrice = 0, bestBid = 0, bestAsk = 0;
+    let yesPrice = 0,
+        noPrice = 0;
 
     try {
         const prices = JSON.parse(market.outcomePrices);
         yesPrice = parseFloat(prices[0]);
         noPrice = parseFloat(prices[1]);
-    } catch { }
+    } catch {
+        /* intentional: malformed outcomePrices JSON */
+    }
 
-    bestBid = parseFloat(market.bestBid) || 0;
-    bestAsk = parseFloat(market.bestAsk) || 0;
+    const bestBid = parseFloat(market.bestBid) || 0;
+    const bestAsk = parseFloat(market.bestAsk) || 0;
     if (bestAsk > 0) yesPrice = bestAsk;
 
     let clobTokenIds = [];
-    try { clobTokenIds = JSON.parse(market.clobTokenIds); } catch { }
+    try {
+        clobTokenIds = JSON.parse(market.clobTokenIds);
+    } catch {
+        /* intentional: may not be valid JSON */
+    }
 
     return {
-        marketId: market.id, question: market.question, conditionId: market.conditionId,
-        lowTemp: range.low, highTemp: range.high, isOpenEnd: range.isOpenEnd,
-        openEndDirection: range.openEndDirection, yesPrice, noPrice, bestBid, bestAsk,
+        marketId: market.id,
+        question: market.question,
+        conditionId: market.conditionId,
+        lowTemp: range.low,
+        highTemp: range.high,
+        isOpenEnd: range.isOpenEnd,
+        openEndDirection: range.openEndDirection,
+        yesPrice,
+        noPrice,
+        bestBid,
+        bestAsk,
         impliedProbability: parseFloat((yesPrice * 100).toFixed(1)),
-        volume: parseFloat(market.volume) || 0, clobTokenIds,
+        volume: parseFloat(market.volume) || 0,
+        clobTokenIds,
     };
 }
 
-// ── Date Helpers ────────────────────────────────────────────────────────
-
-function formatDateForSlug(dateStr) {
-    const [year, month, day] = dateStr.split('-').map(Number);
-    const d = new Date(year, month - 1, day);
-    const monthName = d.toLocaleDateString('en-US', { month: 'long' }).toLowerCase();
-    return `${monthName}-${day}-${year}`;
-}
-
-function extractDateFromTitle(title) {
-    const match = title.match(/on (\w+ \d+)\??/i);
-    if (match) {
-        const parsed = new Date(`${match[1]}, ${new Date().getFullYear()}`);
-        if (!isNaN(parsed.getTime())) return parsed.toISOString().split('T')[0];
-    }
-    return null;
-}
+// (Date utilities now imported from shared/dates.js)
 
 // ── Gamma API Discovery ────────────────────────────────────────────────
 
@@ -107,7 +107,9 @@ async function trySlugDiscovery(targetDate) {
     try {
         const data = await gammaFetch(`${GAMMA_BASE}/events?slug=${slug}`);
         if (Array.isArray(data) && data.length > 0) return data[0];
-    } catch { }
+    } catch {
+        /* intentional: slug may not exist */
+    }
     return null;
 }
 
@@ -119,7 +121,9 @@ async function trySlugWithoutYear(targetDate) {
     try {
         const data = await gammaFetch(`${GAMMA_BASE}/events?slug=${slug}`);
         if (Array.isArray(data) && data.length > 0) return data[0];
-    } catch { }
+    } catch {
+        /* intentional: slug variant may not exist */
+    }
     return null;
 }
 
@@ -128,9 +132,14 @@ async function searchAllTemperatureEvents() {
     try {
         const maxOffset = MAX_SEARCH_PAGES * SEARCH_PAGE_SIZE;
         for (let offset = 0; offset < maxOffset; offset += SEARCH_PAGE_SIZE) {
-            const url = `${GAMMA_BASE}/events?` + new URLSearchParams({
-                active: 'true', closed: 'false', limit: String(SEARCH_PAGE_SIZE), offset: String(offset),
-            });
+            const url =
+                `${GAMMA_BASE}/events?` +
+                new URLSearchParams({
+                    active: 'true',
+                    closed: 'false',
+                    limit: String(SEARCH_PAGE_SIZE),
+                    offset: String(offset),
+                });
             const data = await gammaFetch(url);
             if (!Array.isArray(data) || data.length === 0) break;
 
@@ -150,12 +159,15 @@ async function searchAllTemperatureEvents() {
     if (results.length === 0) {
         const today = new Date();
         for (let i = 0; i <= 7; i++) {
-            const d = new Date(today); d.setDate(d.getDate() + i);
+            const d = new Date(today);
+            d.setDate(d.getDate() + i);
             const dateStr = d.toISOString().split('T')[0];
             try {
                 const event = await trySlugDiscovery(dateStr);
                 if (event) results.push(event);
-            } catch { }
+            } catch {
+                /* intentional: individual date discovery failure */
+            }
         }
     }
     return results;
@@ -166,7 +178,7 @@ async function discoverMarket(targetDate) {
     if (!event) event = await trySlugWithoutYear(targetDate);
     if (!event) {
         const allEvents = await searchAllTemperatureEvents();
-        event = allEvents.find(e => extractDateFromTitle(e.title) === targetDate);
+        event = allEvents.find((e) => extractDateFromTitle(e.title) === targetDate);
         if (!event) {
             throw new Error(`No temperature market found for ${targetDate}`);
         }
@@ -177,9 +189,13 @@ async function discoverMarket(targetDate) {
 
     const ranges = markets.map(transformMarket).sort((a, b) => a.lowTemp - b.lowTemp);
     return {
-        id: event.id, title: event.title, slug: event.slug,
+        id: event.id,
+        title: event.title,
+        slug: event.slug,
         targetDate: extractDateFromTitle(event.title) || targetDate,
-        active: event.active, closed: event.closed, ranges,
+        active: event.active,
+        closed: event.closed,
+        ranges,
     };
 }
 
@@ -205,31 +221,30 @@ function findTargetRange(forecastTempF, ranges) {
 function selectRanges(forecastTempF, ranges, targetDate) {
     const sorted = [...ranges].sort((a, b) => a.lowTemp - b.lowTemp);
     const target = findTargetRange(forecastTempF, sorted);
-    const targetIndex = sorted.findIndex(r => r.marketId === target.marketId);
+    const targetIndex = sorted.findIndex((r) => r.marketId === target.marketId);
 
     const below = targetIndex > 0 ? sorted[targetIndex - 1] : null;
     const above = targetIndex < sorted.length - 1 ? sorted[targetIndex + 1] : null;
 
     const totalCost = parseFloat((target.yesPrice + (below?.yesPrice ?? 0) + (above?.yesPrice ?? 0)).toFixed(4));
     const potentialProfit = parseFloat((1.0 - totalCost).toFixed(4));
-    const roi = totalCost > 0 ? ((1.0 - totalCost) / totalCost * 100).toFixed(1) + '%' : 'N/A';
+    const roi = totalCost > 0 ? (((1.0 - totalCost) / totalCost) * 100).toFixed(1) + '%' : 'N/A';
 
     return {
-        target, below, above, forecastTempF, forecastSource: 'weather-company',
-        targetDate, selectionTimestamp: nowISO(), totalCost, potentialProfit, roi,
+        target,
+        below,
+        above,
+        forecastTempF,
+        forecastSource: 'weather-company',
+        targetDate,
+        selectionTimestamp: nowISO(),
+        totalCost,
+        potentialProfit,
+        roi,
     };
 }
 
-// ── HTTP Helpers ────────────────────────────────────────────────────────
-
-function jsonRes(res, data, status = 200) {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(data));
-}
-
-function errRes(res, message, status = 400) {
-    jsonRes(res, { error: message }, status);
-}
+// (HTTP helpers now imported from shared/httpServer.js)
 
 // ── Request Handler ─────────────────────────────────────────────────────
 
@@ -270,5 +285,11 @@ server.listen(PORT, () => {
     log.info('started', { port: PORT, gammaBase: GAMMA_BASE });
 });
 
-process.on('SIGINT', () => { server.close(); process.exit(0); });
-process.on('SIGTERM', () => { server.close(); process.exit(0); });
+process.on('SIGINT', () => {
+    server.close();
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    server.close();
+    process.exit(0);
+});

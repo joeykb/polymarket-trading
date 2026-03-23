@@ -44,16 +44,21 @@ export function createLogger(service) {
             stream.write(JSON.stringify(entry) + '\n');
         } else {
             // Human-friendly — colored emoji output
-            const prefix = {
-                info:  'ℹ️ ',
-                warn:  '⚠️ ',
-                error: '❌',
-                debug: '🔍',
-            }[level] || '  ';
+            const prefix =
+                {
+                    info: 'ℹ️ ',
+                    warn: '⚠️ ',
+                    error: '❌',
+                    debug: '🔍',
+                }[level] || '  ';
 
-            const extra = Object.keys(data).length > 0
-                ? ' ' + Object.entries(data).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ')
-                : '';
+            const extra =
+                Object.keys(data).length > 0
+                    ? ' ' +
+                      Object.entries(data)
+                          .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+                          .join(' ')
+                    : '';
 
             const stream = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
             stream(`${prefix} [${service}] ${msg}${extra}`);
@@ -61,10 +66,12 @@ export function createLogger(service) {
     }
 
     return {
-        info:  (msg, data) => emit('info', msg, data),
-        warn:  (msg, data) => emit('warn', msg, data),
+        info: (msg, data) => emit('info', msg, data),
+        warn: (msg, data) => emit('warn', msg, data),
         error: (msg, data) => emit('error', msg, data),
-        debug: (msg, data) => { if (process.env.LOG_DEBUG === '1') emit('debug', msg, data); },
+        debug: (msg, data) => {
+            if (process.env.LOG_DEBUG === '1') emit('debug', msg, data);
+        },
     };
 }
 

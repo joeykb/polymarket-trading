@@ -20,35 +20,24 @@ import 'dotenv/config';
 import http from 'http';
 import { healthResponse } from '../../shared/health.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
-import { executeRealBuyOrder, executeSellOrder, retrySinglePosition, redeemPositions, getWalletBalance, getConfig } from './trading.js';
+import {
+    executeRealBuyOrder,
+    executeSellOrder,
+    retrySinglePosition,
+    redeemPositions,
+    getWalletBalance,
+    getConfig,
+    refreshTradingConfig,
+} from './trading.js';
 
 const log = createLogger('trading-svc');
 
 const PORT = parseInt(process.env.TRADING_SVC_PORT || '3004');
 const DATA_SVC_URL = process.env.DATA_SVC_URL || 'http://data-svc:3005';
 
-// ── HTTP Helpers ────────────────────────────────────────────────────────
+// ── HTTP Helpers (shared) ───────────────────────────────────────────────
 
-function jsonRes(res, data, status = 200) {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(data));
-}
-
-function errRes(res, message, status = 400) {
-    jsonRes(res, { error: message }, status);
-}
-
-function readBody(req) {
-    return new Promise((resolve, reject) => {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            try { resolve(body ? JSON.parse(body) : {}); }
-            catch (e) { reject(new Error('Invalid JSON')); }
-        });
-        req.on('error', reject);
-    });
-}
+import { jsonResponse as jsonRes, errorResponse as errRes, readJsonBody as readBody } from '../../shared/httpServer.js';
 
 // ── Request Handler ─────────────────────────────────────────────────────
 
@@ -60,13 +49,17 @@ async function handleRequest(req, res) {
     try {
         if (path === '/health' && method === 'GET') {
             const cfg = getConfig();
-            return jsonRes(res, healthResponse('trading-svc', {
-                mode: cfg.mode,
-                walletConfigured: !!cfg.privateKey,
-            }));
+            return jsonRes(
+                res,
+                healthResponse('trading-svc', {
+                    mode: cfg.mode,
+                    walletConfigured: !!cfg.privateKey,
+                }),
+            );
         }
 
         if (path === '/api/buy' && method === 'POST') {
+            await refreshTradingConfig();
             const body = await readBody(req);
             const result = await executeRealBuyOrder(body.snapshot, body.liqTokens || [], body.context || {});
             if (!result) return jsonRes(res, { success: false, error: 'Buy order failed or skipped' });
@@ -74,6 +67,7 @@ async function handleRequest(req, res) {
         }
 
         if (path === '/api/sell' && method === 'POST') {
+            await refreshTradingConfig();
             const body = await readBody(req);
             const result = await executeSellOrder(body.positions, body.context || {});
             if (!result) return jsonRes(res, { success: false, error: 'Sell order failed or skipped' });
@@ -81,12 +75,14 @@ async function handleRequest(req, res) {
         }
 
         if (path === '/api/retry' && method === 'POST') {
+            await refreshTradingConfig();
             const body = await readBody(req);
             const result = await retrySinglePosition(body.position, body.liqTokenData || null);
             return jsonRes(res, result);
         }
 
         if (path === '/api/redeem' && method === 'POST') {
+            await refreshTradingConfig();
             const body = await readBody(req);
             if (!body.session) return errRes(res, 'session is required');
             const result = await redeemPositions(body.session);
@@ -116,10 +112,17 @@ async function handleRequest(req, res) {
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = http.createServer(requestLogger(log, handleRequest));
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
+    await refreshTradingConfig();
     const cfg = getConfig();
     log.info('started', { port: PORT, mode: cfg.mode, wallet: cfg.privateKey ? 'configured' : 'missing', dataSvc: DATA_SVC_URL });
 });
 
-process.on('SIGINT', () => { server.close(); process.exit(0); });
-process.on('SIGTERM', () => { server.close(); process.exit(0); });
+process.on('SIGINT', () => {
+    server.close();
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    server.close();
+    process.exit(0);
+});
