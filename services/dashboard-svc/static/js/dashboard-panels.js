@@ -68,9 +68,9 @@ function renderLiquidity(data) {
         }
         const liquidBg = token.isLiquid ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.05)';
         const liquidBorder = token.isLiquid ? 'var(--accent-green)' : 'var(--border)';
-        const spreadColor = token.spreadPct <= (data.thresholds?.maxSpreadPct || 0.2) ? 'var(--accent-green)' : 'var(--accent-red)';
-        const depthColor = token.askDepth >= (data.thresholds?.minAskDepth || 5) ? 'var(--accent-green)' : 'var(--accent-red)';
-        const scorePct = Math.round(token.score * 100);
+        const spreadColor = (token.spreadPct || 0) <= (data.thresholds?.maxSpreadPct || 0.2) ? 'var(--accent-green)' : 'var(--accent-red)';
+        const depthColor = (token.askDepth || 0) >= (data.thresholds?.minAskDepth || 5) ? 'var(--accent-green)' : 'var(--accent-red)';
+        const scorePct = Math.round((token.score || 0) * 100);
         const scoreColor = scorePct >= 60 ? 'var(--accent-green)' : scorePct >= 30 ? 'var(--accent-amber)' : 'var(--accent-red)';
 
         html +=
@@ -108,13 +108,13 @@ function renderLiquidity(data) {
             '<div style="text-align:center;"><div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Spread</div><div style="font-family:JetBrains Mono,monospace;font-size:14px;font-weight:600;color:' +
             spreadColor +
             ';">' +
-            (token.spreadPct * 100).toFixed(1) +
+            ((token.spreadPct || 0) * 100).toFixed(1) +
             '%</div></div>';
         html +=
             '<div style="text-align:center;"><div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Depth</div><div style="font-family:JetBrains Mono,monospace;font-size:14px;font-weight:600;color:' +
             depthColor +
             ';">' +
-            token.askDepth.toFixed(1) +
+            (token.askDepth != null ? token.askDepth.toFixed(1) : '--') +
             '</div></div></div>';
         html +=
             '<div style="display:flex;align-items:center;gap:8px;"><div style="font-size:11px;color:var(--text-muted);width:40px;">Score</div><div style="flex:1;height:6px;background:rgba(42,53,80,0.5);border-radius:3px;overflow:hidden;"><div style="width:' +

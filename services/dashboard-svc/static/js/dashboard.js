@@ -5,11 +5,11 @@
  */
 
 const CFG = window.__TEMPEDGE_CONFIG__ || {};
-const currentDate = CFG.defaultDate || new Date().toISOString().slice(0, 10);
-const refreshTimer = null;
-const lastRenderState = null;
-const currentPlay = null;
-const manualSellEnabled = CFG.manualSellEnabled || false;
+let currentDate = CFG.defaultDate || new Date().toISOString().slice(0, 10);
+let refreshTimer = null;
+let lastRenderState = null;
+let currentPlay = null;
+let manualSellEnabled = CFG.manualSellEnabled || false;
 
 // ── Data Fetching ─────────────────────────
 async function fetchStatus(date) {
