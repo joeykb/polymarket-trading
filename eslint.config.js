@@ -74,6 +74,28 @@ export default [
         },
     },
 
+    // ── Test files ──────────────────────────────────────────────────────
+    {
+        files: ['tests/**/*.js'],
+        languageOptions: {
+            globals: {
+                // vitest globals
+                describe: 'readonly',
+                it: 'readonly',
+                expect: 'readonly',
+                vi: 'readonly',
+                beforeAll: 'readonly',
+                afterAll: 'readonly',
+                beforeEach: 'readonly',
+                afterEach: 'readonly',
+                test: 'readonly',
+            },
+        },
+        rules: {
+            'no-unused-vars': 'off',
+        },
+    },
+
     // ── Global ignores ──────────────────────────────────────────────────
     {
         ignores: [

@@ -19,7 +19,9 @@
     "lint:fix": "eslint services/ shared/ --fix",
     "format": "prettier --write \"services/**/*.js\" \"shared/**/*.js\"",
     "format:check": "prettier --check \"services/**/*.js\" \"shared/**/*.js\"",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [
     "polymarket",
@@ -30,11 +32,13 @@
   "license": "ISC",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "better-sqlite3": "^12.8.0",
     "eslint": "^10.1.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
     "globals": "^17.4.0",
     "prettier": "^3.8.1",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "vitest": "^4.1.1"
   }
 }
