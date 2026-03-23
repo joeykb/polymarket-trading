@@ -113,8 +113,13 @@ export async function getConfigSnapshot() {
 
 export async function updateConfig(updates) {
     try {
-        const overrides = await svcGet(DATA_SVC, '/api/config/overrides');
-        const merged = { ...(overrides || {}), ...updates };
+        const overrides = (await svcGet(DATA_SVC, '/api/config/overrides')) || {};
+        // Deep merge at section level: merge each section's fields individually
+        // so updating trading.maxSpreadPct doesn't wipe out trading.mode
+        const merged = { ...overrides };
+        for (const [section, fields] of Object.entries(updates)) {
+            merged[section] = { ...(merged[section] || {}), ...fields };
+        }
         const res = await fetch(`${DATA_SVC}/api/config/overrides`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
