@@ -17,17 +17,21 @@ const DEFAULT_TIMEOUT_MS = 10000;
  * @param {string} [options.method='GET']
  * @param {Object} [options.body]
  * @param {number} [options.timeoutMs]
+ * @param {string} [options.requestId] - Correlation ID to forward as X-Request-Id
  * @returns {Promise<any>}
  */
-export async function svcRequest(url, { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function svcRequest(url, { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS, requestId } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (requestId) headers['X-Request-Id'] = requestId;
+
         const opts = {
             method,
             signal: controller.signal,
-            headers: { 'Content-Type': 'application/json' },
+            headers,
         };
         if (body && method !== 'GET') {
             opts.body = JSON.stringify(body);

@@ -594,3 +594,14 @@ const log = createLogger('dashboard-svc');
 server.listen(port, () => {
     log.info('started', { port, date: targetDate, dataSvc: DATA_SVC, tradingSvc: TRADING_SVC, liquiditySvc: LIQUIDITY_SVC });
 });
+
+process.on('SIGINT', () => {
+    log.info('shutting down (SIGINT)');
+    server.close();
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    log.info('shutting down (SIGTERM)');
+    server.close();
+    process.exit(0);
+});

@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 /**
  * TempEdge — Structured Logger & HTTP Request Logging
  *
@@ -91,6 +93,11 @@ export function requestLogger(log, handler) {
         const start = Date.now();
         const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+        // ── Correlation ID: read from inbound header or generate ────
+        const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+        req.requestId = requestId;
+        res.setHeader('X-Request-Id', requestId);
+
         // Capture status code when response finishes
         const originalEnd = res.end.bind(res);
         let logged = false;
@@ -104,6 +111,7 @@ export function requestLogger(log, handler) {
                     path: url.pathname,
                     status: res.statusCode,
                     ms,
+                    requestId,
                 };
 
                 // Health checks at debug level to reduce noise
@@ -121,7 +129,7 @@ export function requestLogger(log, handler) {
             await handler(req, res);
         } catch (err) {
             const ms = Date.now() - start;
-            log.error('unhandled error', { method: req.method, path: url.pathname, error: err.message, ms });
+            log.error('unhandled error', { method: req.method, path: url.pathname, error: err.message, ms, requestId });
             if (!res.headersSent) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Internal server error' }));
