@@ -1,0 +1,74 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: liquidity-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: liquidity-svc-green
+    version: green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+      component: liquidity-svc-green
+      version: green
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: liquidity-svc-green
+        version: green
+    spec:
+      containers:
+        - name: liquidity-svc-green
+          image: tempedge-liquidity-svc:green
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3001
+          env:
+            - name: LIQUIDITY_SVC_PORT
+              value: "3001"
+            - name: DATA_SVC_URL
+              value: "http://data-svc-green:3005"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: liquidity-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: liquidity-svc-green
+    version: green
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: liquidity-svc-green
+    version: green
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+      protocol: TCP

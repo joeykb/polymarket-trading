@@ -1,0 +1,72 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: weather-svc-green
+    version: green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+      component: weather-svc-green
+      version: green
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: weather-svc-green
+        version: green
+    spec:
+      containers:
+        - name: weather-svc-green
+          image: tempedge-weather-svc:green
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3002
+          env:
+            - name: WEATHER_SVC_PORT
+              value: "3002"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3002
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3002
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: weather-svc-green
+    version: green
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: weather-svc-green
+    version: green
+  ports:
+    - name: http
+      port: 3002
+      targetPort: 3002
+      protocol: TCP

@@ -1,0 +1,118 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: trading-svc-green
+    version: green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+      component: trading-svc-green
+      version: green
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: trading-svc-green
+        version: green
+    spec:
+      containers:
+        - name: trading-svc-green
+          image: tempedge-trading-svc:green
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3004
+          env:
+            - name: DATA_SVC_URL
+              value: "http://data-svc-green:3005"
+            - name: TRADING_SVC_PORT
+              value: "3004"
+            - name: HTTP_PROXY
+              value: "socks5://127.0.0.1:1080"
+            - name: HTTPS_PROXY
+              value: "socks5://127.0.0.1:1080"
+            - name: NO_PROXY
+              value: "data-svc-green,localhost,*.polygon-rpc.com,rpc.ankr.com,polygon-bor-rpc.publicnode.com"
+          envFrom:
+            - secretRef:
+                name: polymarket-trading
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3004
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3004
+            initialDelaySeconds: 15
+            periodSeconds: 30
+        - name: vpn
+          image: qmcgaw/gluetun:latest
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          env:
+            - name: VPN_SERVICE_PROVIDER
+              value: "custom"
+            - name: VPN_TYPE
+              value: "openvpn"
+            - name: OPENVPN_CUSTOM_CONFIG
+              value: "/vpn/nordvpn.ovpn"
+          envFrom:
+            - secretRef:
+                name: nordvpn-credentials
+          volumeMounts:
+            - name: vpn-config
+              mountPath: /vpn
+              readOnly: true
+            - name: tun-device
+              mountPath: /dev/net/tun
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: vpn-config
+          configMap:
+            name: nordvpn-ovpn
+        - name: tun-device
+          hostPath:
+            path: /dev/net/tun
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: trading-svc-green
+    version: green
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: trading-svc-green
+    version: green
+  ports:
+    - name: http
+      port: 3004
+      targetPort: 3004
+      protocol: TCP
