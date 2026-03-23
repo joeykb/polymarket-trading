@@ -146,9 +146,9 @@ async function selectRanges(forecastTempF, ranges, targetDate) {
     return svcGet(MARKET_SVC, `/api/ranges?date=${targetDate}&forecastF=${forecastTempF}`);
 }
 
-async function tryPlaceBuyOrder(snapshot, liqTokens = []) {
+async function tryPlaceBuyOrder(snapshot, liqTokens = [], context = {}) {
     try {
-        const result = await svcPost(TRADING_SVC, '/api/buy', { snapshot, liqTokens });
+        const result = await svcPost(TRADING_SVC, '/api/buy', { snapshot, liqTokens, context });
         if (!result || result.error) {
             console.warn(`  ⚠️  Buy order failed: ${result?.error || 'unknown'}`);
             return null;
@@ -479,7 +479,7 @@ function startLiquidityGatedBuy(session, snapshot) {
             // Take fresh snapshot so buy uses latest forecast
             let freshSnapshot;
             try { freshSnapshot = await takeSnapshot(targetDate, null); } catch { freshSnapshot = snapshot; }
-            const order = await tryPlaceBuyOrder(freshSnapshot, deadlineLiq?.tokens || []);
+            const order = await tryPlaceBuyOrder(freshSnapshot, deadlineLiq?.tokens || [], { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' });
             if (!order) { console.warn('  ⚠️  Deadline buy failed'); return; }
             attachSessionContext(order, session);
             order.liquidityWait = waitStr;
@@ -515,7 +515,7 @@ function startLiquidityGatedBuy(session, snapshot) {
         // Take fresh snapshot so buy uses latest forecast
         let freshSnapshot;
         try { freshSnapshot = await takeSnapshot(targetDate, null); } catch { freshSnapshot = snapshot; }
-        const order = await tryPlaceBuyOrder(freshSnapshot, liqData.tokens);
+        const order = await tryPlaceBuyOrder(freshSnapshot, liqData.tokens, { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' });
         if (!order) { console.warn('  ⚠️  Liquidity-gated buy failed'); return; }
         attachSessionContext(order, session);
         order.liquidityWait = waitStr;
@@ -622,7 +622,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         const shouldGate = _config.liquidity.wsEnabled && phase === 'buy';
         if (!shouldGate) {
             const initLiq = await fetchLiquidityFromService(targetDate);
-            buyOrder = await tryPlaceBuyOrder(snapshot, initLiq?.tokens || []);
+            buyOrder = await tryPlaceBuyOrder(snapshot, initLiq?.tokens || [], { targetDate, marketId: 'nyc' });
             if (buyOrder) {
                 console.log(`  💰 Buy order placed: $${buyOrder.totalCost.toFixed(3)} [${buyOrder.mode || 'live'}]`);
             } else {
@@ -705,7 +705,7 @@ export async function runMonitoringCycle(session) {
     const buySignal = shouldPlaceBuy(session, snapshot);
     if (buySignal === true) {
         const immLiq = await fetchLiquidityFromService(session.targetDate);
-        session.buyOrder = await tryPlaceBuyOrder(snapshot, immLiq?.tokens || []);
+        session.buyOrder = await tryPlaceBuyOrder(snapshot, immLiq?.tokens || [], { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' });
         attachSessionContext(session.buyOrder, session);
     } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
         startLiquidityGatedBuy(session, snapshot);

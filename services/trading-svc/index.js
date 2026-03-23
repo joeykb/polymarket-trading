@@ -68,7 +68,7 @@ async function handleRequest(req, res) {
 
         if (path === '/api/buy' && method === 'POST') {
             const body = await readBody(req);
-            const result = await executeRealBuyOrder(body.snapshot, body.liqTokens || []);
+            const result = await executeRealBuyOrder(body.snapshot, body.liqTokens || [], body.context || {});
             if (!result) return jsonRes(res, { success: false, error: 'Buy order failed or skipped' });
             return jsonRes(res, result);
         }

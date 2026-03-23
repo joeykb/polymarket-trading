@@ -452,9 +452,11 @@ async function placeSingleOrder(position, tradingCfg, liqTokenData = null) {
  * Called by monitor.js instead of the simulated placeBuyOrder()
  * 
  * @param {Object} snapshot - MonitoringSnapshot with target/below/above ranges
+ * @param {Array} liqTokens - live liquidity token data
+ * @param {Object} sessionContext - { sessionId, targetDate, marketId } for DB persistence
  * @returns {Promise<Object>} - buyOrder object compatible with existing P&L logic
  */
-export async function executeRealBuyOrder(snapshot, liqTokens = []) {
+export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionContext = {}) {
     const tradingCfg = getConfig();
 
     if (tradingCfg.mode === 'disabled') {
@@ -552,9 +554,9 @@ export async function executeRealBuyOrder(snapshot, liqTokens = []) {
     // ── Persist to Database (via data-svc) ──────────────────────────
     try {
         const { id: dbTradeId } = await dataSvc('POST', '/api/trades', {
-            sessionId: buyOrder._sessionId || null,
-            marketId: buyOrder._marketId || 'nyc',
-            targetDate: buyOrder._targetDate || null,
+            sessionId: sessionContext.sessionId || buyOrder._sessionId || null,
+            marketId: sessionContext.marketId || buyOrder._marketId || 'nyc',
+            targetDate: sessionContext.targetDate || buyOrder._targetDate || null,
             type: 'buy',
             mode: tradingCfg.mode,
             placedAt: buyOrder.placedAt,
