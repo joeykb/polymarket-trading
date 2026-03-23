@@ -174,19 +174,84 @@ export function recordSpend(date, amount, orderDetails) {
     return data;
 }
 
-// ── Config Overrides ────────────────────────────────────────────────────
+// ── Config Overrides (DB-backed) ────────────────────────────────────────
+// Previously stored in config-overrides.json, now in the config_overrides
+// table for reliable persistence. Auto-migrates from JSON file on first load.
 
-export function loadConfigOverrides() {
-    if (!fs.existsSync(CONFIG_OVERRIDES_PATH)) return {};
-    try {
-        return JSON.parse(fs.readFileSync(CONFIG_OVERRIDES_PATH, 'utf-8'));
-    } catch {
-        return {}; /* intentional: overrides file may not exist */
+let _overridesMigrated = false;
+
+function _migrateJsonToDb(db) {
+    if (_overridesMigrated) return;
+    _overridesMigrated = true;
+
+    // Check if JSON file exists and DB table is empty → migrate
+    if (fs.existsSync(CONFIG_OVERRIDES_PATH)) {
+        const count = db.prepare('SELECT COUNT(*) as n FROM config_overrides').get().n;
+        if (count === 0) {
+            try {
+                const jsonOverrides = JSON.parse(fs.readFileSync(CONFIG_OVERRIDES_PATH, 'utf-8'));
+                const insert = db.prepare('INSERT OR REPLACE INTO config_overrides (section, field, value) VALUES (?, ?, ?)');
+                const migrate = db.transaction(() => {
+                    for (const [section, fields] of Object.entries(jsonOverrides)) {
+                        if (typeof fields === 'object' && fields !== null) {
+                            for (const [field, value] of Object.entries(fields)) {
+                                insert.run(section, field, String(value));
+                            }
+                        }
+                    }
+                });
+                migrate();
+                console.log(`  📦 Migrated config overrides from JSON file → DB`);
+            } catch (err) {
+                console.warn(`  ⚠️  Config override migration failed: ${err.message}`);
+            }
+        }
+        // Rename old file as backup (don't delete immediately)
+        try {
+            fs.renameSync(CONFIG_OVERRIDES_PATH, CONFIG_OVERRIDES_PATH + '.bak');
+            console.log(`  📦 Renamed config-overrides.json → .bak`);
+        } catch {
+            /* intentional: rename may fail if read-only */
+        }
     }
 }
 
-export function saveConfigOverrides(overrides) {
-    fs.writeFileSync(CONFIG_OVERRIDES_PATH, JSON.stringify(overrides, null, 2));
+/**
+ * Load config overrides from the DB, returning them in the legacy
+ * section-keyed format: { trading: { mode: 'live' }, monitor: { ... } }
+ * @param {import('better-sqlite3').Database} db
+ * @returns {Object}
+ */
+export function loadConfigOverrides(db) {
+    _migrateJsonToDb(db);
+    const rows = db.prepare('SELECT section, field, value FROM config_overrides').all();
+    const result = {};
+    for (const row of rows) {
+        if (!result[row.section]) result[row.section] = {};
+        result[row.section][row.field] = row.value;
+    }
+    return result;
+}
+
+/**
+ * Save config overrides to the DB (full replacement).
+ * @param {import('better-sqlite3').Database} db
+ * @param {Object} overrides - Section-keyed overrides
+ */
+export function saveConfigOverrides(db, overrides) {
+    const clear = db.prepare('DELETE FROM config_overrides');
+    const insert = db.prepare('INSERT INTO config_overrides (section, field, value) VALUES (?, ?, ?)');
+    const save = db.transaction(() => {
+        clear.run();
+        for (const [section, fields] of Object.entries(overrides)) {
+            if (typeof fields === 'object' && fields !== null) {
+                for (const [field, value] of Object.entries(fields)) {
+                    insert.run(section, field, String(value));
+                }
+            }
+        }
+    });
+    save();
 }
 
 // ── Route Matching ──────────────────────────────────────────────────────

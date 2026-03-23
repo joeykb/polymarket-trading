@@ -143,3 +143,14 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON snapshots(timestamp);
 CREATE INDEX IF NOT EXISTS idx_alerts_session ON alerts(session_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(type);
+
+-- ── Config Overrides ────────────────────────────────────────────────────
+-- Admin overrides stored in DB (previously in config-overrides.json).
+-- Survives pod restarts since the DB lives on the PVC.
+CREATE TABLE IF NOT EXISTS config_overrides (
+    section     TEXT NOT NULL,           -- e.g. 'trading', 'monitor'
+    field       TEXT NOT NULL,           -- e.g. 'mode', 'intervalMinutes'
+    value       TEXT NOT NULL,           -- stored as text, cast by consumer
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (section, field)
+);

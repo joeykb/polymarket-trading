@@ -277,39 +277,40 @@ export async function handleRequest(req, res) {
         }
 
         // ── Config Overrides ────────────────────────────
+        const db = getDb();
         if (pathname === '/api/config/overrides' && method === 'GET') {
-            return json(res, loadConfigOverrides());
+            return json(res, loadConfigOverrides(db));
         }
 
         if (pathname === '/api/config/overrides' && method === 'PUT') {
             const body = await readBody(req);
-            saveConfigOverrides(body);
+            saveConfigOverrides(db, body);
             return json(res, { saved: true });
         }
 
         {
             const m = matchRoute('/api/config/overrides/:section/:field', pathname);
             if (m.match && method === 'DELETE') {
-                const overrides = loadConfigOverrides();
+                const overrides = loadConfigOverrides(db);
                 if (overrides[m.params.section]) {
                     delete overrides[m.params.section][m.params.field];
                     if (Object.keys(overrides[m.params.section]).length === 0) {
                         delete overrides[m.params.section];
                     }
-                    saveConfigOverrides(overrides);
+                    saveConfigOverrides(db, overrides);
                 }
                 return json(res, { reset: true });
             }
         }
 
         if (pathname === '/api/config/overrides' && method === 'DELETE') {
-            saveConfigOverrides({});
+            saveConfigOverrides(db, {});
             return json(res, { resetAll: true });
         }
 
         // ── Full Config (defaults + overrides) ──────────
         if (pathname === '/api/config' && method === 'GET') {
-            const overrides = loadConfigOverrides();
+            const overrides = loadConfigOverrides(db);
             const isAdmin = query.admin === '1';
             if (isAdmin) {
                 return json(res, buildAdminConfig(overrides));
