@@ -1,0 +1,7 @@
+{
+  "name": "tempedge-shared",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TempEdge Shared — utilities, HTTP helpers, config schema, dates, and logger",
+  "main": "index.js"
+}

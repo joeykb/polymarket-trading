@@ -1,0 +1,57 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: monitor-green
+    version: green
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: tempedge
+      component: monitor-green
+      version: green
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: monitor-green
+        version: green
+    spec:
+      initContainers:
+        - name: wait-for-deps
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until wget -qO- http://data-svc-green:3005/health > /dev/null 2>&1; do sleep 2; done
+              until wget -qO- http://weather-svc-green:3002/health > /dev/null 2>&1; do sleep 2; done
+              until wget -qO- http://market-svc-green:3003/health > /dev/null 2>&1; do sleep 2; done
+              until wget -qO- http://trading-svc-green:3004/health > /dev/null 2>&1; do sleep 2; done
+              echo "All dependencies ready."
+      containers:
+        - name: monitor-green
+          image: tempedge-monitor:green
+          imagePullPolicy: Never
+          env:
+            - name: DATA_SVC_URL
+              value: "http://data-svc-green:3005"
+            - name: WEATHER_SVC_URL
+              value: "http://weather-svc-green:3002"
+            - name: MARKET_SVC_URL
+              value: "http://market-svc-green:3003"
+            - name: TRADING_SVC_URL
+              value: "http://trading-svc-green:3004"
+            - name: LIQUIDITY_SVC_URL
+              value: "http://liquidity-svc-green:3001"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

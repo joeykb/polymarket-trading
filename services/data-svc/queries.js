@@ -12,22 +12,50 @@ import { getDb } from './db.js';
 /**
  * Create or update a session
  */
-export function upsertSession({ id, marketId, targetDate, status, phase, initialForecastTemp, initialTargetRange, forecastSource, intervalMinutes, rebalanceThreshold }) {
+export function upsertSession({
+    id,
+    marketId,
+    targetDate,
+    status,
+    phase,
+    initialForecastTemp,
+    initialTargetRange,
+    forecastSource,
+    intervalMinutes,
+    rebalanceThreshold,
+}) {
     const db = getDb();
     // Try by id first, then by (market_id, target_date) — handles monitor restarts with new UUIDs
     const existing = db.prepare('SELECT id FROM sessions WHERE market_id = ? AND target_date = ?').get(marketId || 'nyc', targetDate);
     if (existing) {
         // Update existing session (keep original ID)
-        db.prepare(`
+        db.prepare(
+            `
             UPDATE sessions SET status = ?, phase = ?, updated_at = datetime('now')
             WHERE id = ?
-        `).run(status, phase, existing.id);
+        `,
+        ).run(status, phase, existing.id);
         return { changes: 1, existingId: existing.id };
     }
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         INSERT INTO sessions (id, market_id, target_date, status, phase, initial_forecast_temp, initial_target_range, forecast_source, interval_minutes, rebalance_threshold)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, marketId || 'nyc', targetDate, status, phase, initialForecastTemp, initialTargetRange, forecastSource, intervalMinutes || 15, rebalanceThreshold || 3.0);
+    `,
+        )
+        .run(
+            id,
+            marketId || 'nyc',
+            targetDate,
+            status,
+            phase,
+            initialForecastTemp,
+            initialTargetRange,
+            forecastSource,
+            intervalMinutes || 15,
+            rebalanceThreshold || 3.0,
+        );
 }
 
 /**
@@ -79,16 +107,25 @@ export function getAllSessions(limit = 30) {
  */
 export function insertTrade({ sessionId, marketId, targetDate, type, mode, placedAt, totalCost, totalProceeds, status, metadata }) {
     const db = getDb();
-    const result = db.prepare(`
+    const result = db
+        .prepare(
+            `
         INSERT INTO trades (session_id, market_id, target_date, type, mode, placed_at, total_cost, total_proceeds, status, metadata)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-        sessionId, marketId || 'nyc', targetDate, type, mode || 'live',
-        placedAt || new Date().toISOString(),
-        totalCost || 0, totalProceeds || 0,
-        status || 'placed',
-        metadata ? JSON.stringify(metadata) : null,
-    );
+    `,
+        )
+        .run(
+            sessionId,
+            marketId || 'nyc',
+            targetDate,
+            type,
+            mode || 'live',
+            placedAt || new Date().toISOString(),
+            totalCost || 0,
+            totalProceeds || 0,
+            status || 'placed',
+            metadata ? JSON.stringify(metadata) : null,
+        );
     return { id: result.lastInsertRowid };
 }
 
@@ -98,8 +135,11 @@ export function insertTrade({ sessionId, marketId, targetDate, type, mode, place
 export function updateTrade(id, updates) {
     const db = getDb();
     const fieldMap = {
-        status: 'status', verifiedAt: 'verified_at', actualCost: 'actual_cost',
-        fillSummary: 'fill_summary', totalProceeds: 'total_proceeds',
+        status: 'status',
+        verifiedAt: 'verified_at',
+        actualCost: 'actual_cost',
+        fillSummary: 'fill_summary',
+        totalProceeds: 'total_proceeds',
     };
     const fields = [];
     const values = [];
@@ -118,13 +158,17 @@ export function updateTrade(id, updates) {
  */
 export function getTradesForDate(targetDate) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT t.*, m.name as market_name, m.unit
         FROM trades t
         JOIN markets m ON t.market_id = m.id
         WHERE t.target_date = ?
         ORDER BY t.placed_at
-    `).all(targetDate);
+    `,
+        )
+        .all(targetDate);
 }
 
 /**
@@ -132,13 +176,17 @@ export function getTradesForDate(targetDate) {
  */
 export function getAllTrades(limit = 50) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT t.*, m.name as market_name, m.unit
         FROM trades t
         JOIN markets m ON t.market_id = m.id
         ORDER BY t.placed_at DESC
         LIMIT ?
-    `).all(limit);
+    `,
+        )
+        .all(limit);
 }
 
 /**
@@ -146,7 +194,9 @@ export function getAllTrades(limit = 50) {
  */
 export function getTradeLog(limit = 30) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT
             t.target_date,
             t.market_id,
@@ -166,7 +216,9 @@ export function getTradeLog(limit = 30) {
         LEFT JOIN sessions s ON t.session_id = s.id
         ORDER BY t.target_date DESC, t.placed_at ASC
         LIMIT ?
-    `).all(limit);
+    `,
+        )
+        .all(limit);
 }
 
 // ── Positions ────────────────────────────────────────────────────────────
@@ -189,7 +241,7 @@ export function insertPositions(tradeId, positions) {
                 p.question,
                 p.marketId || p.polymarket_id,
                 p.conditionId || p.condition_id,
-                p.clobTokenIds ? JSON.stringify(p.clobTokenIds) : (p.clob_token_ids || null),
+                p.clobTokenIds ? JSON.stringify(p.clobTokenIds) : p.clob_token_ids || null,
                 p.orderId || p.order_id || null,
                 p.tokenId || p.token_id || null,
                 p.buyPrice || p.price || 0,
@@ -218,7 +270,9 @@ export function getPositionsForTrade(tradeId) {
  */
 export function getActivePositions(targetDate) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT p.*, t.target_date, t.type as trade_type, t.market_id
         FROM positions p
         JOIN trades t ON p.trade_id = t.id
@@ -226,7 +280,9 @@ export function getActivePositions(targetDate) {
           AND p.status NOT IN ('sold', 'redeemed', 'failed')
           AND t.type = 'buy'
         ORDER BY p.label
-    `).all(targetDate);
+    `,
+        )
+        .all(targetDate);
 }
 
 /**
@@ -250,10 +306,14 @@ export function updatePosition(id, updates) {
  */
 export function markPositionSold(positionId, { sellPrice, soldAt, sellOrderId }) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         UPDATE positions SET status = 'sold', sell_price = ?, sold_at = ?, sell_order_id = ?
         WHERE id = ?
-    `).run(sellPrice, soldAt, sellOrderId, positionId);
+    `,
+        )
+        .run(sellPrice, soldAt, sellOrderId, positionId);
 }
 
 /**
@@ -261,10 +321,14 @@ export function markPositionSold(positionId, { sellPrice, soldAt, sellOrderId })
  */
 export function markPositionRedeemed(positionId, { redeemedValue, redeemedAt, redeemedTx }) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         UPDATE positions SET status = 'redeemed', redeemed_value = ?, redeemed_at = ?, redeemed_tx = ?
         WHERE id = ?
-    `).run(redeemedValue, redeemedAt, redeemedTx, positionId);
+    `,
+        )
+        .run(redeemedValue, redeemedAt, redeemedTx, positionId);
 }
 
 // ── Snapshots ────────────────────────────────────────────────────────────
@@ -274,7 +338,9 @@ export function markPositionRedeemed(positionId, { redeemedValue, redeemedAt, re
  */
 export function insertSnapshot(snapshot) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         INSERT INTO snapshots (
             session_id, timestamp, forecast_temp, forecast_source, forecast_change,
             current_temp, max_today, current_conditions, phase, days_until_target,
@@ -283,31 +349,33 @@ export function insertSnapshot(snapshot) {
             above_question, above_price, above_price_change,
             total_cost, range_shifted, shifted_from, event_closed
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-        snapshot.sessionId,
-        snapshot.timestamp,
-        snapshot.forecastTempF || snapshot.forecast_temp,
-        snapshot.forecastSource || snapshot.forecast_source,
-        snapshot.forecastChange || snapshot.forecast_change || 0,
-        snapshot.currentTempF || snapshot.current_temp || null,
-        snapshot.maxTodayF || snapshot.max_today || null,
-        snapshot.currentConditions || snapshot.current_conditions || null,
-        snapshot.phase,
-        snapshot.daysUntilTarget || snapshot.days_until_target,
-        snapshot.target?.question || snapshot.target_question,
-        snapshot.target?.yesPrice || snapshot.target_price,
-        snapshot.target?.priceChange || snapshot.target_price_change || 0,
-        snapshot.below?.question || snapshot.below_question || null,
-        snapshot.below?.yesPrice || snapshot.below_price || null,
-        snapshot.below?.priceChange || snapshot.below_price_change || 0,
-        snapshot.above?.question || snapshot.above_question || null,
-        snapshot.above?.yesPrice || snapshot.above_price || null,
-        snapshot.above?.priceChange || snapshot.above_price_change || 0,
-        snapshot.totalCost || snapshot.total_cost || null,
-        snapshot.rangeShifted ? 1 : 0,
-        snapshot.shiftedFrom || snapshot.shifted_from || null,
-        snapshot.eventClosed ? 1 : 0,
-    );
+    `,
+        )
+        .run(
+            snapshot.sessionId,
+            snapshot.timestamp,
+            snapshot.forecastTempF || snapshot.forecast_temp,
+            snapshot.forecastSource || snapshot.forecast_source,
+            snapshot.forecastChange || snapshot.forecast_change || 0,
+            snapshot.currentTempF || snapshot.current_temp || null,
+            snapshot.maxTodayF || snapshot.max_today || null,
+            snapshot.currentConditions || snapshot.current_conditions || null,
+            snapshot.phase,
+            snapshot.daysUntilTarget || snapshot.days_until_target,
+            snapshot.target?.question || snapshot.target_question,
+            snapshot.target?.yesPrice || snapshot.target_price,
+            snapshot.target?.priceChange || snapshot.target_price_change || 0,
+            snapshot.below?.question || snapshot.below_question || null,
+            snapshot.below?.yesPrice || snapshot.below_price || null,
+            snapshot.below?.priceChange || snapshot.below_price_change || 0,
+            snapshot.above?.question || snapshot.above_question || null,
+            snapshot.above?.yesPrice || snapshot.above_price || null,
+            snapshot.above?.priceChange || snapshot.above_price_change || 0,
+            snapshot.totalCost || snapshot.total_cost || null,
+            snapshot.rangeShifted ? 1 : 0,
+            snapshot.shiftedFrom || snapshot.shifted_from || null,
+            snapshot.eventClosed ? 1 : 0,
+        );
 }
 
 /**
@@ -315,9 +383,13 @@ export function insertSnapshot(snapshot) {
  */
 export function getSnapshots(sessionId, limit = 500) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT * FROM snapshots WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?
-    `).all(sessionId, limit);
+    `,
+        )
+        .all(sessionId, limit);
 }
 
 // ── Alerts ───────────────────────────────────────────────────────────────
@@ -327,10 +399,14 @@ export function getSnapshots(sessionId, limit = 500) {
  */
 export function insertAlert({ sessionId, timestamp, type, message, data }) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         INSERT INTO alerts (session_id, timestamp, type, message, data)
         VALUES (?, ?, ?, ?, ?)
-    `).run(sessionId, timestamp, type, message, data ? JSON.stringify(data) : null);
+    `,
+        )
+        .run(sessionId, timestamp, type, message, data ? JSON.stringify(data) : null);
 }
 
 // ── Analytics ────────────────────────────────────────────────────────────
@@ -340,7 +416,9 @@ export function insertAlert({ sessionId, timestamp, type, message, data }) {
  */
 export function getPnLSummary() {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT
             t.target_date,
             t.market_id,
@@ -353,7 +431,9 @@ export function getPnLSummary() {
         JOIN markets m ON t.market_id = m.id
         GROUP BY t.target_date, t.market_id
         ORDER BY t.target_date DESC
-    `).all();
+    `,
+        )
+        .all();
 }
 
 /**
@@ -361,7 +441,9 @@ export function getPnLSummary() {
  */
 export function getForecastAccuracy() {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         SELECT
             s.target_date,
             s.initial_forecast_temp,
@@ -375,7 +457,9 @@ export function getForecastAccuracy() {
         FROM sessions s
         WHERE s.phase IN ('resolve', 'monitor')
         ORDER BY s.target_date DESC
-    `).all();
+    `,
+        )
+        .all();
 }
 
 // ── Markets ──────────────────────────────────────────────────────────────
@@ -393,8 +477,12 @@ export function getActiveMarkets() {
  */
 export function addMarket({ id, name, slugTemplate, unit, stationLat, stationLon, stationName }) {
     const db = getDb();
-    return db.prepare(`
+    return db
+        .prepare(
+            `
         INSERT OR IGNORE INTO markets (id, name, slug_template, unit, station_lat, station_lon, station_name)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, name, slugTemplate, unit || 'F', stationLat, stationLon, stationName);
+    `,
+        )
+        .run(id, name, slugTemplate, unit || 'F', stationLat, stationLon, stationName);
 }

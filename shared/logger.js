@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 /**
  * TempEdge — Structured Logger & HTTP Request Logging
  *
@@ -44,16 +46,21 @@ export function createLogger(service) {
             stream.write(JSON.stringify(entry) + '\n');
         } else {
             // Human-friendly — colored emoji output
-            const prefix = {
-                info:  'ℹ️ ',
-                warn:  '⚠️ ',
-                error: '❌',
-                debug: '🔍',
-            }[level] || '  ';
+            const prefix =
+                {
+                    info: 'ℹ️ ',
+                    warn: '⚠️ ',
+                    error: '❌',
+                    debug: '🔍',
+                }[level] || '  ';
 
-            const extra = Object.keys(data).length > 0
-                ? ' ' + Object.entries(data).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ')
-                : '';
+            const extra =
+                Object.keys(data).length > 0
+                    ? ' ' +
+                      Object.entries(data)
+                          .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+                          .join(' ')
+                    : '';
 
             const stream = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
             stream(`${prefix} [${service}] ${msg}${extra}`);
@@ -61,10 +68,12 @@ export function createLogger(service) {
     }
 
     return {
-        info:  (msg, data) => emit('info', msg, data),
-        warn:  (msg, data) => emit('warn', msg, data),
+        info: (msg, data) => emit('info', msg, data),
+        warn: (msg, data) => emit('warn', msg, data),
         error: (msg, data) => emit('error', msg, data),
-        debug: (msg, data) => { if (process.env.LOG_DEBUG === '1') emit('debug', msg, data); },
+        debug: (msg, data) => {
+            if (process.env.LOG_DEBUG === '1') emit('debug', msg, data);
+        },
     };
 }
 
@@ -84,6 +93,11 @@ export function requestLogger(log, handler) {
         const start = Date.now();
         const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+        // ── Correlation ID: read from inbound header or generate ────
+        const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+        req.requestId = requestId;
+        res.setHeader('X-Request-Id', requestId);
+
         // Capture status code when response finishes
         const originalEnd = res.end.bind(res);
         let logged = false;
@@ -97,6 +111,7 @@ export function requestLogger(log, handler) {
                     path: url.pathname,
                     status: res.statusCode,
                     ms,
+                    requestId,
                 };
 
                 // Health checks at debug level to reduce noise
@@ -114,7 +129,7 @@ export function requestLogger(log, handler) {
             await handler(req, res);
         } catch (err) {
             const ms = Date.now() - start;
-            log.error('unhandled error', { method: req.method, path: url.pathname, error: err.message, ms });
+            log.error('unhandled error', { method: req.method, path: url.pathname, error: err.message, ms, requestId });
             if (!res.headersSent) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Internal server error' }));

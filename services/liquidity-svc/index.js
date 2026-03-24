@@ -22,6 +22,8 @@ import WebSocket from 'ws';
 import { services } from '../../shared/services.js';
 import { healthResponse } from '../../shared/health.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
+import { svcGet } from '../../shared/httpClient.js';
+import { jsonResponse, errorResponse } from '../../shared/httpServer.js';
 
 const DATA_SVC = services.dataSvc;
 const PORT = parseInt(process.env.LIQUIDITY_PORT || '3001');
@@ -40,13 +42,8 @@ let svcConfig = {
 };
 
 async function refreshConfig() {
-    try {
-        const res = await fetch(`${DATA_SVC}/api/config`, { signal: AbortSignal.timeout(5000) });
-        if (res.ok) {
-            const data = await res.json();
-            svcConfig = { ...svcConfig, ...data };
-        }
-    } catch { /* keep defaults */ }
+    const data = await svcGet(`${DATA_SVC}/api/config`, { timeoutMs: 5000 });
+    if (data) svcConfig = { ...svcConfig, ...data };
 }
 
 // ── Per-Date Stream Manager ─────────────────────────────────────────────
@@ -86,7 +83,11 @@ function assessLiquidity(entry) {
 
 function connectDate(stream) {
     if (stream.ws) {
-        try { stream.ws.close(); } catch { }
+        try {
+            stream.ws.close();
+        } catch {
+            /* intentional: WS may already be closed */
+        }
     }
 
     stream.status = 'connecting';
@@ -99,10 +100,10 @@ function connectDate(stream) {
         stream.reconnectAttempts = 0;
         stream.lastError = null;
 
-        const tokenIds = stream.tokens.map(t => t.tokenId);
+        const tokenIds = stream.tokens.map((t) => t.tokenId);
         const sub = { type: 'market', assets_ids: tokenIds, custom_feature_enabled: true };
         stream.ws.send(JSON.stringify(sub));
-        console.log(`  ✅ [${stream.date}] Connected — ${stream.tokens.map(t => t.label).join(', ')}`);
+        console.log(`  ✅ [${stream.date}] Connected — ${stream.tokens.map((t) => t.label).join(', ')}`);
 
         clearInterval(stream.heartbeatTimer);
         stream.heartbeatTimer = setInterval(() => {
@@ -118,7 +119,9 @@ function connectDate(stream) {
         try {
             const data = JSON.parse(text);
             handleMessage(stream, data);
-        } catch { }
+        } catch {
+            /* intentional: non-JSON WS frames (e.g. pings) */
+        }
     });
 
     stream.ws.on('close', (code) => {
@@ -134,10 +137,7 @@ function connectDate(stream) {
 }
 
 function scheduleReconnect(stream) {
-    const delay = Math.min(
-        RECONNECT_BASE_MS * Math.pow(2, stream.reconnectAttempts),
-        RECONNECT_MAX_MS
-    );
+    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, stream.reconnectAttempts), RECONNECT_MAX_MS);
     stream.reconnectAttempts++;
     setTimeout(() => {
         if (dateStreams.has(stream.date)) connectDate(stream);
@@ -219,7 +219,9 @@ function handleBookSnapshot(entry, event) {
     entry.lastUpdate = new Date().toISOString();
     assessLiquidity(entry);
 
-    console.log(`  📊 [${entry.label}] book bid=$${bestBid.toFixed(3)} ask=$${bestAsk.toFixed(3)} spread=${(entry.spreadPct * 100).toFixed(1)}% depth=${bestAskDepth}`);
+    console.log(
+        `  📊 [${entry.label}] book bid=$${bestBid.toFixed(3)} ask=$${bestAsk.toFixed(3)} spread=${(entry.spreadPct * 100).toFixed(1)}% depth=${bestAskDepth}`,
+    );
 }
 
 function handlePriceChange(entry, event) {
@@ -292,7 +294,7 @@ async function discoverSessions() {
 
                 // 2. Buy order positions — ensures ALL purchased tokens are tracked
                 if (data.buyOrder?.positions) {
-                    const usedLabels = new Set([...tokenMap.values()].map(t => t.label));
+                    const usedLabels = new Set([...tokenMap.values()].map((t) => t.label));
 
                     for (const pos of data.buyOrder.positions) {
                         let label = pos.label;
@@ -308,16 +310,22 @@ async function discoverSessions() {
                             }
                         };
 
-                        if (pos.clobTokenId) { addToken(pos.clobTokenId); continue; }
+                        if (pos.clobTokenId) {
+                            addToken(pos.clobTokenId);
+                            continue;
+                        }
 
                         if (pos.question && latest.allRanges) {
-                            const match = latest.allRanges.find(r => r.question === pos.question);
-                            if (match?.clobTokenIds?.[0]) { addToken(match.clobTokenIds[0]); continue; }
+                            const match = latest.allRanges.find((r) => r.question === pos.question);
+                            if (match?.clobTokenIds?.[0]) {
+                                addToken(match.clobTokenIds[0]);
+                                continue;
+                            }
                         }
 
                         if (pos.question) {
                             let found = false;
-                            for (const snap of (data.snapshots || [])) {
+                            for (const snap of data.snapshots || []) {
                                 for (const key of ['target', 'below', 'above']) {
                                     const r = snap[key];
                                     if (r?.question === pos.question && r?.clobTokenIds?.[0]) {
@@ -336,7 +344,9 @@ async function discoverSessions() {
                 if (tokens.length > 0) {
                     result.set(date, tokens);
                 }
-            } catch { }
+            } catch {
+                /* intentional: individual session parse failure */
+            }
         }
     } catch (err) {
         console.warn(`  ⚠️  Session discovery failed: ${err.message}`);
@@ -353,8 +363,14 @@ async function syncStreams() {
     for (const [date, tokens] of sessions) {
         if (dateStreams.has(date)) {
             const existing = dateStreams.get(date);
-            const existingIds = existing.tokens.map(t => t.tokenId).sort().join(',');
-            const newIds = tokens.map(t => t.tokenId).sort().join(',');
+            const existingIds = existing.tokens
+                .map((t) => t.tokenId)
+                .sort()
+                .join(',');
+            const newIds = tokens
+                .map((t) => t.tokenId)
+                .sort()
+                .join(',');
             if (existingIds !== newIds) {
                 console.log(`  🔄 [${date}] Tokens changed, reconnecting...`);
                 stopDateStream(date);
@@ -411,11 +427,14 @@ function startDateStream(date, tokens) {
 
     const intervalMs = (svcConfig.liquidity?.checkIntervalSecs || 30) * 1000;
     stream.assessmentTimer = setInterval(() => {
-        let liquidCount = 0, totalCount = 0;
+        let liquidCount = 0,
+            totalCount = 0;
         for (const [, entry] of stream.books) {
             totalCount++;
             if (entry.isLiquid) liquidCount++;
         }
+        stream.liquidCount = liquidCount;
+        stream.totalCount = totalCount;
     }, intervalMs);
 
     console.log(`  📡 [${date}] Stream started (${tokens.length} tokens)`);
@@ -428,7 +447,11 @@ function stopDateStream(date) {
     clearInterval(stream.heartbeatTimer);
     clearInterval(stream.assessmentTimer);
     if (stream.ws) {
-        try { stream.ws.close(); } catch { }
+        try {
+            stream.ws.close();
+        } catch {
+            /* intentional: WS may already be closed */
+        }
     }
     dateStreams.delete(date);
     console.log(`  🛑 [${date}] Stream stopped.`);
@@ -438,27 +461,43 @@ function stopDateStream(date) {
 
 function getDateSnapshot(stream) {
     const tokens = [];
-    let bestScore = 0, bestToken = null;
+    let bestScore = 0,
+        bestToken = null;
 
     for (const [, entry] of stream.books) {
         tokens.push({
-            tokenId: entry.tokenId, label: entry.label, question: entry.question,
-            bestBid: entry.bestBid, bestAsk: entry.bestAsk,
-            bidDepth: entry.bidDepth, askDepth: entry.askDepth,
-            spread: entry.spread, spreadPct: entry.spreadPct,
-            score: entry.score, lastTrade: entry.lastTrade,
-            lastUpdate: entry.lastUpdate, isLiquid: entry.isLiquid,
+            tokenId: entry.tokenId,
+            label: entry.label,
+            question: entry.question,
+            bestBid: entry.bestBid,
+            bestAsk: entry.bestAsk,
+            bidDepth: entry.bidDepth,
+            askDepth: entry.askDepth,
+            spread: entry.spread,
+            spreadPct: entry.spreadPct,
+            score: entry.score,
+            lastTrade: entry.lastTrade,
+            lastUpdate: entry.lastUpdate,
+            isLiquid: entry.isLiquid,
             historyCount: entry.history.length,
             recentHistory: entry.history.slice(-20),
         });
-        if (entry.score > bestScore) { bestScore = entry.score; bestToken = entry.label; }
+        if (entry.score > bestScore) {
+            bestScore = entry.score;
+            bestToken = entry.label;
+        }
     }
 
     return {
-        date: stream.date, status: stream.status, lastError: stream.lastError,
-        tokenCount: tokens.length, tokens, bestScore, bestToken,
-        allLiquid: tokens.length > 0 && tokens.every(t => t.isLiquid),
-        liquidCount: tokens.filter(t => t.isLiquid).length,
+        date: stream.date,
+        status: stream.status,
+        lastError: stream.lastError,
+        tokenCount: tokens.length,
+        tokens,
+        bestScore,
+        bestToken,
+        allLiquid: tokens.length > 0 && tokens.every((t) => t.isLiquid),
+        liquidCount: tokens.filter((t) => t.isLiquid).length,
         thresholds: { maxSpreadPct: svcConfig.trading.maxSpreadPct, minAskDepth: svcConfig.trading.minAskDepth },
         timestamp: new Date().toISOString(),
     };
@@ -476,43 +515,47 @@ function getAllSnapshots() {
 
 const log = createLogger('liquidity-svc');
 
-const server = http.createServer(requestLogger(log, (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+const server = http.createServer(
+    requestLogger(log, (req, res) => {
+        const url = new URL(req.url, `http://${req.headers.host}`);
 
-    if (url.pathname === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(healthResponse('liquidity-svc', { streams: dateStreams.size })));
-        return;
-    }
-
-    if (url.pathname === '/api/liquidity') {
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        const date = url.searchParams.get('date');
-        if (date) {
-            const stream = dateStreams.get(date);
-            res.end(JSON.stringify(stream ? getDateSnapshot(stream) : { date, status: 'not-tracked', tokens: [], tokenCount: 0, timestamp: new Date().toISOString() }));
-        } else {
-            res.end(JSON.stringify(getAllSnapshots()));
+        if (url.pathname === '/health') {
+            return jsonResponse(res, healthResponse('liquidity-svc', { streams: dateStreams.size }));
         }
-        return;
-    }
 
-    if (url.pathname === '/api/liquidity/subscribe' && req.method === 'POST') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', message: 'Use polling: GET /api/liquidity?date=X' }));
-        return;
-    }
+        if (url.pathname === '/api/liquidity') {
+            const date = url.searchParams.get('date');
+            if (date) {
+                const stream = dateStreams.get(date);
+                return jsonResponse(
+                    res,
+                    stream
+                        ? getDateSnapshot(stream)
+                        : { date, status: 'not-tracked', tokens: [], tokenCount: 0, timestamp: new Date().toISOString() },
+                );
+            }
+            return jsonResponse(res, getAllSnapshots());
+        }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
-}));
+        if (url.pathname === '/api/liquidity/subscribe' && req.method === 'POST') {
+            return jsonResponse(res, { status: 'ok', message: 'Use polling: GET /api/liquidity?date=X' });
+        }
+
+        errorResponse(res, 'Not found', 404);
+    }),
+);
 
 // ── Main ────────────────────────────────────────────────────────────────
 
 async function main() {
     await refreshConfig();
 
-    log.info('started', { port: PORT, dataSvc: DATA_SVC, maxSpread: svcConfig.trading.maxSpreadPct, minDepth: svcConfig.trading.minAskDepth });
+    log.info('started', {
+        port: PORT,
+        dataSvc: DATA_SVC,
+        maxSpread: svcConfig.trading.maxSpreadPct,
+        minDepth: svcConfig.trading.minAskDepth,
+    });
 
     await syncStreams();
 

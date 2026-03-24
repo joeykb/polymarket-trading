@@ -13,8 +13,13 @@
 
 import 'dotenv/config';
 import {
-    createOrResumeSession, runMonitoringCycle, stopSession, loadSession,
-    getConfig, getPhase, getDateOffsetET, daysUntil, refreshConfig,
+    createOrResumeSession,
+    runMonitoringCycle,
+    stopSession,
+    getConfig,
+    getPhase,
+    getDateOffsetET,
+    refreshConfig,
 } from './orchestrator.js';
 import { services } from '../../shared/services.js';
 
@@ -35,24 +40,35 @@ for (let i = 0; i < args.length; i++) {
 // ── Console Formatting ──────────────────────────────────────────────────
 
 const PHASE_LABELS = {
-    scout: '🔭 SCOUT', track: '📈 TRACK', buy: '🛒 BUY',
-    monitor: '👁️  MONITOR', resolve: '🎯 RESOLVE',
+    scout: '🔭 SCOUT',
+    track: '📈 TRACK',
+    buy: '🛒 BUY',
+    monitor: '👁️  MONITOR',
+    resolve: '🎯 RESOLVE',
 };
 
 const PHASE_COLORS = {
-    scout: '\x1b[36m', track: '\x1b[35m', buy: '\x1b[32m',
-    monitor: '\x1b[33m', resolve: '\x1b[31m',
+    scout: '\x1b[36m',
+    track: '\x1b[35m',
+    buy: '\x1b[32m',
+    monitor: '\x1b[33m',
+    resolve: '\x1b[31m',
 };
 
 const RESET = '\x1b[0m';
 
 function formatTime(iso) {
     return new Date(iso).toLocaleTimeString('en-US', {
-        timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit',
+        timeZone: 'America/New_York',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
     });
 }
 
-function formatPrice(price) { return (price * 100).toFixed(1) + '¢'; }
+function formatPrice(price) {
+    return (price * 100).toFixed(1) + '¢';
+}
 
 function formatPriceChange(change) {
     if (change === 0) return '  --';
@@ -81,7 +97,9 @@ function printSnapshotCompact(date, snapshot, session) {
     const currentTemp = snapshot.currentTempF !== null ? `${snapshot.currentTempF}°F` : '--';
     const forecast = `${snapshot.forecastTempF}°F`;
     const delta = snapshot.forecastChange !== 0 ? ` (${snapshot.forecastChange > 0 ? '+' : ''}${snapshot.forecastChange})` : '';
-    console.log(`  │ ${date} │ ${phaseColor}${phaseLabel.padEnd(12)}${RESET} │ Now: ${currentTemp.padEnd(5)} │ Fcst: ${forecast.padEnd(5)}${delta.padEnd(6)} │ 🎯 ${target} ${price} │ Cost: ${cost} │`);
+    console.log(
+        `  │ ${date} │ ${phaseColor}${phaseLabel.padEnd(12)}${RESET} │ Now: ${currentTemp.padEnd(5)} │ Fcst: ${forecast.padEnd(5)}${delta.padEnd(6)} │ 🎯 ${target} ${price} │ Cost: ${cost} │`,
+    );
 }
 
 function printDetailedSnapshot(date, snapshot, session) {
@@ -92,14 +110,24 @@ function printDetailedSnapshot(date, snapshot, session) {
     const phaseColor = PHASE_COLORS[phase] || '';
 
     console.log(`\n  ┌─ ${date} ${phaseColor}${phaseLabel}${RESET} @ ${time} (#${count}) ${'─'.repeat(30)}┐`);
-    console.log(`  │  Forecast: ${snapshot.forecastTempF}°F  (Δ ${snapshot.forecastChange >= 0 ? '+' : ''}${snapshot.forecastChange}°F)  [${snapshot.forecastSource || 'unknown'}]`);
+    console.log(
+        `  │  Forecast: ${snapshot.forecastTempF}°F  (Δ ${snapshot.forecastChange >= 0 ? '+' : ''}${snapshot.forecastChange}°F)  [${snapshot.forecastSource || 'unknown'}]`,
+    );
     if (snapshot.currentTempF != null) {
         const maxToday = snapshot.maxTodayF ? `  Hi: ${snapshot.maxTodayF}°F` : '';
         console.log(`  │  Current:  ${snapshot.currentTempF}°F  ${snapshot.currentConditions || ''}${maxToday}`);
     }
-    console.log(`  │  🎯 Target: ${shortLabel(snapshot.target.question).padEnd(14)} YES: ${formatPrice(snapshot.target.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.target.priceChange)})`);
-    if (snapshot.below) console.log(`  │  ⬇️  Below:  ${shortLabel(snapshot.below.question).padEnd(14)} YES: ${formatPrice(snapshot.below.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.below.priceChange)})`);
-    if (snapshot.above) console.log(`  │  ⬆️  Above:  ${shortLabel(snapshot.above.question).padEnd(14)} YES: ${formatPrice(snapshot.above.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.above.priceChange)})`);
+    console.log(
+        `  │  🎯 Target: ${shortLabel(snapshot.target.question).padEnd(14)} YES: ${formatPrice(snapshot.target.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.target.priceChange)})`,
+    );
+    if (snapshot.below)
+        console.log(
+            `  │  ⬇️  Below:  ${shortLabel(snapshot.below.question).padEnd(14)} YES: ${formatPrice(snapshot.below.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.below.priceChange)})`,
+        );
+    if (snapshot.above)
+        console.log(
+            `  │  ⬆️  Above:  ${shortLabel(snapshot.above.question).padEnd(14)} YES: ${formatPrice(snapshot.above.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.above.priceChange)})`,
+        );
     console.log(`  │  Total cost: $${snapshot.totalCost.toFixed(3)}   Profit: $${(1 - snapshot.totalCost).toFixed(3)}`);
     if (snapshot.rangeShifted) console.log(`  │  🔄 RANGE SHIFTED from "${shortLabel(snapshot.shiftedFrom)}"`);
     console.log(`  └${'─'.repeat(58)}┘`);
@@ -154,14 +182,18 @@ async function checkRestartSignal() {
             const data = await res.json();
             return data.requested === true;
         }
-    } catch { }
+    } catch {
+        /* intentional: restart signal check is best-effort */
+    }
     return false;
 }
 
 async function clearRestartSignal() {
     try {
         await fetch(`${DATA_SVC}/api/restart-signal`, { method: 'DELETE', signal: AbortSignal.timeout(2000) });
-    } catch { }
+    } catch {
+        /* intentional: fire-and-forget */
+    }
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -176,7 +208,7 @@ async function main() {
 
     console.log(`\n🌡️  TempEdge Monitor — Rolling Portfolio (Microservice Edition)`);
     console.log('═══════════════════════════════════════════════════════════════');
-    console.log(`  Dates:           ${dates.map(d => d.date).join(', ')}`);
+    console.log(`  Dates:           ${dates.map((d) => d.date).join(', ')}`);
     console.log(`  Check interval:  ${intervalMinutes} minutes`);
     console.log(`  Weather:         weather-svc`);
     console.log(`  Markets:         market-svc`);
@@ -268,7 +300,7 @@ async function main() {
 
         console.log('  └────────────┴──────────────┴───────────┴─────────────────┴────────────────────────────┴────────────┘');
 
-        const allComplete = [...sessions.values()].every(s => s.status === 'completed');
+        const allComplete = [...sessions.values()].every((s) => s.status === 'completed');
         if (allComplete) {
             console.log('\n  ✅ All markets resolved. Done.');
             clearInterval(timer);
@@ -297,7 +329,7 @@ async function main() {
     process.on('SIGTERM', shutdown);
 }
 
-main().catch(err => {
+main().catch((err) => {
     console.error('\n❌ Fatal error:', err.message);
     console.error(err.stack);
     process.exit(1);

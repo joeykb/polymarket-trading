@@ -14,7 +14,8 @@ TempEdge monitors weather forecasts, discovers Polymarket temperature binary opt
 │                                                                 │
 │  ┌────────────┐   ┌────────────┐   ┌─────────────────────────┐ │
 │  │ weather-svc│   │ market-svc │   │      trading-svc        │ │
-│  │   :3006    │   │   :3003    │   │   :3004                 │ │
+│  │   :3002    │   │   :3003    │   │   :3004                 │ │
+
 │  │            │   │            │   │  ┌───────┐ ┌──────────┐ │ │
 │  │ WC + Meteo │   │ Gamma API  │   │  │ Node  │ │  Gluetun │ │ │
 │  └─────┬──────┘   └─────┬──────┘   │  │  app  │ │  VPN     │ │ │
@@ -47,16 +48,20 @@ TempEdge monitors weather forecasts, discovers Polymarket temperature binary opt
 | **market-svc** | 3003 | Polymarket Gamma API integration — event/market/range discovery |
 | **trading-svc** | 3004 | Buy, sell, and redeem orders via CLOB API (runs behind VPN sidecar) |
 | **data-svc** | 3005 | SQLite database, session file management, config store, spend tracking |
-| **weather-svc** | 3006 | Multi-source weather forecast (Weather Company + Open-Meteo fallback) |
+| **weather-svc** | 3002 | Multi-source weather forecast (Weather Company + Open-Meteo fallback) |
 
 ### Shared Modules
 
 | Module | Purpose |
 |--------|---------|
 | `shared/services.js` | Service registry — single source of truth for all service URLs |
-| `shared/health.js` | Standardized health check responses |
-| `shared/logger.js` | Structured JSON logging with consistent format |
-| `shared/httpClient.js` | HTTP client utilities for inter-service communication |
+| `shared/health.js` | Health check responses with dependency monitoring |
+| `shared/logger.js` | Structured JSON logging with `X-Request-Id` correlation |
+| `shared/httpClient.js` | HTTP client with timeout, JSON handling, correlation ID propagation |
+| `shared/httpServer.js` | Shared response helpers (JSON, CORS, body parsing) |
+| `shared/configSchema.js` | Centralized config schema with defaults, env mapping, and admin UI metadata |
+| `shared/dates.js` | Eastern Time date utilities and trading phase determination |
+| `shared/pnl.js` | P&L computation from buy orders + market snapshots |
 
 ---
 
@@ -147,9 +152,9 @@ kubectl port-forward -n tempedge svc/dashboard-svc 3000:3000
 
 Configuration is managed at three levels (highest priority first):
 
-1. **Environment variables** — K8s ConfigMap + Secrets
-2. **Admin overrides** — Set via the `/admin` page at runtime, persisted to disk
-3. **Code defaults** — Fallback values in `src/config.js`
+1. **Admin overrides** — Set via the `/admin` page at runtime, persisted to disk
+2. **Environment variables** — K8s ConfigMap + Secrets
+3. **Code defaults** — Fallback values in `shared/configSchema.js`
 
 ### Key Settings
 
@@ -228,48 +233,57 @@ polymarket-trading/
 ├── services/
 │   ├── dashboard-svc/        # Web UI + admin page
 │   │   ├── static/           # Frontend (HTML, CSS, JS)
-│   │   ├── server.js         # HTTP server + API proxy
-│   │   ├── data.js           # Data aggregation
-│   │   └── pnl.js            # P&L calculations
+│   │   ├── server.js         # HTTP server + API proxy + /health
+│   │   ├── data.js           # Data aggregation from downstream services
+│   │   └── pnl.js            # Live P&L overlay
 │   ├── data-svc/             # Database + config store
-│   │   ├── index.js          # HTTP API
-│   │   ├── db.js             # SQLite connection
+│   │   ├── index.js          # HTTP server startup
+│   │   ├── routes.js         # Route handlers (40+ endpoints)
+│   │   ├── schemas.js        # Zod validation schemas
+│   │   ├── db.js             # SQLite connection + WAL mode
 │   │   ├── queries.js        # SQL query functions
-│   │   └── schema.sql        # Database schema
+│   │   ├── storage.js        # Session file + config file I/O
+│   │   └── schema.sql        # Database schema (6 tables)
 │   ├── liquidity-svc/        # WebSocket orderbook streams
 │   ├── market-svc/           # Polymarket Gamma API
 │   ├── monitor/              # Core orchestrator
 │   │   ├── index.js          # Timer loop
 │   │   └── orchestrator.js   # Trading logic
 │   ├── trading-svc/          # CLOB API + on-chain redeem
-│   │   ├── index.js          # HTTP API
-│   │   └── trading.js        # Order placement + redeem
-│   └── weather-svc/          # Weather forecast
-├── shared/                   # Shared modules (imported by services)
+│   │   ├── index.js          # HTTP API + /health
+│   │   ├── client.js         # CLOB client initialization
+│   │   ├── buy.js            # GTC limit order placement
+│   │   ├── sell.js           # Position sell logic
+│   │   ├── verify.js         # On-chain fill verification
+│   │   └── redeem.js         # CTF / NegRisk redemption
+│   └── weather-svc/          # Weather forecast (WC + Open-Meteo)
+├── shared/                   # Shared modules (npm workspace)
 │   ├── services.js           # Service URL registry
-│   ├── health.js             # Health check helper
-│   ├── logger.js             # Structured JSON logger
-│   └── httpClient.js         # HTTP client utilities
+│   ├── health.js             # Health checks with dependency monitoring
+│   ├── logger.js             # Structured JSON logging + X-Request-Id
+│   ├── httpClient.js         # HTTP client with correlation ID forwarding
+│   ├── httpServer.js         # JSON responses, body parsing, CORS
+│   ├── configSchema.js       # Centralized config schema + admin builder
+│   ├── dates.js              # Eastern Time utilities + phase determination
+│   └── pnl.js                # P&L computation engine
+├── tests/                    # Vitest test suite (102 tests)
+│   ├── pnl.test.js           # P&L computation (13 tests)
+│   ├── dates.test.js         # Date utilities + phase logic (22 tests)
+│   ├── config.test.js        # Config schema + resolution (17 tests)
+│   ├── queries.test.js       # DB operations via in-memory SQLite (16 tests)
+│   ├── schemas.test.js       # Zod validation (24 tests)
+│   └── health.test.js        # Health checks + dependency mocking (10 tests)
+├── docs/
+│   └── openapi.yaml          # OpenAPI 3.1 specification
 ├── k8s/                      # Kubernetes manifests
 │   ├── namespace.yaml
 │   ├── configmap.yaml
 │   ├── pvc.yaml
-│   ├── dashboard-svc.yaml
-│   ├── data-svc.yaml
-│   ├── liquidity-svc.yaml
-│   ├── market-svc.yaml
-│   ├── monitor.yaml
-│   ├── trading-svc.yaml      # Includes Gluetun VPN sidecar
-│   ├── weather-svc.yaml
+│   ├── *-svc.yaml            # Per-service deployments
 │   └── secrets/              # Secret templates (examples only)
-│       ├── trading-secret.example.yaml
-│       ├── vpn-secret.example.yaml
-│       └── weather-secret.example.yaml
-├── src/
-│   ├── config.js             # Centralized config schema + defaults
-│   └── scripts/
-│       └── redeem.js          # Standalone CLI redeem tool
-├── .env.example              # All environment variables documented
+├── vitest.config.js          # Test runner configuration
+├── eslint.config.js          # ESLint 9 flat config + Prettier
+├── .prettierrc               # Code formatting rules
 ├── deploy.ps1                # Build + deploy all services
 └── teardown.ps1              # Remove services from cluster
 ```
@@ -360,6 +374,44 @@ The dashboard provides real-time monitoring at `http://localhost:30301`:
 - **Trade Log** — Complete execution history with P&L per trade
 - **Status Bar** — Monitor status, wallet balance, last update time
 - **Admin Page** (`/admin`) — Edit all configuration at runtime
+
+---
+
+## Development
+
+### npm Workspaces
+
+The project uses npm workspaces for dependency management. Dev dependencies (eslint, prettier, vitest) are at root; production deps are per-service.
+
+```powershell
+# Install all dependencies
+npm install
+
+# Run tests (102 tests, <300ms)
+npm test
+
+# Watch mode
+npm run test:watch
+
+# Lint all code
+npm run lint
+
+# Auto-fix formatting
+npm run lint:fix
+
+# Check syntax only (no execution)
+npm run check
+```
+
+### API Documentation
+
+The full API is documented in [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.1). You can view it with any OpenAPI viewer like [Swagger Editor](https://editor.swagger.io/) or the VS Code OpenAPI extension.
+
+### Adding Environment Variables
+
+1. Add the schema entry to `shared/configSchema.js`
+2. Update the relevant service's `.env.example`
+3. If it should be admin-editable, no other changes needed — the admin page auto-discovers from the schema
 
 ---
 

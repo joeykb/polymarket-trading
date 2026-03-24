@@ -1,11 +1,13 @@
 /**
  * TempEdge Dashboard — P&L Computation & Price Overlay (Microservice Edition)
  *
- * overlayLivePrices and computeLivePnL are pure functions (no I/O).
- * enrichBuyOrderWithDbIds now calls data-svc instead of querying DB directly.
+ * overlayLivePrices is a pure function (no I/O).
+ * computeLivePnL delegates to shared/pnl.js.
+ * enrichBuyOrderWithDbIds calls data-svc.
  */
 
 import { services } from '../../shared/services.js';
+import { computePnL } from '../../shared/pnl.js';
 
 const DATA_SVC = services.dataSvc;
 
@@ -21,8 +23,13 @@ export function overlayLivePrices(snapshot, liveData) {
         if (!range?.question) continue;
         const liveAsk = liveData.asks[range.question];
         const liveBid = liveData.bids[range.question];
-        if (liveAsk > 0) { range.yesPrice = liveAsk; range._live = true; }
-        if (liveBid > 0) { range.bestBid = liveBid; }
+        if (liveAsk > 0) {
+            range.yesPrice = liveAsk;
+            range._live = true;
+        }
+        if (liveBid > 0) {
+            range.bestBid = liveBid;
+        }
     }
 
     const t = snapshot.target?.yesPrice || 0;
@@ -46,11 +53,11 @@ export async function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
         const positions = await posRes.json();
 
         const posMap = {};
-        for (const p of (Array.isArray(positions) ? positions : [])) {
+        for (const p of Array.isArray(positions) ? positions : []) {
             posMap[p.question] = p;
         }
 
-        buyOrder.positions = buyOrder.positions.map(p => {
+        buyOrder.positions = buyOrder.positions.map((p) => {
             const dbPos = posMap[p.question];
             return {
                 ...p,
@@ -66,40 +73,8 @@ export async function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
 
 /**
  * Compute P&L from buyOrder vs latest snapshot.
- * Uses live CLOB bids for accurate sell pricing.
+ * Delegates to shared/pnl.js core computation.
  */
 export function computeLivePnL(buyOrder, latestSnapshot, liquidityBids) {
-    if (!buyOrder || !buyOrder.positions || !latestSnapshot) return null;
-
-    const currentRanges = { target: latestSnapshot.target, below: latestSnapshot.below, above: latestSnapshot.above };
-    const bids = liquidityBids || {};
-    let totalBuyCost = 0, totalCurrentValue = 0;
-    const positions = [];
-
-    for (const pos of buyOrder.positions) {
-        const shares = pos.shares || 1;
-        const buyCost = pos.buyPrice * shares;
-        let currentPrice, sold = false, sellPrice = 0;
-
-        if (pos.soldAt && pos.soldStatus === 'placed') {
-            sold = true;
-            sellPrice = typeof pos.soldAt === 'number' ? pos.soldAt : parseFloat(pos.soldAt) || 0;
-            currentPrice = sellPrice;
-        } else {
-            const currentRange = currentRanges[pos.label];
-            const clobBid = bids[pos.question];
-            currentPrice = clobBid > 0 ? clobBid : (currentRange?.yesPrice ?? pos.buyPrice);
-        }
-
-        const currentValue = currentPrice * shares;
-        const pnl = parseFloat((currentValue - buyCost).toFixed(4));
-        const pnlPct = buyCost > 0 ? parseFloat(((pnl / buyCost) * 100).toFixed(1)) : 0;
-        totalBuyCost += buyCost;
-        totalCurrentValue += currentValue;
-        positions.push({ label: pos.label, question: pos.question, buyPrice: pos.buyPrice, currentPrice, shares, pnl, pnlPct, sold, sellPrice: sold ? sellPrice : null });
-    }
-
-    const totalPnL = parseFloat((totalCurrentValue - totalBuyCost).toFixed(4));
-    const totalPnLPct = totalBuyCost > 0 ? parseFloat(((totalPnL / totalBuyCost) * 100).toFixed(1)) : 0;
-    return { positions, totalBuyCost: parseFloat(totalBuyCost.toFixed(4)), totalCurrentValue: parseFloat(totalCurrentValue.toFixed(4)), totalPnL, totalPnLPct };
+    return computePnL(buyOrder, latestSnapshot, liquidityBids);
 }

@@ -2,13 +2,26 @@
   "name": "tempedge",
   "version": "1.0.0",
   "description": "Polymarket NYC Temperature Predictor",
-  "main": "src/index.js",
+  "main": "services/monitor/index.js",
   "type": "module",
+  "workspaces": [
+    "shared",
+    "services/dashboard-svc",
+    "services/data-svc",
+    "services/liquidity-svc",
+    "services/market-svc",
+    "services/monitor",
+    "services/trading-svc",
+    "services/weather-svc"
+  ],
   "scripts": {
-    "start": "node src/index.js",
-    "monitor": "node src/monitor.js",
-    "dashboard": "node src/dashboard/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "eslint services/ shared/",
+    "lint:fix": "eslint services/ shared/ --fix",
+    "format": "prettier --write \"services/**/*.js\" \"shared/**/*.js\"",
+    "format:check": "prettier --check \"services/**/*.js\" \"shared/**/*.js\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [
     "polymarket",
@@ -17,15 +30,15 @@
   ],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@polymarket/builder-relayer-client": "^0.0.8",
-    "@polymarket/clob-client": "^5.7.0",
-    "better-sqlite3": "^12.8.0",
-    "dotenv": "^17.3.1",
-    "ethers": "^5.8.0",
-    "ws": "^8.19.0"
-  },
   "devDependencies": {
-    "qrcode": "^1.5.4"
+    "@eslint/js": "^10.0.1",
+    "better-sqlite3": "^12.8.0",
+    "eslint": "^10.1.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "globals": "^17.4.0",
+    "prettier": "^3.8.1",
+    "qrcode": "^1.5.4",
+    "vitest": "^4.1.1"
   }
 }

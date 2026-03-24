@@ -1,0 +1,1388 @@
+openapi: 3.1.0
+info:
+  title: TempEdge API
+  description: |
+    Temperature weather prediction market trading system.
+    Microservice architecture with 6 HTTP services communicating via REST APIs.
+
+    **Services:**
+    - **data-svc** (3005) — Database, sessions, trades, config
+    - **trading-svc** (3004) — Buy, sell, redeem via Polymarket CLOB
+    - **weather-svc** (3002) — Forecast + current conditions
+    - **market-svc** (3003) — Polymarket event discovery
+    - **liquidity-svc** (3001) — WebSocket order book streaming
+    - **dashboard-svc** (3000) — Admin UI + API aggregation
+  version: 1.0.0
+  contact:
+    name: TempEdge
+
+servers:
+  - url: http://localhost:3005
+    description: data-svc (local)
+  - url: http://localhost:3004
+    description: trading-svc (local)
+  - url: http://localhost:3002
+    description: weather-svc (local)
+  - url: http://localhost:3003
+    description: market-svc (local)
+  - url: http://localhost:3001
+    description: liquidity-svc (local)
+  - url: http://localhost:3000
+    description: dashboard-svc (local)
+
+tags:
+  - name: Health
+    description: Service health checks with dependency monitoring
+  - name: Sessions
+    description: Trading session lifecycle management
+  - name: Trades
+    description: Trade execution records (buy, sell, redeem)
+  - name: Positions
+    description: Token-level position tracking within trades
+  - name: Snapshots
+    description: Time-series forecast + price monitoring data
+  - name: Alerts
+    description: System event notifications (forecast shifts, price spikes)
+  - name: Config
+    description: Runtime configuration with admin overrides
+  - name: Spend
+    description: Daily spend tracking and limits
+  - name: Analytics
+    description: P&L summaries and forecast accuracy
+  - name: Weather
+    description: Temperature forecasts and current conditions
+  - name: Market
+    description: Polymarket event discovery and range selection
+  - name: Trading
+    description: Order execution (buy, sell, redeem, retry)
+  - name: Liquidity
+    description: Real-time order book data
+
+# ── Shared Components ──────────────────────────────────────────────────
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: Overall health (degraded if any dependency is down)
+        service:
+          type: string
+        uptime:
+          type: integer
+          description: Seconds since process start
+        startedAt:
+          type: string
+          format: date-time
+        timestamp:
+          type: string
+          format: date-time
+        dependencies:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [ok, down]
+              latencyMs:
+                type: integer
+              error:
+                type: string
+
+    Session:
+      type: object
+      required: [id, targetDate]
+      properties:
+        id:
+          type: string
+          description: UUID
+        market_id:
+          type: string
+          default: nyc
+        target_date:
+          type: string
+          format: date
+          example: '2026-03-25'
+        status:
+          type: string
+          enum: [active, completed, stopped]
+        phase:
+          type: string
+          enum: [scout, track, buy, monitor, resolve]
+        initial_forecast_temp:
+          type: number
+        initial_target_range:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SessionInput:
+      type: object
+      required: [id, targetDate]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        marketId:
+          type: string
+          default: nyc
+        targetDate:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        status:
+          type: string
+          enum: [active, completed, stopped]
+        phase:
+          type: string
+          enum: [scout, track, buy, monitor, resolve]
+        initialForecastTemp:
+          type: number
+        initialTargetRange:
+          type: string
+        forecastSource:
+          type: string
+        intervalMinutes:
+          type: integer
+          default: 15
+        rebalanceThreshold:
+          type: number
+          default: 3.0
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        session_id:
+          type: string
+          nullable: true
+        market_id:
+          type: string
+        target_date:
+          type: string
+          format: date
+        type:
+          type: string
+          enum: [buy, sell, redeem]
+        mode:
+          type: string
+          enum: [live, dry-run]
+        placed_at:
+          type: string
+          format: date-time
+        total_cost:
+          type: number
+        total_proceeds:
+          type: number
+        status:
+          type: string
+          enum: [placed, filled, failed, redeemed]
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+        actual_cost:
+          type: number
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+        market_name:
+          type: string
+
+    TradeInput:
+      type: object
+      required: [targetDate, type]
+      properties:
+        sessionId:
+          type: string
+          nullable: true
+        marketId:
+          type: string
+          default: nyc
+        targetDate:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        type:
+          type: string
+          enum: [buy, sell, redeem]
+        mode:
+          type: string
+          enum: [live, dry-run]
+          default: live
+        placedAt:
+          type: string
+        totalCost:
+          type: number
+          minimum: 0
+          default: 0
+        totalProceeds:
+          type: number
+          minimum: 0
+          default: 0
+        status:
+          type: string
+          enum: [placed, filled, failed, redeemed]
+          default: placed
+        metadata:
+          type: object
+          nullable: true
+
+    Position:
+      type: object
+      properties:
+        id:
+          type: integer
+        trade_id:
+          type: integer
+        label:
+          type: string
+          enum: [target, below, above]
+        question:
+          type: string
+        polymarket_id:
+          type: string
+          nullable: true
+        condition_id:
+          type: string
+          nullable: true
+        token_id:
+          type: string
+          nullable: true
+        order_id:
+          type: string
+          nullable: true
+        price:
+          type: number
+        shares:
+          type: number
+        status:
+          type: string
+          enum: [placed, filled, partial, failed, sold, redeemed]
+        sell_price:
+          type: number
+          nullable: true
+        sold_at:
+          type: string
+          nullable: true
+        redeemed_value:
+          type: number
+          nullable: true
+        redeemed_at:
+          type: string
+          nullable: true
+
+    PositionsInsertInput:
+      type: object
+      required: [tradeId, positions]
+      properties:
+        tradeId:
+          type: integer
+          minimum: 1
+        positions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [question]
+            properties:
+              label:
+                type: string
+              question:
+                type: string
+                minLength: 1
+              buyPrice:
+                type: number
+                minimum: 0
+              shares:
+                type: number
+                minimum: 0
+              status:
+                type: string
+                enum: [placed, filled, partial, failed, sold, redeemed]
+                default: placed
+              error:
+                type: string
+                nullable: true
+
+    SnapshotInput:
+      type: object
+      required: [sessionId, timestamp]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+        timestamp:
+          type: string
+          minLength: 1
+        forecastTempF:
+          type: number
+        forecastSource:
+          type: string
+        forecastChange:
+          type: number
+        phase:
+          type: string
+        daysUntilTarget:
+          type: integer
+        target:
+          type: object
+          properties:
+            question:
+              type: string
+            yesPrice:
+              type: number
+        below:
+          type: object
+          properties:
+            question:
+              type: string
+            yesPrice:
+              type: number
+        above:
+          type: object
+          properties:
+            question:
+              type: string
+            yesPrice:
+              type: number
+
+    AlertInput:
+      type: object
+      required: [sessionId, timestamp, type]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+        timestamp:
+          type: string
+          minLength: 1
+        type:
+          type: string
+          enum: [forecast_shift, range_shift, price_spike, buy_executed, phase_change, sell_executed, redeem_executed]
+        message:
+          type: string
+        data:
+          type: object
+          nullable: true
+
+    SpendInput:
+      type: object
+      required: [date, amount]
+      properties:
+        date:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        amount:
+          type: number
+          exclusiveMinimum: 0
+        details:
+          type: object
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+    BuyRequest:
+      type: object
+      required: [date]
+      properties:
+        date:
+          type: string
+          format: date
+        ranges:
+          type: array
+          items:
+            type: object
+            properties:
+              question:
+                type: string
+              tokenId:
+                type: string
+              price:
+                type: number
+
+    SellRequest:
+      type: object
+      required: [positionId]
+      properties:
+        positionId:
+          type: integer
+        price:
+          type: number
+        shares:
+          type: number
+
+    RedeemRequest:
+      type: object
+      required: [date]
+      properties:
+        date:
+          type: string
+          format: date
+
+# ── Paths ────────────────────────────────────────────────────────────────
+
+paths:
+
+  # ── Data Service ─────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Service health check
+      description: Returns service status with uptime, optional dependency checks, and service-specific metadata.
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  # Sessions
+  /api/sessions:
+    get:
+      tags: [Sessions]
+      summary: List all sessions
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Sessions ordered by target_date DESC
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+
+  /api/sessions/active:
+    get:
+      tags: [Sessions]
+      summary: List active sessions only
+      responses:
+        '200':
+          description: Sessions with status 'active'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+
+  /api/sessions/{id}:
+    get:
+      tags: [Sessions]
+      summary: Get session by market+date
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Target date (YYYY-MM-DD)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags: [Sessions]
+      summary: Upsert session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionInput'
+      responses:
+        '200':
+          description: Session upserted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upserted:
+                    type: boolean
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      tags: [Sessions]
+      summary: Update session fields
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [active, completed, stopped]
+                phase:
+                  type: string
+                  enum: [scout, track, buy, monitor, resolve]
+      responses:
+        '200':
+          description: Session updated
+        '400':
+          description: Validation error
+
+  /api/db/sessions:
+    post:
+      tags: [Sessions]
+      summary: Upsert session (alternate endpoint)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionInput'
+      responses:
+        '201':
+          description: Session upserted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upserted:
+                    type: boolean
+                  existingId:
+                    type: string
+                    nullable: true
+        '400':
+          description: Validation error
+        '409':
+          description: Conflict (FK constraint)
+
+  # Trades
+  /api/trades:
+    get:
+      tags: [Trades]
+      summary: List trades
+      parameters:
+        - name: date
+          in: query
+          description: Filter by target date
+          schema:
+            type: string
+            format: date
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Trades list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Trade'
+    post:
+      tags: [Trades]
+      summary: Insert a new trade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TradeInput'
+      responses:
+        '201':
+          description: Trade created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+        '400':
+          description: Validation error
+
+  /api/trades/{id}:
+    patch:
+      tags: [Trades]
+      summary: Update trade status/verification
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [placed, filled, failed, redeemed]
+                verifiedAt:
+                  type: string
+                actualCost:
+                  type: number
+                  minimum: 0
+                totalProceeds:
+                  type: number
+                  minimum: 0
+      responses:
+        '200':
+          description: Trade updated
+        '400':
+          description: Validation error
+
+  /api/trades/log:
+    get:
+      tags: [Trades]
+      summary: Trade log with positions
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Trades with joined position data
+
+  /api/trades/pnl:
+    get:
+      tags: [Analytics]
+      summary: P&L summary by date
+      responses:
+        '200':
+          description: P&L breakdown per target date and market
+
+  /api/trade-summary:
+    get:
+      tags: [Trades]
+      summary: Rich trade summary for dashboard (session files + DB)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 15
+      responses:
+        '200':
+          description: Merged trade summary from session files and database
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trades:
+                    type: array
+                    items:
+                      type: object
+
+  # Positions
+  /api/positions:
+    post:
+      tags: [Positions]
+      summary: Batch insert positions for a trade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PositionsInsertInput'
+      responses:
+        '201':
+          description: Positions inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inserted:
+                    type: integer
+        '400':
+          description: Validation error
+
+  /api/positions/active:
+    get:
+      tags: [Positions]
+      summary: Get active (non-sold, non-failed) positions
+      parameters:
+        - name: date
+          in: query
+          required: true
+          description: Target date
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Active positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Position'
+
+  /api/positions/{id}:
+    get:
+      tags: [Positions]
+      summary: Get position by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Position found
+        '404':
+          description: Position not found
+    patch:
+      tags: [Positions]
+      summary: Update position fields
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Position updated
+
+  /api/positions/{id}/sold:
+    patch:
+      tags: [Positions]
+      summary: Mark position as sold
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sellPrice, soldAt]
+              properties:
+                sellPrice:
+                  type: number
+                  minimum: 0
+                soldAt:
+                  type: string
+                  format: date-time
+                sellOrderId:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Position marked as sold
+        '400':
+          description: Validation error
+
+  /api/positions/{id}/redeemed:
+    patch:
+      tags: [Positions]
+      summary: Mark position as redeemed
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redeemedValue, redeemedAt]
+              properties:
+                redeemedValue:
+                  type: number
+                  minimum: 0
+                redeemedAt:
+                  type: string
+                  format: date-time
+                redeemedTx:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Position marked as redeemed
+        '400':
+          description: Validation error
+
+  # Snapshots
+  /api/snapshots:
+    post:
+      tags: [Snapshots]
+      summary: Insert monitoring snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SnapshotInput'
+      responses:
+        '201':
+          description: Snapshot inserted
+        '400':
+          description: Validation error
+        '409':
+          description: Foreign key conflict
+
+  /api/snapshots/{sessionId}:
+    get:
+      tags: [Snapshots]
+      summary: Get snapshots for chart rendering
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 500
+      responses:
+        '200':
+          description: Snapshots ordered by timestamp ASC
+
+  # Alerts
+  /api/alerts:
+    post:
+      tags: [Alerts]
+      summary: Insert system alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertInput'
+      responses:
+        '201':
+          description: Alert inserted
+        '400':
+          description: Validation error
+        '409':
+          description: Foreign key conflict
+
+  # Spend
+  /api/spend:
+    get:
+      tags: [Spend]
+      summary: Get daily spend
+      parameters:
+        - name: date
+          in: query
+          description: Date to check (defaults to today ET)
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Spend data for the date
+    post:
+      tags: [Spend]
+      summary: Record a spend entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpendInput'
+      responses:
+        '201':
+          description: Spend recorded
+        '400':
+          description: Validation error
+
+  # Config
+  /api/config:
+    get:
+      tags: [Config]
+      summary: Get resolved configuration
+      description: Returns all config values with defaults, env vars, and admin overrides merged.
+      parameters:
+        - name: admin
+          in: query
+          description: Set to 1 for admin UI format with metadata
+          schema:
+            type: string
+            enum: ['0', '1']
+      responses:
+        '200':
+          description: Configuration object
+
+  /api/config/overrides:
+    get:
+      tags: [Config]
+      summary: Get admin override values only
+      responses:
+        '200':
+          description: Override map
+    put:
+      tags: [Config]
+      summary: Set all config overrides
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Overrides saved
+    delete:
+      tags: [Config]
+      summary: Reset all overrides to defaults
+      responses:
+        '200':
+          description: All overrides cleared
+
+  /api/config/overrides/{section}/{field}:
+    delete:
+      tags: [Config]
+      summary: Reset a single config override
+      parameters:
+        - name: section
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: field
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Override reset
+
+  # Analytics
+  /api/analytics:
+    get:
+      tags: [Analytics]
+      summary: Full analytics with P&L by date and totals
+      responses:
+        '200':
+          description: Analytics object
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pnlByDate:
+                    type: array
+                    items:
+                      type: object
+                  totals:
+                    type: object
+                    properties:
+                      totalInvested:
+                        type: number
+                      totalSold:
+                        type: number
+                      totalRedeemed:
+                        type: number
+                      realizedPnL:
+                        type: number
+                      tradingDays:
+                        type: integer
+                      totalTrades:
+                        type: integer
+                  serverTime:
+                    type: string
+                    format: date-time
+
+  /api/forecast-accuracy:
+    get:
+      tags: [Analytics]
+      summary: Forecast vs. actual temperature accuracy
+      responses:
+        '200':
+          description: Accuracy data per session
+
+  /api/markets:
+    get:
+      tags: [Market]
+      summary: List active markets
+      responses:
+        '200':
+          description: Active market configurations
+
+  # Session Files (legacy)
+  /api/session-files:
+    get:
+      tags: [Sessions]
+      summary: List session file dates
+      responses:
+        '200':
+          description: Available dates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dates:
+                    type: array
+                    items:
+                      type: string
+
+  /api/session-files/{date}:
+    get:
+      tags: [Sessions]
+      summary: Get session file data
+      parameters:
+        - name: date
+          in: path
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: slim
+          in: query
+          description: Limit snapshot count for performance
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Session file contents
+        '404':
+          description: Session file not found
+    put:
+      tags: [Sessions]
+      summary: Save session file data
+      parameters:
+        - name: date
+          in: path
+          required: true
+          schema:
+            type: string
+            format: date
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Session file saved
+
+  # Restart Signal
+  /api/restart-signal:
+    get:
+      tags: [Config]
+      summary: Check if restart was requested
+      responses:
+        '200':
+          description: Restart signal status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requested:
+                    type: boolean
+    post:
+      tags: [Config]
+      summary: Signal a restart request
+      responses:
+        '201':
+          description: Restart signal created
+    delete:
+      tags: [Config]
+      summary: Clear restart signal
+      responses:
+        '200':
+          description: Restart signal cleared
+
+  # ── Trading Service ────────────────────────────────────────────────────
+
+  /api/buy:
+    post:
+      tags: [Trading]
+      summary: Execute buy order
+      description: Places buy orders on Polymarket CLOB for temperature range positions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuyRequest'
+      responses:
+        '200':
+          description: Buy order result
+        '400':
+          description: Invalid request
+        '500':
+          description: Order execution failed
+
+  /api/sell:
+    post:
+      tags: [Trading]
+      summary: Sell a position
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SellRequest'
+      responses:
+        '200':
+          description: Sell order result
+
+  /api/retry:
+    post:
+      tags: [Trading]
+      summary: Retry a failed/partial buy order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Retry result
+
+  /api/redeem:
+    post:
+      tags: [Trading]
+      summary: Redeem won positions for a date
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemRequest'
+      responses:
+        '200':
+          description: Redeem result
+
+  /api/wallet:
+    get:
+      tags: [Trading]
+      summary: Get wallet balance
+      responses:
+        '200':
+          description: USDC balance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+                  balance:
+                    type: string
+                  balanceFormatted:
+                    type: number
+
+  # ── Weather Service ────────────────────────────────────────────────────
+
+  /api/forecast:
+    get:
+      tags: [Weather]
+      summary: Get temperature forecast for a date
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Forecast data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  forecastHighF:
+                    type: number
+                  source:
+                    type: string
+                  confidence:
+                    type: string
+                  queriedAt:
+                    type: string
+                    format: date-time
+
+  /api/current:
+    get:
+      tags: [Weather]
+      summary: Get current weather conditions
+      responses:
+        '200':
+          description: Current conditions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tempF:
+                    type: number
+                  conditions:
+                    type: string
+                  maxTodayF:
+                    type: number
+
+  /api/weather:
+    get:
+      tags: [Weather]
+      summary: Get combined forecast + current weather
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Combined weather data
+
+  /api/forecast-days:
+    get:
+      tags: [Weather]
+      summary: Get all available forecast days
+      responses:
+        '200':
+          description: Forecast day list
+
+  # ── Market Service ─────────────────────────────────────────────────────
+
+  /api/market:
+    get:
+      tags: [Market]
+      summary: Get Polymarket event for a date
+      parameters:
+        - name: date
+          in: query
+          required: true
+          description: Target date to find the temperature event
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Market event with all temperature ranges
+        '404':
+          description: No event found for date
+
+  /api/ranges:
+    get:
+      tags: [Market]
+      summary: Get temperature ranges for a date given a forecast
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: temp
+          in: query
+          required: true
+          description: Forecast temperature to center range selection
+          schema:
+            type: number
+      responses:
+        '200':
+          description: Selected ranges (target, below, above)
+
+  # ── Liquidity Service ──────────────────────────────────────────────────
+
+  /api/liquidity:
+    get:
+      tags: [Liquidity]
+      summary: Get real-time order book data
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Live order book bids/asks for subscribed tokens
+
+  /api/liquidity/subscribe:
+    post:
+      tags: [Liquidity]
+      summary: Subscribe to order book updates for token IDs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date, tokenIds]
+              properties:
+                date:
+                  type: string
+                  format: date
+                tokenIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Subscription confirmed

@@ -1,0 +1,83 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: data-svc-green
+    version: green
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tempedge
+      component: data-svc-green
+      version: green
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: data-svc-green
+        version: green
+    spec:
+      containers:
+        - name: data-svc-green
+          image: tempedge-data-svc:green
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3005
+          env:
+            - name: OUTPUT_DIR
+              value: "/app/output"
+            - name: DATA_SVC_PORT
+              value: "3005"
+          volumeMounts:
+            - name: output
+              mountPath: /app/output
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3005
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: output
+          persistentVolumeClaim:
+            claimName: tempedge-output
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-svc-green
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: data-svc-green
+    version: green
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: data-svc-green
+    version: green
+  ports:
+    - name: http
+      port: 3005
+      targetPort: 3005
+      protocol: TCP

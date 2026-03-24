@@ -42,18 +42,18 @@ export function getDb() {
     _db = new Database(DB_PATH);
 
     // ── Performance & Safety Pragmas ────────────────────────────────
-    _db.pragma('journal_mode = WAL');       // Multi-process safe reads
-    _db.pragma('busy_timeout = 5000');      // Wait up to 5s for locks
-    _db.pragma('foreign_keys = ON');        // Enforce FK constraints
-    _db.pragma('synchronous = NORMAL');     // Good balance of safety + speed
+    _db.pragma('journal_mode = WAL'); // Multi-process safe reads
+    _db.pragma('busy_timeout = 5000'); // Wait up to 5s for locks
+    _db.pragma('foreign_keys = ON'); // Enforce FK constraints
+    _db.pragma('synchronous = NORMAL'); // Good balance of safety + speed
 
     // ── Run Schema ──────────────────────────────────────────────────
     const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
     // Split on statements and execute (skip PRAGMA lines — already set above)
     const statements = schema
         .split(';')
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('PRAGMA'));
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && !s.startsWith('PRAGMA'));
 
     for (const stmt of statements) {
         try {
@@ -71,7 +71,7 @@ export function getDb() {
         INSERT OR IGNORE INTO markets (id, name, slug_template, unit, station_lat, station_lon, station_name)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
-    insertMarket.run('nyc', 'NYC Temperature', 'highest-temperature-in-nyc-on-{date}', 'F', 40.7769, -73.8740, 'KLGA');
+    insertMarket.run('nyc', 'NYC Temperature', 'highest-temperature-in-nyc-on-{date}', 'F', 40.7769, -73.874, 'KLGA');
 
     console.log(`📦 Database connected: ${DB_PATH}`);
     return _db;
