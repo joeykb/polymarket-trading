@@ -141,6 +141,13 @@ if ($Only -ne "") {
         }
     }
 
+    # Force pod restart to pick up rebuilt images (imagePullPolicy: Never + same tag)
+    Write-Host "`n[RESTART] Restarting deployments to pick up new images..." -ForegroundColor Yellow
+    foreach ($svc in $services) {
+        kubectl rollout restart "deployment/$($svc.Name)" -n tempedge 2>&1 | Out-Null
+        Write-Host "  [RESTART] $($svc.Name)" -ForegroundColor DarkGray
+    }
+
     # Wait for targeted deployments
     Write-Host "`n[WAIT] Waiting for deployments..." -ForegroundColor Yellow
     foreach ($svc in $services) {
@@ -164,6 +171,12 @@ if ($Only -ne "") {
                 kubectl apply -f $manifest 2>&1 | Out-Null
                 Write-Host "    [APPLY] $svcName" -ForegroundColor DarkGray
             }
+        }
+
+        # Force pod restart to pick up rebuilt images (imagePullPolicy: Never + same tag)
+        foreach ($svcName in $layer.Services) {
+            kubectl rollout restart "deployment/$svcName" -n tempedge 2>&1 | Out-Null
+            Write-Host "    [RESTART] $svcName" -ForegroundColor DarkGray
         }
 
         # Wait for all deployments in this layer to be ready
