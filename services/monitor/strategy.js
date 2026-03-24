@@ -88,6 +88,132 @@ export function resolveRanges(snapshot) {
     };
 }
 
+// ── Edge Computation & Confidence Sizing ─────────────────────────────────
+
+/**
+ * Compute forecast confidence and expected value for buy decision.
+ *
+ * Confidence is built from 5 independent signals:
+ *   1. Trend convergence (+0.12 converging, -0.12 diverging)
+ *   2. Volatility (low = +0.08, high = -0.08)
+ *   3. Days to target (closer = higher confidence)
+ *   4. Trend consistency (warming/cooling = +0.05, neutral = 0)
+ *   5. Data points (more history = more reliable)
+ *
+ * Expected value: EV = (confidence × $1.00) - targetCost
+ *
+ * Position sizing tiers based on confidence:
+ *   high   (≥0.55): target only — max ROI, forecast is strong
+ *   medium (0.40-0.55): target + cheapest adjacent hedge
+ *   low    (<0.40): target + both hedges — max coverage
+ *
+ * @param {Object} snapshot - Current snapshot with target/below/above ranges
+ * @param {Object} trend    - Result from analyzeTrend()
+ * @param {Object} config   - { evThreshold }
+ * @returns {{ ev, confidence, tier, action, reason, rangesToBuy }}
+ */
+export function computeEdge(snapshot, trend, config = {}) {
+    const evThreshold = config.evThreshold ?? 0.05;
+
+    const result = {
+        ev: 0,
+        confidence: 0,
+        tier: 'low',
+        action: 'skip',
+        reason: '',
+        rangesToBuy: ['target', 'below', 'above'], // default: all 3
+    };
+
+    if (!snapshot?.target) {
+        result.reason = 'No target range in snapshot';
+        return result;
+    }
+
+    const daysOut = snapshot.daysUntilTarget ?? 2;
+    const targetCost = snapshot.target.yesPrice ?? 0;
+
+    if (targetCost <= 0 || targetCost >= 0.95) {
+        result.reason = `Target price $${targetCost.toFixed(2)} is out of tradeable range`;
+        return result;
+    }
+
+    // ── Build confidence from independent signals ────────────────────
+
+    let confidence = 0.45; // base — slightly below coin-flip
+
+    // Signal 1: Trend convergence (is forecast stabilizing?)
+    if (trend?.convergence === 'converging') confidence += 0.12;
+    else if (trend?.convergence === 'diverging') confidence -= 0.12;
+    // 'stable' or 'unknown' = no adjustment
+
+    // Signal 2: Volatility (low forecast jitter = more predictable)
+    if (trend?.volatility != null) {
+        if (trend.volatility < 1.0) confidence += 0.08;
+        else if (trend.volatility < 2.0) confidence += 0.03;
+        else if (trend.volatility > 3.0) confidence -= 0.08;
+        else if (trend.volatility > 2.0) confidence -= 0.04;
+    }
+
+    // Signal 3: Days to target (closer = more accurate forecasts)
+    if (daysOut <= 1) confidence += 0.12;
+    else if (daysOut === 2) confidence += 0.05;
+    else if (daysOut >= 4) confidence -= 0.1;
+    else if (daysOut >= 3) confidence -= 0.05;
+
+    // Signal 4: Trend direction consistency (clear signal vs. neutral)
+    if (trend?.direction === 'warming' || trend?.direction === 'cooling') {
+        confidence += 0.05; // clear directional signal is informative
+    }
+
+    // Signal 5: Data points — more forecast history = more reliable trend
+    const pointCount = trend?.points?.length ?? 0;
+    if (pointCount >= 5) confidence += 0.05;
+    else if (pointCount <= 1) confidence -= 0.05;
+
+    // Clamp to sensible range
+    confidence = Math.max(0.15, Math.min(0.85, confidence));
+    result.confidence = parseFloat(confidence.toFixed(2));
+
+    // ── Expected value ──────────────────────────────────────────────
+
+    const ev = confidence * 1.0 - targetCost;
+    result.ev = parseFloat(ev.toFixed(4));
+
+    // ── Position sizing tier ────────────────────────────────────────
+
+    if (confidence >= 0.55) {
+        result.tier = 'high';
+        result.rangesToBuy = ['target']; // target only — max ROI
+    } else if (confidence >= 0.4) {
+        result.tier = 'medium';
+        // Pick target + the cheaper adjacent hedge
+        const belowCost = snapshot.below?.yesPrice ?? Infinity;
+        const aboveCost = snapshot.above?.yesPrice ?? Infinity;
+        if (belowCost <= aboveCost && snapshot.below) {
+            result.rangesToBuy = ['target', 'below'];
+        } else if (snapshot.above) {
+            result.rangesToBuy = ['target', 'above'];
+        } else {
+            result.rangesToBuy = ['target'];
+        }
+    } else {
+        result.tier = 'low';
+        result.rangesToBuy = ['target', 'below', 'above']; // full coverage
+    }
+
+    // ── Action decision ─────────────────────────────────────────────
+
+    if (ev > evThreshold) {
+        result.action = 'buy';
+        result.reason = `EV $${ev.toFixed(3)} at ${(confidence * 100).toFixed(0)}% confidence (tier: ${result.tier})`;
+    } else {
+        result.action = 'skip';
+        result.reason = `EV $${ev.toFixed(3)} below $${evThreshold.toFixed(2)} threshold (${(confidence * 100).toFixed(0)}% confidence)`;
+    }
+
+    return result;
+}
+
 // ── Buy Decision ────────────────────────────────────────────────────────
 
 /**

@@ -18,7 +18,7 @@ import { createClient } from '../../shared/httpClient.js';
 import { nowISO, getTodayET, getDateOffsetET, daysUntil, getPhase } from '../../shared/dates.js';
 import { takeSnapshot } from './snapshot.js';
 import { detectAlerts } from './alerts.js';
-import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss } from './strategy.js';
+import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge } from './strategy.js';
 
 // ── Service URLs (from shared config) ───────────────────────────────────
 
@@ -252,6 +252,26 @@ function _shouldPlaceBuy(session, snapshot) {
     });
 }
 
+// ── Snapshot Filtering by Confidence Tier ────────────────────────────────
+
+/**
+ * Create a filtered snapshot containing only the ranges specified by rangesToBuy.
+ * This controls which positions the trading service will buy.
+ *
+ * @param {Object} snapshot - Full snapshot with target/below/above
+ * @param {Array<string>} rangesToBuy - e.g. ['target'] or ['target', 'below']
+ * @returns {Object} Filtered snapshot
+ */
+function _filterSnapshotByTier(snapshot, rangesToBuy) {
+    const rangeSet = new Set(rangesToBuy);
+    return {
+        ...snapshot,
+        target: rangeSet.has('target') ? snapshot.target : null,
+        below: rangeSet.has('below') ? snapshot.below : null,
+        above: rangeSet.has('above') ? snapshot.above : null,
+    };
+}
+
 // ── Liquidity-Gated Buy Flow ────────────────────────────────────────────
 
 function attachSessionContext(order, session) {
@@ -314,7 +334,14 @@ function startLiquidityGatedBuy(session, snapshot) {
                 } catch {
                     freshSnapshot = snapshot; /* intentional: use last known snapshot */
                 }
-                const order = await tryPlaceBuyOrder(freshSnapshot, deadlineLiq?.tokens || [], {
+                // Re-evaluate edge with fresh data (deadline still forces buy but respects tier)
+                const edge =
+                    session.pendingEdge ||
+                    computeEdge(freshSnapshot, session.trend, {
+                        evThreshold: _config.monitor.evThreshold ?? 0.05,
+                    });
+                const filteredSnapshot = _filterSnapshotByTier(freshSnapshot, edge.rangesToBuy);
+                const order = await tryPlaceBuyOrder(filteredSnapshot, deadlineLiq?.tokens || [], {
                     sessionId: session.id,
                     targetDate: session.targetDate,
                     marketId: 'nyc',
@@ -323,6 +350,7 @@ function startLiquidityGatedBuy(session, snapshot) {
                     console.warn('  ⚠️  Deadline buy failed');
                     return;
                 }
+                order.edge = edge;
                 attachSessionContext(order, session);
                 order.liquidityWait = waitStr;
                 order.forcedByDeadline = true;
@@ -366,7 +394,19 @@ function startLiquidityGatedBuy(session, snapshot) {
             } catch {
                 freshSnapshot = snapshot; /* intentional: use last known snapshot */
             }
-            const order = await tryPlaceBuyOrder(freshSnapshot, liqData.tokens, {
+            // Re-evaluate edge with fresh data
+            const edge = computeEdge(freshSnapshot, session.trend, {
+                evThreshold: _config.monitor.evThreshold ?? 0.05,
+            });
+            if (edge.action === 'skip') {
+                console.log(`  ⏭️  SKIP BUY (liquidity-gated): ${edge.reason}`);
+                session.awaitingLiquidity = false;
+                session.lastEdge = edge;
+                await saveSession(session);
+                return;
+            }
+            const filteredSnapshot = _filterSnapshotByTier(freshSnapshot, edge.rangesToBuy);
+            const order = await tryPlaceBuyOrder(filteredSnapshot, liqData.tokens, {
                 sessionId: session.id,
                 targetDate: session.targetDate,
                 marketId: 'nyc',
@@ -375,18 +415,20 @@ function startLiquidityGatedBuy(session, snapshot) {
                 console.warn('  ⚠️  Liquidity-gated buy failed');
                 return;
             }
+            order.edge = edge;
             attachSessionContext(order, session);
             order.liquidityWait = waitStr;
             session.buyOrder = order;
+            session.lastEdge = edge;
             session.pnl = computePnL(order, snapshot);
             session.alerts.push({
                 timestamp: nowISO(),
                 type: 'buy_executed',
-                message: `Buy after ${waitStr} liquidity wait`,
-                data: { waitMs, liquidCount, totalCount },
+                message: `Buy after ${waitStr} liquidity wait (EV: $${edge.ev.toFixed(3)}, tier: ${edge.tier})`,
+                data: { waitMs, liquidCount, totalCount, edge },
             });
             await saveSession(session);
-            console.log(`  💰 Buy order placed: $${order.totalCost.toFixed(3)} [waited ${waitStr}]`);
+            console.log(`  💰 Buy order placed: $${order.totalCost.toFixed(3)} [waited ${waitStr}, tier: ${edge.tier}]`);
         } finally {
             // Release lock
             _buyInProgress = false;
@@ -610,16 +652,42 @@ export async function runMonitoringCycle(session) {
 
     // Buy logic
     const buySignal = _shouldPlaceBuy(session, snapshot);
-    if (buySignal === true) {
-        const immLiq = await fetchLiquidityFromService(session.targetDate);
-        session.buyOrder = await tryPlaceBuyOrder(snapshot, immLiq?.tokens || [], {
-            sessionId: session.id,
-            targetDate: session.targetDate,
-            marketId: 'nyc',
+    if (buySignal === true || buySignal === 'await-liquidity') {
+        // ── EV Filter: compute edge before committing capital ────────
+        const edge = computeEdge(snapshot, session.trend, {
+            evThreshold: _config.monitor.evThreshold ?? 0.05,
         });
-        attachSessionContext(session.buyOrder, session);
-    } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
-        startLiquidityGatedBuy(session, snapshot);
+        session.lastEdge = edge;
+        console.log(
+            `  📊 Edge: EV=$${edge.ev.toFixed(3)} | conf=${(edge.confidence * 100).toFixed(0)}% | tier=${edge.tier} | ${edge.action}`,
+        );
+
+        if (edge.action === 'skip') {
+            console.log(`  ⏭️  SKIP BUY: ${edge.reason}`);
+            alerts.push({
+                timestamp: nowISO(),
+                type: 'ev_skip',
+                message: `Buy skipped: ${edge.reason}`,
+                data: { ev: edge.ev, confidence: edge.confidence, tier: edge.tier, targetPrice: snapshot.target?.yesPrice },
+            });
+        } else if (buySignal === true) {
+            // Build a filtered snapshot with only the ranges we want to buy
+            const filteredSnapshot = _filterSnapshotByTier(snapshot, edge.rangesToBuy);
+            const immLiq = await fetchLiquidityFromService(session.targetDate);
+            session.buyOrder = await tryPlaceBuyOrder(filteredSnapshot, immLiq?.tokens || [], {
+                sessionId: session.id,
+                targetDate: session.targetDate,
+                marketId: 'nyc',
+            });
+            if (session.buyOrder) {
+                session.buyOrder.edge = edge;
+                session.initialForecastTempF = session.initialForecastTempF ?? snapshot.forecastTempF;
+            }
+            attachSessionContext(session.buyOrder, session);
+        } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
+            session.pendingEdge = edge; // Store edge for use when liquidity gate fires
+            startLiquidityGatedBuy(session, snapshot);
+        }
     }
 
     // ── Sell Strategy ───────────────────────────────────────────────────

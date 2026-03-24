@@ -4,7 +4,7 @@
  * Covers: analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss } from '../services/monitor/strategy.js';
+import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge } from '../services/monitor/strategy.js';
 
 // ── analyzeTrend ────────────────────────────────────────────────────────
 
@@ -324,5 +324,143 @@ describe('checkStopLoss', () => {
         });
         const result = checkStopLoss(session, makeSnapshot(), enabledConfig);
         expect(result.triggered).toBe(false);
+    });
+});
+
+// ── computeEdge ─────────────────────────────────────────────────────────
+
+describe('computeEdge', () => {
+    const makeSnapshot = (targetPrice, daysOut = 2, opts = {}) => ({
+        target: { question: '66-67°F', yesPrice: targetPrice },
+        below: opts.below ?? { question: '64-65°F', yesPrice: 0.15 },
+        above: opts.above ?? { question: '68-69°F', yesPrice: 0.1 },
+        daysUntilTarget: daysOut,
+    });
+
+    const goodTrend = {
+        direction: 'warming',
+        convergence: 'converging',
+        volatility: 0.5,
+        points: [1, 2, 3, 4, 5],
+    };
+
+    const badTrend = {
+        direction: 'neutral',
+        convergence: 'diverging',
+        volatility: 4.0,
+        points: [1],
+    };
+
+    it('returns skip when no target in snapshot', () => {
+        const result = computeEdge({}, goodTrend);
+        expect(result.action).toBe('skip');
+        expect(result.reason).toContain('No target');
+    });
+
+    it('returns skip when target price is 0', () => {
+        const result = computeEdge(makeSnapshot(0), goodTrend);
+        expect(result.action).toBe('skip');
+        expect(result.reason).toContain('out of tradeable');
+    });
+
+    it('returns skip when target price is >= 0.95', () => {
+        const result = computeEdge(makeSnapshot(0.96), goodTrend);
+        expect(result.action).toBe('skip');
+    });
+
+    it('returns buy with high tier for good conditions', () => {
+        // T+1, converging, low volatility, warming, 5 points
+        // base 0.45 + 0.12 (converging) + 0.08 (vol<1) + 0.12 (T+1) + 0.05 (warming) + 0.05 (5pts) = 0.87 -> clamped to 0.85
+        const snap = makeSnapshot(0.3, 1);
+        const result = computeEdge(snap, goodTrend);
+        expect(result.action).toBe('buy');
+        expect(result.tier).toBe('high');
+        expect(result.rangesToBuy).toEqual(['target']);
+        expect(result.confidence).toBeGreaterThanOrEqual(0.55);
+        expect(result.ev).toBeGreaterThan(0.05);
+    });
+
+    it('returns buy with low tier for bad conditions', () => {
+        // T+4, diverging, high vol, neutral, 1 point
+        // base 0.45 - 0.12 (diverging) - 0.08 (vol>3) - 0.10 (T+4) + 0 (neutral) - 0.05 (1pt) = 0.10 -> clamped to 0.15
+        // EV = 0.15 - 0.05 = 0.10 > 0.05 threshold
+        const snap = makeSnapshot(0.05, 4);
+        const result = computeEdge(snap, badTrend);
+        expect(result.tier).toBe('low');
+        expect(result.rangesToBuy).toEqual(['target', 'below', 'above']);
+    });
+
+    it('skips when EV is below threshold', () => {
+        // Expensive target ($0.80) + bad trend = negative EV
+        const snap = makeSnapshot(0.8, 4);
+        const result = computeEdge(snap, badTrend);
+        expect(result.action).toBe('skip');
+        expect(result.ev).toBeLessThanOrEqual(0.05);
+    });
+
+    it('respects custom evThreshold', () => {
+        const snap = makeSnapshot(0.3, 2);
+        const neutral = { direction: 'neutral', convergence: 'stable', volatility: 1.5, points: [1, 2, 3] };
+        // With very high threshold, should skip
+        const result = computeEdge(snap, neutral, { evThreshold: 0.9 });
+        expect(result.action).toBe('skip');
+
+        // With threshold of 0, should buy
+        const result2 = computeEdge(snap, neutral, { evThreshold: 0 });
+        expect(result2.action).toBe('buy');
+    });
+
+    it('medium tier picks cheaper hedge', () => {
+        // Force medium tier: confidence around 0.45-0.54
+        const neutral = { direction: 'neutral', convergence: 'stable', volatility: 1.5, points: [1, 2, 3] };
+        const snap = makeSnapshot(0.25, 2, {
+            below: { question: 'below', yesPrice: 0.2 },
+            above: { question: 'above', yesPrice: 0.05 },
+        });
+        const result = computeEdge(snap, neutral);
+        if (result.tier === 'medium') {
+            // Should pick the cheaper hedge (above at $0.05)
+            expect(result.rangesToBuy).toContain('target');
+            expect(result.rangesToBuy).toContain('above');
+            expect(result.rangesToBuy).not.toContain('below');
+        }
+    });
+
+    it('handles null trend gracefully', () => {
+        const snap = makeSnapshot(0.2, 2);
+        const result = computeEdge(snap, null);
+        expect(result.confidence).toBeGreaterThan(0);
+        // Should still compute without crashing
+        expect(['buy', 'skip']).toContain(result.action);
+    });
+
+    it('clamps confidence between 0.15 and 0.85', () => {
+        // Best case: should not exceed 0.85
+        const snap1 = makeSnapshot(0.1, 1);
+        const r1 = computeEdge(snap1, goodTrend);
+        expect(r1.confidence).toBeLessThanOrEqual(0.85);
+
+        // Worst case: should not go below 0.15
+        const snap2 = makeSnapshot(0.1, 5);
+        const r2 = computeEdge(snap2, badTrend);
+        expect(r2.confidence).toBeGreaterThanOrEqual(0.15);
+    });
+
+    it('includes reason in result', () => {
+        const snap = makeSnapshot(0.2, 1);
+        const result = computeEdge(snap, goodTrend);
+        expect(result.reason).toBeTruthy();
+        if (result.action === 'buy') {
+            expect(result.reason).toContain('EV');
+            expect(result.reason).toContain('confidence');
+        }
+    });
+
+    it('T+1 converging adds more confidence than T+4 diverging', () => {
+        const snap1 = makeSnapshot(0.3, 1);
+        const snap4 = makeSnapshot(0.3, 4);
+        const r1 = computeEdge(snap1, goodTrend);
+        const r4 = computeEdge(snap4, badTrend);
+        expect(r1.confidence).toBeGreaterThan(r4.confidence);
     });
 });

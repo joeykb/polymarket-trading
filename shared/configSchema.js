@@ -48,6 +48,11 @@ export const CONFIG_SCHEMA = {
         description: '°F change to trigger auto-sell of out-of-range strikes',
     },
     'monitor.buyHourEST': { key: 'BUY_HOUR_EST', default: 9.5, description: 'Hour (ET, decimal) to trigger buy (9.5 = 9:30am)' },
+    'monitor.evThreshold': {
+        key: 'EV_THRESHOLD',
+        default: 0.05,
+        description: 'Min expected value ($) to place a buy. EV = (confidence × $1) - cost. Set to 0 to disable.',
+    },
     'monitor.stopLossEnabled': {
         key: 'STOP_LOSS_ENABLED',
         default: 0,
