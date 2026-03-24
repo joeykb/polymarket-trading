@@ -206,6 +206,7 @@ export function computeEdge(snapshot, trend, config = {}, trajectory = null) {
         action: 'skip',
         reason: '',
         rangesToBuy: ['target', 'below', 'above'], // default: all 3
+        totalDeployedCost: 0,
         trajectory: trajectory || null,
     };
 

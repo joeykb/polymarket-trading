@@ -183,7 +183,7 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
                 tickSize,
                 negRisk,
             },
-            OrderType.FOK, // Fill-or-Kill: immediate fill or clean rejection in illiquid markets
+            OrderType.GTC, // createAndPostOrder only supports GTC|GTD; FOK requires createAndPostMarketOrder
         );
 
         console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
