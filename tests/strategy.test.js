@@ -3,8 +3,15 @@
  *
  * Covers: analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge } from '../services/monitor/strategy.js';
+import {
+    analyzeTrend,
+    resolveRanges,
+    shouldPlaceBuy,
+    computePnL,
+    checkStopLoss,
+    computeEdge,
+    analyzeTrajectory,
+} from '../services/monitor/strategy.js';
 
 // ── analyzeTrend ────────────────────────────────────────────────────────
 
@@ -462,5 +469,114 @@ describe('computeEdge', () => {
         const r1 = computeEdge(snap1, goodTrend);
         const r4 = computeEdge(snap4, badTrend);
         expect(r1.confidence).toBeGreaterThan(r4.confidence);
+    });
+});
+
+// ── analyzeTrajectory ───────────────────────────────────────────────────
+
+describe('analyzeTrajectory', () => {
+    it('returns unknown for < 2 points', () => {
+        const result = analyzeTrajectory([{ daysOut: 2, forecast: 65 }]);
+        expect(result.rangeStability).toBe('unknown');
+        expect(result.pointCount).toBe(0);
+    });
+
+    it('returns null/empty for no data', () => {
+        const result = analyzeTrajectory(null);
+        expect(result.rangeStability).toBe('unknown');
+    });
+
+    it('detects stable range (forecast stayed in same 2°F band)', () => {
+        // All forecasts fall in the 66-67 range (Math.floor(x/2) = 33)
+        const history = [
+            { daysOut: 4, forecast: 66.5 },
+            { daysOut: 3, forecast: 66.8 },
+            { daysOut: 2, forecast: 67.0 },
+        ];
+        const result = analyzeTrajectory(history);
+        expect(result.rangeStability).toBe('stable');
+        expect(result.rangesCrossed).toBe(0);
+        expect(result.pointCount).toBe(3);
+    });
+
+    it('detects volatile trajectory (crossed 2+ ranges)', () => {
+        const history = [
+            { daysOut: 4, forecast: 62 }, // range 31
+            { daysOut: 3, forecast: 66 }, // range 33
+            { daysOut: 2, forecast: 70 }, // range 35
+        ];
+        const result = analyzeTrajectory(history);
+        expect(result.rangeStability).toBe('volatile');
+        expect(result.rangesCrossed).toBeGreaterThanOrEqual(2);
+    });
+
+    it('computes drift magnitude and direction', () => {
+        const warming = [
+            { daysOut: 4, forecast: 60 },
+            { daysOut: 2, forecast: 65 },
+        ];
+        const result = analyzeTrajectory(warming);
+        expect(result.driftMagnitude).toBe(5);
+        expect(result.driftDirection).toBe('warming');
+
+        const cooling = [
+            { daysOut: 3, forecast: 70 },
+            { daysOut: 2, forecast: 65 },
+        ];
+        const r2 = analyzeTrajectory(cooling);
+        expect(r2.driftDirection).toBe('cooling');
+    });
+
+    it('detects flat drift for small changes', () => {
+        const history = [
+            { daysOut: 3, forecast: 66.0 },
+            { daysOut: 2, forecast: 66.5 },
+        ];
+        const result = analyzeTrajectory(history);
+        expect(result.driftDirection).toBe('flat');
+        expect(result.driftMagnitude).toBeLessThan(1);
+    });
+
+    it('computes negative acceleration (settling) for decelerating drift', () => {
+        // Deltas: +4, +1 → abs deltas: 4, 1 → accel = (1-4) = -3
+        const history = [
+            { daysOut: 4, forecast: 60 },
+            { daysOut: 3, forecast: 64 },
+            { daysOut: 2, forecast: 65 },
+        ];
+        const result = analyzeTrajectory(history);
+        expect(result.acceleration).toBeLessThan(0); // settling
+    });
+
+    it('computes positive acceleration (speeding up) for accelerating drift', () => {
+        // Deltas: +1, +4 → abs deltas: 1, 4 → accel = (4-1) = 3
+        const history = [
+            { daysOut: 4, forecast: 60 },
+            { daysOut: 3, forecast: 61 },
+            { daysOut: 2, forecast: 65 },
+        ];
+        const result = analyzeTrajectory(history);
+        expect(result.acceleration).toBeGreaterThan(0); // speeding up
+    });
+
+    it('minor-drift when crossing exactly one range boundary', () => {
+        const history = [
+            { daysOut: 3, forecast: 65.5 }, // range 32
+            { daysOut: 2, forecast: 66.5 }, // range 33
+        ];
+        const result = analyzeTrajectory(history);
+        expect(result.rangeStability).toBe('minor-drift');
+        expect(result.rangesCrossed).toBe(1);
+    });
+
+    it('trajectory boosts computeEdge confidence when stable', () => {
+        const snap = { target: { question: '66-67°F', yesPrice: 0.3 }, below: null, above: null, daysUntilTarget: 2 };
+        const trend = { direction: 'neutral', convergence: 'stable', volatility: 1.5, points: [1, 2, 3] };
+        const stableTrajectory = { rangeStability: 'stable', acceleration: -1, driftMagnitude: 0.5, pointCount: 3 };
+        const volatileTrajectory = { rangeStability: 'volatile', acceleration: 2, driftMagnitude: 5, pointCount: 3 };
+
+        const rStable = computeEdge(snap, trend, {}, stableTrajectory);
+        const rVolatile = computeEdge(snap, trend, {}, volatileTrajectory);
+        expect(rStable.confidence).toBeGreaterThan(rVolatile.confidence);
     });
 });

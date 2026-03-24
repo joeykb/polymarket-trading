@@ -18,7 +18,7 @@ import { createClient } from '../../shared/httpClient.js';
 import { nowISO, getTodayET, getDateOffsetET, daysUntil, getPhase } from '../../shared/dates.js';
 import { takeSnapshot } from './snapshot.js';
 import { detectAlerts } from './alerts.js';
-import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge } from './strategy.js';
+import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge, analyzeTrajectory } from './strategy.js';
 
 // ── Service URLs (from shared config) ───────────────────────────────────
 
@@ -337,9 +337,14 @@ function startLiquidityGatedBuy(session, snapshot) {
                 // Re-evaluate edge with fresh data (deadline still forces buy but respects tier)
                 const edge =
                     session.pendingEdge ||
-                    computeEdge(freshSnapshot, session.trend, {
-                        evThreshold: _config.monitor.evThreshold ?? 0.05,
-                    });
+                    computeEdge(
+                        freshSnapshot,
+                        session.trend,
+                        {
+                            evThreshold: _config.monitor.evThreshold ?? 0.05,
+                        },
+                        session.trajectory,
+                    );
                 const filteredSnapshot = _filterSnapshotByTier(freshSnapshot, edge.rangesToBuy);
                 const order = await tryPlaceBuyOrder(filteredSnapshot, deadlineLiq?.tokens || [], {
                     sessionId: session.id,
@@ -395,9 +400,14 @@ function startLiquidityGatedBuy(session, snapshot) {
                 freshSnapshot = snapshot; /* intentional: use last known snapshot */
             }
             // Re-evaluate edge with fresh data
-            const edge = computeEdge(freshSnapshot, session.trend, {
-                evThreshold: _config.monitor.evThreshold ?? 0.05,
-            });
+            const edge = computeEdge(
+                freshSnapshot,
+                session.trend,
+                {
+                    evThreshold: _config.monitor.evThreshold ?? 0.05,
+                },
+                session.trajectory,
+            );
             if (edge.action === 'skip') {
                 console.log(`  ⏭️  SKIP BUY (liquidity-gated): ${edge.reason}`);
                 session.awaitingLiquidity = false;
@@ -639,6 +649,14 @@ export async function runMonitoringCycle(session) {
         });
     }
     session.trend = analyzeTrend(session.forecastHistory);
+    session.trajectory = analyzeTrajectory(session.forecastHistory);
+
+    if (session.trajectory && session.trajectory.pointCount >= 2) {
+        const t = session.trajectory;
+        console.log(
+            `  🔮 Trajectory: ${t.rangeStability} | drift=${t.driftMagnitude}°F ${t.driftDirection} | accel=${t.acceleration} | ${t.pointCount} pts`,
+        );
+    }
 
     // Scout/Track: observation only
     if (snapshot.phase === 'scout' || snapshot.phase === 'track') {
@@ -654,9 +672,14 @@ export async function runMonitoringCycle(session) {
     const buySignal = _shouldPlaceBuy(session, snapshot);
     if (buySignal === true || buySignal === 'await-liquidity') {
         // ── EV Filter: compute edge before committing capital ────────
-        const edge = computeEdge(snapshot, session.trend, {
-            evThreshold: _config.monitor.evThreshold ?? 0.05,
-        });
+        const edge = computeEdge(
+            snapshot,
+            session.trend,
+            {
+                evThreshold: _config.monitor.evThreshold ?? 0.05,
+            },
+            session.trajectory,
+        );
         session.lastEdge = edge;
         console.log(
             `  📊 Edge: EV=$${edge.ev.toFixed(3)} | conf=${(edge.confidence * 100).toFixed(0)}% | tier=${edge.tier} | ${edge.action}`,

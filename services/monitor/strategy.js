@@ -88,17 +88,100 @@ export function resolveRanges(snapshot) {
     };
 }
 
+// ── Forecast Trajectory Analysis ─────────────────────────────────────────
+
+/**
+ * Analyze the T+4 → T+3 → T+2 forecast trajectory for a single target date.
+ *
+ * Unlike analyzeTrend (which looks at raw forecast deltas), this function
+ * extracts *structural* signals from the multi-day forecast path:
+ *
+ *   1. Range Stability — did the forecast stay in the same 2°F range?
+ *   2. Acceleration     — is the drift speeding up or slowing down?
+ *   3. Drift Magnitude  — how far has the forecast moved overall?
+ *
+ * These are independent signals that feed into computeEdge() confidence.
+ *
+ * @param {Array} forecastHistory - Array of { daysOut, forecast } points (from session)
+ * @param {number} rangeWidth     - Width of Polymarket temperature ranges (default 2°F)
+ * @returns {{ rangeStability, acceleration, driftMagnitude, driftDirection, rangesCrossed, pointCount }}
+ */
+export function analyzeTrajectory(forecastHistory, rangeWidth = 2) {
+    const result = {
+        rangeStability: 'unknown', // 'stable' | 'minor-drift' | 'volatile'
+        acceleration: 0, // positive = speeding up, negative = settling
+        driftMagnitude: 0, // total °F from first to last
+        driftDirection: 'flat', // 'warming' | 'cooling' | 'flat'
+        rangesCrossed: 0, // how many 2°F boundaries were crossed
+        pointCount: 0,
+    };
+
+    if (!forecastHistory || forecastHistory.length < 2) {
+        return result;
+    }
+
+    // Sort by daysOut descending (T+4 first, T+2 last = chronological order)
+    const sorted = [...forecastHistory].sort((a, b) => b.daysOut - a.daysOut);
+    result.pointCount = sorted.length;
+
+    // ── Drift Magnitude & Direction ─────────────────────────────────
+    const earliest = sorted[0].forecast;
+    const latest = sorted[sorted.length - 1].forecast;
+    result.driftMagnitude = parseFloat(Math.abs(latest - earliest).toFixed(1));
+    if (latest - earliest >= 1.0) result.driftDirection = 'warming';
+    else if (latest - earliest <= -1.0) result.driftDirection = 'cooling';
+    else result.driftDirection = 'flat';
+
+    // ── Range Stability ─────────────────────────────────────────────
+    // Calculate which 2°F range each forecast falls into (e.g., 66-67 = range 33)
+    const ranges = sorted.map((p) => Math.floor(p.forecast / rangeWidth));
+    const uniqueRanges = new Set(ranges);
+    result.rangesCrossed = uniqueRanges.size - 1; // 0 = stayed in same range
+
+    if (result.rangesCrossed === 0) {
+        result.rangeStability = 'stable'; // Forecast never left the range
+    } else if (result.rangesCrossed === 1) {
+        result.rangeStability = 'minor-drift'; // Crossed one boundary (normal)
+    } else {
+        result.rangeStability = 'volatile'; // Crossed 2+ ranges (red flag)
+    }
+
+    // ── Acceleration (second derivative) ────────────────────────────
+    // Build per-step deltas, then compute how deltas are changing
+    if (sorted.length >= 3) {
+        const deltas = [];
+        for (let i = 1; i < sorted.length; i++) {
+            deltas.push(sorted[i].forecast - sorted[i - 1].forecast);
+        }
+        // Acceleration = change in absolute delta over time
+        // If |delta[n]| < |delta[n-1]|, forecast is decelerating (settling)
+        const absDeltas = deltas.map(Math.abs);
+        let accelSum = 0;
+        for (let i = 1; i < absDeltas.length; i++) {
+            accelSum += absDeltas[i] - absDeltas[i - 1];
+        }
+        result.acceleration = parseFloat((accelSum / (absDeltas.length - 1)).toFixed(2));
+        // Negative acceleration = decelerating = good (forecast is settling)
+        // Positive acceleration = speeding up = bad (forecast is unstable)
+    }
+
+    return result;
+}
+
 // ── Edge Computation & Confidence Sizing ─────────────────────────────────
 
 /**
  * Compute forecast confidence and expected value for buy decision.
  *
- * Confidence is built from 5 independent signals:
+ * Confidence is built from 8 independent signals:
  *   1. Trend convergence (+0.12 converging, -0.12 diverging)
  *   2. Volatility (low = +0.08, high = -0.08)
  *   3. Days to target (closer = higher confidence)
  *   4. Trend consistency (warming/cooling = +0.05, neutral = 0)
  *   5. Data points (more history = more reliable)
+ *   6. Range stability — T+4→T+2 stayed in same range (+0.15 stable, -0.10 volatile)
+ *   7. Forecast acceleration — settling (+0.06) vs. speeding up (-0.06)
+ *   8. Drift magnitude — small drift = reliable, large drift = unreliable
  *
  * Expected value: EV = (confidence × $1.00) - targetCost
  *
@@ -107,12 +190,13 @@ export function resolveRanges(snapshot) {
  *   medium (0.40-0.55): target + cheapest adjacent hedge
  *   low    (<0.40): target + both hedges — max coverage
  *
- * @param {Object} snapshot - Current snapshot with target/below/above ranges
- * @param {Object} trend    - Result from analyzeTrend()
- * @param {Object} config   - { evThreshold }
- * @returns {{ ev, confidence, tier, action, reason, rangesToBuy }}
+ * @param {Object} snapshot    - Current snapshot with target/below/above ranges
+ * @param {Object} trend       - Result from analyzeTrend()
+ * @param {Object} config      - { evThreshold }
+ * @param {Object} [trajectory] - Result from analyzeTrajectory() (optional, enhances accuracy)
+ * @returns {{ ev, confidence, tier, action, reason, rangesToBuy, trajectory }}
  */
-export function computeEdge(snapshot, trend, config = {}) {
+export function computeEdge(snapshot, trend, config = {}, trajectory = null) {
     const evThreshold = config.evThreshold ?? 0.05;
 
     const result = {
@@ -122,6 +206,7 @@ export function computeEdge(snapshot, trend, config = {}) {
         action: 'skip',
         reason: '',
         rangesToBuy: ['target', 'below', 'above'], // default: all 3
+        trajectory: trajectory || null,
     };
 
     if (!snapshot?.target) {
@@ -169,6 +254,40 @@ export function computeEdge(snapshot, trend, config = {}) {
     const pointCount = trend?.points?.length ?? 0;
     if (pointCount >= 5) confidence += 0.05;
     else if (pointCount <= 1) confidence -= 0.05;
+
+    // ── Trajectory-based signals (T+4 → T+3 → T+2 path) ────────────
+
+    if (trajectory && trajectory.pointCount >= 2) {
+        // Signal 6: Range Stability — strongest single signal
+        // If forecast stayed in the same 2°F range from T+4 to T+2,
+        // the market is highly likely to settle there.
+        if (trajectory.rangeStability === 'stable') {
+            confidence += 0.15; // forecast never left the range — very strong
+        } else if (trajectory.rangeStability === 'minor-drift') {
+            confidence += 0.03; // crossed one boundary — normal, slight boost
+        } else if (trajectory.rangeStability === 'volatile') {
+            confidence -= 0.1; // crossed 2+ ranges — forecast is unreliable
+        }
+
+        // Signal 7: Forecast Acceleration (second derivative)
+        // Negative = decelerating (settling down) = good
+        // Positive = accelerating (getting less stable) = bad
+        if (trajectory.acceleration < -0.5) {
+            confidence += 0.06; // forecast is clearly settling
+        } else if (trajectory.acceleration > 0.5) {
+            confidence -= 0.06; // forecast is speeding up — unstable
+        }
+
+        // Signal 8: Drift Magnitude
+        // Small total movement from first observation = reliable forecast
+        if (trajectory.driftMagnitude < 1.0) {
+            confidence += 0.04; // barely moved — very consistent
+        } else if (trajectory.driftMagnitude > 4.0) {
+            confidence -= 0.06; // moved 4+°F — forecast was way off initially
+        } else if (trajectory.driftMagnitude > 2.0) {
+            confidence -= 0.02; // moderate drift
+        }
+    }
 
     // Clamp to sensible range
     confidence = Math.max(0.15, Math.min(0.85, confidence));
