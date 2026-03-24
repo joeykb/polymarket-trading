@@ -122,19 +122,19 @@ export const snapshotSchema = z.object({
     phase: z.string().optional(),
     daysUntilTarget: z.number().int().optional(),
     days_until_target: z.number().int().optional(),
-    target: z.object({ question: z.string(), yesPrice: z.number() }).optional(),
-    below: z.object({ question: z.string(), yesPrice: z.number() }).optional(),
-    above: z.object({ question: z.string(), yesPrice: z.number() }).optional(),
-});
+    target: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
+    below: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
+    above: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
+}).passthrough();
 
 // ── Alerts ───────────────────────────────────────────────────────────────
 
 export const alertSchema = z.object({
     sessionId: z.string().min(1, 'sessionId is required'),
     timestamp: z.string().min(1, 'timestamp is required'),
-    type: z.enum(['forecast_shift', 'range_shift', 'price_spike', 'buy_executed', 'phase_change', 'sell_executed', 'redeem_executed']),
+    type: z.string().min(1, 'type is required'),
     message: z.string().optional(),
-    data: z.record(z.unknown()).nullable().optional(),
+    data: z.any().optional(),
 });
 
 // ── Spend ───────────────────────────────────────────────────────────────

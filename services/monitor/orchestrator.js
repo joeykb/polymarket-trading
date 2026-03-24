@@ -604,14 +604,29 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         }
 
         await saveSession(existing);
-        // Reconcile session ID with DB — the DB may hold a different ID from a prior pod lifecycle
+        // Reconcile session ID with DB — the DB may hold a different ID, or no session at all
         try {
             const dbSession = await svcGet(DATA_SVC, `/api/db/sessions/nyc/${targetDate}`);
             if (dbSession && dbSession.id && dbSession.id !== existing.id) {
                 existing.id = dbSession.id;
             }
         } catch {
-            /* intentional: DB lookup best-effort */
+            // Session not in DB — upsert it so snapshots/alerts have a valid FK target
+            const upsertResult = await dbUpsertSession({
+                id: existing.id,
+                marketId: 'nyc',
+                targetDate,
+                status: existing.status,
+                phase: existing.phase,
+                initialForecastTemp: existing.initialForecastTempF,
+                initialTargetRange: existing.initialTargetRange,
+                forecastSource: existing.forecastSource,
+                intervalMinutes: parseInt(existing.intervalMinutes) || 5,
+                rebalanceThreshold: parseFloat(existing.rebalanceThreshold) || 3.0,
+            });
+            if (upsertResult?.existingId && upsertResult.existingId !== existing.id) {
+                existing.id = upsertResult.existingId;
+            }
         }
         console.log(`  📋 Resuming session (${existing.snapshots.length} snapshots, phase: ${existing.phase})`);
         return existing;
@@ -917,7 +932,7 @@ export async function runMonitoringCycle(session) {
         initialForecastTemp: session.initialForecastTempF,
         initialTargetRange: session.initialTargetRange,
         forecastSource: session.forecastSource,
-        intervalMinutes: session.intervalMinutes,
+        intervalMinutes: parseInt(session.intervalMinutes) || 5,
         rebalanceThreshold: session.rebalanceThreshold,
     });
     if (upsertResult?.existingId && upsertResult.existingId !== session.id) {

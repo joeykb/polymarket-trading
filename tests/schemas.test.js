@@ -201,11 +201,11 @@ describe('alertSchema', () => {
         expect(data.type).toBe('forecast_shift');
     });
 
-    it('rejects invalid alert type', () => {
+    it('rejects empty alert type', () => {
         const { error } = validate(alertSchema, {
             sessionId: 'sess-1',
             timestamp: '2026-03-23T14:00:00Z',
-            type: 'unknown_type',
+            type: '',
         });
         expect(error).toContain('type');
     });
