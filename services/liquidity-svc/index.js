@@ -137,7 +137,9 @@ function connectDate(stream) {
 }
 
 function scheduleReconnect(stream) {
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, stream.reconnectAttempts), RECONNECT_MAX_MS);
+    const base = Math.min(RECONNECT_BASE_MS * Math.pow(2, stream.reconnectAttempts), RECONNECT_MAX_MS);
+    const jitter = Math.random() * base * 0.3; // ±30% jitter to prevent thundering herd
+    const delay = Math.round(base + jitter);
     stream.reconnectAttempts++;
     setTimeout(() => {
         if (dateStreams.has(stream.date)) connectDate(stream);

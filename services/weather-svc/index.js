@@ -184,6 +184,35 @@ async function fetchAllDays() {
     return data.daily.time.map((date, i) => ({ date, highTempF: data.daily.temperature_2m_max[i] }));
 }
 
+// ── TTL Cache ───────────────────────────────────────────────────────────
+// Avoids redundant external API calls when the dashboard polls every 30s.
+
+const _cache = new Map();
+
+function cached(key, ttlMs, fetchFn) {
+    const entry = _cache.get(key);
+    if (entry && Date.now() - entry.ts < ttlMs) return entry.data;
+    const data = fetchFn();
+    // Handle both sync and async fetchFn
+    if (data && typeof data.then === 'function') {
+        return data
+            .then((result) => {
+                _cache.set(key, { data: result, ts: Date.now() });
+                return result;
+            })
+            .catch((err) => {
+                _cache.delete(key); // don't cache errors
+                throw err;
+            });
+    }
+    _cache.set(key, { data, ts: Date.now() });
+    return data;
+}
+
+const FORECAST_TTL = 5 * 60 * 1000; // 5 min — forecasts change slowly
+const CURRENT_TTL = 2 * 60 * 1000; // 2 min — current conditions
+const FORECAST_DAYS_TTL = 3 * 60 * 1000; // 3 min — multi-day overview
+
 // (HTTP helpers now imported from shared/httpServer.js)
 
 // ── Request Handler ─────────────────────────────────────────────────────
@@ -200,23 +229,26 @@ async function handleRequest(req, res) {
 
         if (path === '/api/forecast') {
             if (!query.date) return errRes(res, 'date parameter required');
-            const forecast = await fetchForecast(query.date);
+            const forecast = await cached(`forecast:${query.date}`, FORECAST_TTL, () => fetchForecast(query.date));
             return jsonRes(res, forecast);
         }
 
         if (path === '/api/current') {
-            const current = await fetchCurrent();
+            const current = await cached('current', CURRENT_TTL, () => fetchCurrent());
             return jsonRes(res, current);
         }
 
         if (path === '/api/weather') {
             if (!query.date) return errRes(res, 'date parameter required');
-            const [forecast, current] = await Promise.all([fetchForecast(query.date), fetchCurrent()]);
+            const [forecast, current] = await Promise.all([
+                cached(`forecast:${query.date}`, FORECAST_TTL, () => fetchForecast(query.date)),
+                cached('current', CURRENT_TTL, () => fetchCurrent()),
+            ]);
             return jsonRes(res, { forecast, current });
         }
 
         if (path === '/api/forecast-days') {
-            const days = await fetchAllDays();
+            const days = await cached('forecast-days', FORECAST_DAYS_TTL, () => fetchAllDays());
             return jsonRes(res, days);
         }
 

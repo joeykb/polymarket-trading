@@ -36,7 +36,9 @@ async function _fetchRemoteConfig() {
 export function getConfig() {
     const remote = _configCache || {};
     return {
-        privateKey: process.env.POLYMARKET_PRIVATE_KEY || '',
+        // NOTE: privateKey is intentionally NOT included here.
+        // It is read directly from process.env in getClient() only,
+        // to prevent accidental exposure via config logging/serialization.
         mode: remote.mode ?? process.env.TRADING_MODE ?? 'disabled',
         maxPositionCost: remote.maxPositionCost ?? parseFloat(process.env.MAX_POSITION_COST || '3'),
         maxDailySpend: remote.maxDailySpend ?? parseFloat(process.env.MAX_DAILY_SPEND || '10'),
@@ -64,12 +66,13 @@ let _signer = null;
 export async function getClient() {
     if (_client) return _client;
 
-    const tradingCfg = getConfig();
-    if (!tradingCfg.privateKey) {
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY || '';
+    if (!privateKey) {
         throw new Error('POLYMARKET_PRIVATE_KEY not set');
     }
 
-    _signer = new Wallet(tradingCfg.privateKey);
+    const tradingCfg = getConfig();
+    _signer = new Wallet(privateKey);
     console.log(`  🔑 Wallet: ${_signer.address}`);
 
     const tempClient = new ClobClient(tradingCfg.clobHost, tradingCfg.chainId, _signer);

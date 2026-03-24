@@ -207,6 +207,17 @@ async function dbInsertAlert(data) {
     }
 }
 
+async function dbInsertAlertsBatch(alerts) {
+    if (!alerts || alerts.length === 0) return;
+    try {
+        await svcPost(DATA_SVC, '/api/alerts/batch', { alerts });
+    } catch (err) {
+        // Fallback to sequential inserts if batch endpoint is unavailable
+        console.warn(`  ⚠️  Batch alert insert failed (${err.message}), falling back to sequential`);
+        for (const a of alerts) await dbInsertAlert(a);
+    }
+}
+
 // ── Snapshot Construction ───────────────────────────────────────────────
 
 function buildSnapshotRange(range, previous) {
@@ -357,7 +368,7 @@ function resolveRanges(snapshot) {
 
 function analyzeTrend(forecastHistory) {
     if (!forecastHistory || forecastHistory.length < 2) {
-        return { direction: 'neutral', magnitude: 0, points: forecastHistory || [] };
+        return { direction: 'neutral', magnitude: 0, volatility: 0, momentum: 0, convergence: 'unknown', points: forecastHistory || [] };
     }
     const sorted = [...forecastHistory].sort((a, b) => b.daysOut - a.daysOut);
     const totalDelta = sorted[sorted.length - 1].forecast - sorted[0].forecast;
@@ -365,7 +376,37 @@ function analyzeTrend(forecastHistory) {
     let direction = 'neutral';
     if (totalDelta >= threshold) direction = 'warming';
     if (totalDelta <= -threshold) direction = 'cooling';
-    return { direction, magnitude: totalDelta, points: sorted };
+
+    // Volatility: standard deviation of forecast deltas
+    const deltas = [];
+    for (let i = 1; i < sorted.length; i++) {
+        deltas.push(sorted[i].forecast - sorted[i - 1].forecast);
+    }
+    const meanDelta = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+    const variance = deltas.reduce((sum, d) => sum + Math.pow(d - meanDelta, 2), 0) / deltas.length;
+    const volatility = parseFloat(Math.sqrt(variance).toFixed(2));
+
+    // Momentum: weighted average of recent deltas (last 3 weighted 3x more)
+    let weightedSum = 0;
+    let weightTotal = 0;
+    for (let i = 0; i < deltas.length; i++) {
+        const recency = i >= deltas.length - 3 ? 3 : 1;
+        weightedSum += deltas[i] * recency;
+        weightTotal += recency;
+    }
+    const momentum = parseFloat((weightTotal > 0 ? weightedSum / weightTotal : 0).toFixed(2));
+
+    // Convergence: is the forecast stabilizing? (are recent deltas smaller?)
+    let convergence = 'unknown';
+    if (deltas.length >= 4) {
+        const firstHalf = deltas.slice(0, Math.floor(deltas.length / 2)).map(Math.abs);
+        const secondHalf = deltas.slice(Math.floor(deltas.length / 2)).map(Math.abs);
+        const avgFirst = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+        const avgSecond = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
+        convergence = avgSecond < avgFirst * 0.7 ? 'converging' : avgSecond > avgFirst * 1.3 ? 'diverging' : 'stable';
+    }
+
+    return { direction, magnitude: totalDelta, volatility, momentum, convergence, points: sorted };
 }
 
 // ── Buy Decision ────────────────────────────────────────────────────────
@@ -417,19 +458,80 @@ function startLiquidityGatedBuy(session, snapshot) {
     console.log(`     Polling:   every ${pollIntervalMs / 1000}s`);
     console.log(`     Deadline:  ${deadlineH}:${String(deadlineM).padStart(2, '0')} ET`);
 
+    // Mutex: prevents TOCTOU race where two interval ticks could both
+    // pass the guard before either completes the async buy operation.
     let bought = false;
+    let _buyInProgress = false;
 
     const pollTimer = setInterval(async () => {
-        if (bought || session.buyOrder) {
-            clearInterval(pollTimer);
+        // Fast exit: already bought or buy currently executing
+        if (bought || session.buyOrder || _buyInProgress) {
+            if (bought || session.buyOrder) clearInterval(pollTimer);
             return;
         }
 
-        const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-        const nowDate = new Date(nowET);
-        const currentDecimalHour = nowDate.getHours() + nowDate.getMinutes() / 60;
+        // Acquire lock
+        _buyInProgress = true;
 
-        if (currentDecimalHour >= deadlineHour) {
+        try {
+            const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+            const nowDate = new Date(nowET);
+            const currentDecimalHour = nowDate.getHours() + nowDate.getMinutes() / 60;
+
+            if (currentDecimalHour >= deadlineHour) {
+                clearInterval(pollTimer);
+                if (bought || session.buyOrder) return;
+                bought = true;
+                session.awaitingLiquidity = false;
+
+                const waitMs = Date.now() - new Date(session.liquidityWaitStart).getTime();
+                const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
+                console.log(`\n  ⏰ DEADLINE — forcing buy after ${waitStr}`);
+
+                const deadlineLiq = await fetchLiquidityFromService(targetDate);
+                // Take fresh snapshot so buy uses latest forecast
+                let freshSnapshot;
+                try {
+                    freshSnapshot = await takeSnapshot(targetDate, null);
+                } catch {
+                    freshSnapshot = snapshot; /* intentional: use last known snapshot */
+                }
+                const order = await tryPlaceBuyOrder(freshSnapshot, deadlineLiq?.tokens || [], {
+                    sessionId: session.id,
+                    targetDate: session.targetDate,
+                    marketId: 'nyc',
+                });
+                if (!order) {
+                    console.warn('  ⚠️  Deadline buy failed');
+                    return;
+                }
+                attachSessionContext(order, session);
+                order.liquidityWait = waitStr;
+                order.forcedByDeadline = true;
+                session.buyOrder = order;
+                session.pnl = computePnL(order, snapshot);
+                session.alerts.push({
+                    timestamp: nowISO(),
+                    type: 'buy_executed',
+                    message: `Buy forced at deadline after ${waitStr}`,
+                    data: { waitMs, forced: true },
+                });
+                await saveSession(session);
+                console.log(`  💰 Deadline buy: $${order.totalCost.toFixed(3)}`);
+                return;
+            }
+
+            const liqData = await fetchLiquidityFromService(targetDate);
+            if (!liqData || !liqData.tokens || liqData.tokens.length === 0) return;
+
+            const requireAll = _config.liquidity.requireAllLiquid;
+            const liquidCount = liqData.liquidCount || 0;
+            const totalCount = liqData.tokenCount || liqData.tokens.length;
+            const allLiquid = liqData.allLiquid || false;
+            const conditionMet = requireAll ? allLiquid : liquidCount > 0;
+
+            if (!conditionMet) return;
+
             clearInterval(pollTimer);
             if (bought || session.buyOrder) return;
             bought = true;
@@ -437,9 +539,8 @@ function startLiquidityGatedBuy(session, snapshot) {
 
             const waitMs = Date.now() - new Date(session.liquidityWaitStart).getTime();
             const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
-            console.log(`\n  ⏰ DEADLINE — forcing buy after ${waitStr}`);
+            console.log(`\n  ✅ LIQUIDITY MET — buying (${liquidCount}/${totalCount} liquid, waited ${waitStr})`);
 
-            const deadlineLiq = await fetchLiquidityFromService(targetDate);
             // Take fresh snapshot so buy uses latest forecast
             let freshSnapshot;
             try {
@@ -447,79 +548,31 @@ function startLiquidityGatedBuy(session, snapshot) {
             } catch {
                 freshSnapshot = snapshot; /* intentional: use last known snapshot */
             }
-            const order = await tryPlaceBuyOrder(freshSnapshot, deadlineLiq?.tokens || [], {
+            const order = await tryPlaceBuyOrder(freshSnapshot, liqData.tokens, {
                 sessionId: session.id,
                 targetDate: session.targetDate,
                 marketId: 'nyc',
             });
             if (!order) {
-                console.warn('  ⚠️  Deadline buy failed');
+                console.warn('  ⚠️  Liquidity-gated buy failed');
                 return;
             }
             attachSessionContext(order, session);
             order.liquidityWait = waitStr;
-            order.forcedByDeadline = true;
             session.buyOrder = order;
             session.pnl = computePnL(order, snapshot);
             session.alerts.push({
                 timestamp: nowISO(),
                 type: 'buy_executed',
-                message: `Buy forced at deadline after ${waitStr}`,
-                data: { waitMs, forced: true },
+                message: `Buy after ${waitStr} liquidity wait`,
+                data: { waitMs, liquidCount, totalCount },
             });
             await saveSession(session);
-            console.log(`  💰 Deadline buy: $${order.totalCost.toFixed(3)}`);
-            return;
+            console.log(`  💰 Buy order placed: $${order.totalCost.toFixed(3)} [waited ${waitStr}]`);
+        } finally {
+            // Release lock
+            _buyInProgress = false;
         }
-
-        const liqData = await fetchLiquidityFromService(targetDate);
-        if (!liqData || !liqData.tokens || liqData.tokens.length === 0) return;
-
-        const requireAll = _config.liquidity.requireAllLiquid;
-        const liquidCount = liqData.liquidCount || 0;
-        const totalCount = liqData.tokenCount || liqData.tokens.length;
-        const allLiquid = liqData.allLiquid || false;
-        const conditionMet = requireAll ? allLiquid : liquidCount > 0;
-
-        if (!conditionMet) return;
-
-        clearInterval(pollTimer);
-        if (bought || session.buyOrder) return;
-        bought = true;
-        session.awaitingLiquidity = false;
-
-        const waitMs = Date.now() - new Date(session.liquidityWaitStart).getTime();
-        const waitStr = `${(waitMs / 60000).toFixed(1)}m`;
-        console.log(`\n  ✅ LIQUIDITY MET — buying (${liquidCount}/${totalCount} liquid, waited ${waitStr})`);
-
-        // Take fresh snapshot so buy uses latest forecast
-        let freshSnapshot;
-        try {
-            freshSnapshot = await takeSnapshot(targetDate, null);
-        } catch {
-            freshSnapshot = snapshot; /* intentional: use last known snapshot */
-        }
-        const order = await tryPlaceBuyOrder(freshSnapshot, liqData.tokens, {
-            sessionId: session.id,
-            targetDate: session.targetDate,
-            marketId: 'nyc',
-        });
-        if (!order) {
-            console.warn('  ⚠️  Liquidity-gated buy failed');
-            return;
-        }
-        attachSessionContext(order, session);
-        order.liquidityWait = waitStr;
-        session.buyOrder = order;
-        session.pnl = computePnL(order, snapshot);
-        session.alerts.push({
-            timestamp: nowISO(),
-            type: 'buy_executed',
-            message: `Buy after ${waitStr} liquidity wait`,
-            data: { waitMs, liquidCount, totalCount },
-        });
-        await saveSession(session);
-        console.log(`  💰 Buy order placed: $${order.totalCost.toFixed(3)} [waited ${waitStr}]`);
     }, pollIntervalMs);
 }
 
@@ -733,7 +786,7 @@ export async function runMonitoringCycle(session) {
         session.alerts = [...(session.alerts || []), ...alerts];
         await saveSession(session);
         await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
-        for (const a of alerts) await dbInsertAlert({ sessionId: session.id, ...a });
+        await dbInsertAlertsBatch(alerts.map((a) => ({ sessionId: session.id, ...a })));
         return { snapshot, alerts };
     }
 
@@ -802,7 +855,8 @@ export async function runMonitoringCycle(session) {
                         for (const sold of sellResult.positions) {
                             const original = session.buyOrder.positions.find((p) => p.question === sold.question);
                             if (original) {
-                                original.soldAt = sold.sellPrice;
+                                original.soldAt = nowISO();
+                                original.sellPrice = sold.sellPrice;
                                 original.soldOrderId = sold.orderId;
                                 original.soldStatus = sold.status;
                             }
@@ -821,10 +875,12 @@ export async function runMonitoringCycle(session) {
         }
 
         // MONITOR/BUY: rebalance on forecast shift
-        if ((snapshot.phase === 'monitor' || snapshot.phase === 'buy') && !session.rebalanceExecuted) {
-            const totalShift = Math.abs(snapshot.forecastTempF - session.initialForecastTempF);
+        // Multi-rebalance: measures shift from last rebalance point (not just initial forecast)
+        if ((snapshot.phase === 'monitor' || snapshot.phase === 'buy') && session.buyOrder) {
+            const rebalanceRef = session.lastRebalanceForecastF ?? session.initialForecastTempF;
+            const totalShift = Math.abs(snapshot.forecastTempF - rebalanceRef);
             if (totalShift >= _config.monitor.rebalanceThreshold) {
-                console.log(`\n  🔄 REBALANCE: forecast shifted ${totalShift.toFixed(1)}°F`);
+                console.log(`\n  🔄 REBALANCE: forecast shifted ${totalShift.toFixed(1)}°F from reference ${rebalanceRef.toFixed(1)}°F`);
 
                 const currentRangeQuestions = new Set(
                     [snapshot.target?.question, snapshot.below?.question, snapshot.above?.question].filter(Boolean),
@@ -860,11 +916,12 @@ export async function runMonitoringCycle(session) {
                     if (sellResult) {
                         if (!session.sellOrders) session.sellOrders = [];
                         session.sellOrders.push(sellResult);
-                        session.rebalanceExecuted = true;
+                        session.lastRebalanceForecastF = snapshot.forecastTempF;
                         for (const sold of sellResult.positions) {
                             const original = session.buyOrder.positions.find((p) => p.question === sold.question);
                             if (original) {
-                                original.soldAt = sold.sellPrice;
+                                original.soldAt = nowISO();
+                                original.sellPrice = sold.sellPrice;
                                 original.soldOrderId = sold.orderId;
                                 original.soldStatus = sold.status;
                             }
@@ -872,8 +929,8 @@ export async function runMonitoringCycle(session) {
                         alerts.push({
                             timestamp: nowISO(),
                             type: 'rebalance_sell',
-                            message: `Sold ${positionsToSell.length} out-of-range positions`,
-                            data: { shift: totalShift, proceeds: sellResult.totalProceeds },
+                            message: `Sold ${positionsToSell.length} out-of-range positions (shift: ${totalShift.toFixed(1)}°F from ${rebalanceRef.toFixed(1)}°F)`,
+                            data: { shift: totalShift, rebalanceRef, proceeds: sellResult.totalProceeds },
                         });
                     }
                 }
@@ -939,7 +996,7 @@ export async function runMonitoringCycle(session) {
         session.id = upsertResult.existingId;
     }
     await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
-    for (const a of alerts) await dbInsertAlert({ sessionId: session.id, ...a });
+    await dbInsertAlertsBatch(alerts.map((a) => ({ sessionId: session.id, ...a })));
 
     return { snapshot, alerts, resolution };
 }

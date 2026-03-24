@@ -13,6 +13,7 @@ import {
     positionsInsertSchema,
     positionSoldSchema,
     positionRedeemedSchema,
+    positionUpdateSchema,
     snapshotSchema,
     alertSchema,
     spendSchema,
@@ -165,6 +166,52 @@ describe('positionSoldSchema', () => {
     it('rejects missing sellPrice', () => {
         const { error } = validate(positionSoldSchema, { soldAt: '2026-03-23T14:30:00Z' });
         expect(error).toContain('sellPrice');
+    });
+});
+
+// ── Position Update Schema ──────────────────────────────────────────
+
+describe('positionUpdateSchema', () => {
+    it('accepts valid partial update', () => {
+        const { data, error } = validate(positionUpdateSchema, {
+            status: 'filled',
+            fillPrice: 0.52,
+        });
+        expect(error).toBeNull();
+        expect(data.status).toBe('filled');
+        expect(data.fillPrice).toBe(0.52);
+    });
+
+    it('accepts sell-related fields', () => {
+        const { data, error } = validate(positionUpdateSchema, {
+            sellPrice: 0.45,
+            soldAt: '2026-03-23T14:30:00Z',
+            sellOrderId: 'order-abc',
+        });
+        expect(error).toBeNull();
+        expect(data.sellPrice).toBe(0.45);
+    });
+
+    it('rejects empty update', () => {
+        const { error } = validate(positionUpdateSchema, {});
+        expect(error).toContain('At least one field');
+    });
+
+    it('strips unknown fields (SQL injection attempt)', () => {
+        const { data, error } = validate(positionUpdateSchema, {
+            status: 'filled',
+            'id = 1; DROP TABLE sessions --': 'x',
+        });
+        // Zod .object() with defined keys strips unrecognized keys by default
+        // The dangerous key is not in the schema, so it won't be in data
+        expect(error).toBeNull();
+        expect(data.status).toBe('filled');
+        expect(data).not.toHaveProperty('id = 1; DROP TABLE sessions --');
+    });
+
+    it('rejects invalid status enum', () => {
+        const { error } = validate(positionUpdateSchema, { status: 'hacked' });
+        expect(error).toContain('status');
     });
 });
 

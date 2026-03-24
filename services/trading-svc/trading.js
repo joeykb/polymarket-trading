@@ -32,7 +32,7 @@ import { getConfig, getClient } from './client.js';
 
 export async function getWalletBalance() {
     const config = getConfig();
-    if (!config.privateKey || config.mode === 'disabled') return null;
+    if (!process.env.POLYMARKET_PRIVATE_KEY || config.mode === 'disabled') return null;
 
     try {
         const _client = await getClient();

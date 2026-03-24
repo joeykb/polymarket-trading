@@ -29,6 +29,8 @@ function getSessionFilePath(date) {
 // Delta format: { _deltaCompressed: true, base: {...}, deltas: [{...changed fields...}] }
 // This reduces 16MB files to ~1-2MB.
 
+import deepEqual from 'fast-deep-equal';
+
 export function compressSnapshots(snapshots) {
     if (!snapshots || snapshots.length === 0) return snapshots;
     const base = snapshots[0];
@@ -37,7 +39,7 @@ export function compressSnapshots(snapshots) {
         const delta = {};
         let hasChanges = false;
         for (const key of Object.keys(snapshots[i])) {
-            if (JSON.stringify(snapshots[i][key]) !== JSON.stringify(snapshots[i - 1][key])) {
+            if (!deepEqual(snapshots[i][key], snapshots[i - 1][key])) {
                 delta[key] = snapshots[i][key];
                 hasChanges = true;
             }

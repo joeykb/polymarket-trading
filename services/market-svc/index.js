@@ -246,6 +246,26 @@ function selectRanges(forecastTempF, ranges, targetDate) {
 
 // (HTTP helpers now imported from shared/httpServer.js)
 
+// ── TTL Cache ───────────────────────────────────────────────────────────
+// Market data changes slowly; avoid redundant Gamma API calls.
+
+const _cache = new Map();
+
+async function cached(key, ttlMs, fetchFn) {
+    const entry = _cache.get(key);
+    if (entry && Date.now() - entry.ts < ttlMs) return entry.data;
+    try {
+        const data = await fetchFn();
+        _cache.set(key, { data, ts: Date.now() });
+        return data;
+    } catch (err) {
+        _cache.delete(key); // don't cache errors
+        throw err;
+    }
+}
+
+const MARKET_TTL = 2 * 60 * 1000; // 2 min — ranges update slowly
+
 // ── Request Handler ─────────────────────────────────────────────────────
 
 async function handleRequest(req, res) {
@@ -260,13 +280,13 @@ async function handleRequest(req, res) {
 
         if (path === '/api/market') {
             if (!query.date) return errRes(res, 'date parameter required');
-            const event = await discoverMarket(query.date);
+            const event = await cached(`market:${query.date}`, MARKET_TTL, () => discoverMarket(query.date));
             return jsonRes(res, event);
         }
 
         if (path === '/api/ranges') {
             if (!query.date || !query.forecastF) return errRes(res, 'date and forecastF parameters required');
-            const event = await discoverMarket(query.date);
+            const event = await cached(`market:${query.date}`, MARKET_TTL, () => discoverMarket(query.date));
             const selection = selectRanges(parseFloat(query.forecastF), event.ranges, query.date);
             return jsonRes(res, { ...selection, eventId: event.id, eventTitle: event.title, closed: event.closed });
         }

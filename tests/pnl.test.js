@@ -141,14 +141,15 @@ describe('computePnL — CLOB bid priority', () => {
 // ── Sold Positions ──────────────────────────────────────────────────
 
 describe('computePnL — sold positions', () => {
-    it('uses sell price for sold positions', () => {
+    it('uses sellPrice for sold positions (ISO timestamp soldAt)', () => {
         const buyOrder = makeBuyOrder([
             {
                 label: 'target',
                 question: 'Between 66-67°F',
                 buyPrice: 0.3,
                 shares: 10,
-                soldAt: '0.45',
+                soldAt: '2026-03-23T14:30:00Z', // timestamp, NOT a price
+                sellPrice: 0.45,                 // actual fill price
                 soldStatus: 'placed',
             },
         ]);
@@ -163,14 +164,15 @@ describe('computePnL — sold positions', () => {
         expect(result.totalPnL).toBe(1.5);
     });
 
-    it('handles numeric soldAt value', () => {
+    it('handles sell_price (snake_case from DB)', () => {
         const buyOrder = makeBuyOrder([
             {
                 label: 'target',
                 question: 'Between 66-67°F',
                 buyPrice: 0.5,
                 shares: 5,
-                soldAt: 0.4,
+                sold_at: '2026-03-23T14:30:00Z',
+                sell_price: 0.4,
                 soldStatus: 'placed',
             },
         ]);
@@ -183,4 +185,24 @@ describe('computePnL — sold positions', () => {
         // Loss: (0.40 - 0.50) * 5 = -0.50
         expect(result.totalPnL).toBe(-0.5);
     });
+
+    it('does not mark as sold when soldAt is present but no sellPrice', () => {
+        const buyOrder = makeBuyOrder([
+            {
+                label: 'target',
+                question: 'Between 66-67°F',
+                buyPrice: 0.3,
+                shares: 10,
+                soldAt: '2026-03-23T14:30:00Z',
+                // No sellPrice, no soldStatus — should NOT be treated as sold
+            },
+        ]);
+        const snapshot = makeSnapshot({ yesPrice: 0.5 });
+
+        const result = computePnL(buyOrder, snapshot);
+
+        expect(result.positions[0].sold).toBe(false);
+        expect(result.positions[0].currentPrice).toBe(0.5); // uses snapshot
+    });
 });
+

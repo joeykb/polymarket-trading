@@ -54,7 +54,7 @@ async function handleRequest(req, res) {
                 res,
                 healthResponse('trading-svc', {
                     mode: cfg.mode,
-                    walletConfigured: !!cfg.privateKey,
+                    walletConfigured: !!process.env.POLYMARKET_PRIVATE_KEY,
                     dependencies: deps,
                 }),
             );
@@ -117,7 +117,7 @@ const server = http.createServer(requestLogger(log, handleRequest));
 server.listen(PORT, async () => {
     await refreshTradingConfig();
     const cfg = getConfig();
-    log.info('started', { port: PORT, mode: cfg.mode, wallet: cfg.privateKey ? 'configured' : 'missing', dataSvc: DATA_SVC_URL });
+    log.info('started', { port: PORT, mode: cfg.mode, wallet: process.env.POLYMARKET_PRIVATE_KEY ? 'configured' : 'missing', dataSvc: DATA_SVC_URL });
 });
 
 process.on('SIGINT', () => {

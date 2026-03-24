@@ -59,17 +59,30 @@ export function upsertSession({
 }
 
 /**
- * Update session status/phase
+ * Update session status/phase.
+ * Uses an explicit column whitelist to prevent SQL injection.
  */
+const ALLOWED_SESSION_UPDATE_FIELDS = {
+    status: 'status',
+    phase: 'phase',
+    initialForecastTemp: 'initial_forecast_temp',
+    initialTargetRange: 'initial_target_range',
+    forecastSource: 'forecast_source',
+    intervalMinutes: 'interval_minutes',
+    rebalanceThreshold: 'rebalance_threshold',
+};
+
 export function updateSession(id, updates) {
     const db = getDb();
     const fields = [];
     const values = [];
     for (const [key, val] of Object.entries(updates)) {
-        const col = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase → snake_case
+        const col = ALLOWED_SESSION_UPDATE_FIELDS[key];
+        if (!col) continue; // silently ignore unknown fields
         fields.push(`${col} = ?`);
         values.push(val);
     }
+    if (fields.length === 0) return { changes: 0 };
     fields.push("updated_at = datetime('now')");
     values.push(id);
     return db.prepare(`UPDATE sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
@@ -286,17 +299,48 @@ export function getActivePositions(targetDate) {
 }
 
 /**
- * Update position status (sold, redeemed, etc.)
+ * Update position status (sold, redeemed, etc.).
+ * Uses an explicit column whitelist to prevent SQL injection.
  */
+const ALLOWED_POSITION_UPDATE_FIELDS = {
+    status: 'status',
+    label: 'label',
+    orderId: 'order_id',
+    order_id: 'order_id',
+    tokenId: 'token_id',
+    token_id: 'token_id',
+    price: 'price',
+    shares: 'shares',
+    fillPrice: 'fill_price',
+    fill_price: 'fill_price',
+    fillShares: 'fill_shares',
+    fill_shares: 'fill_shares',
+    error: 'error',
+    soldAt: 'sold_at',
+    sold_at: 'sold_at',
+    sellPrice: 'sell_price',
+    sell_price: 'sell_price',
+    sellOrderId: 'sell_order_id',
+    sell_order_id: 'sell_order_id',
+    redeemedAt: 'redeemed_at',
+    redeemed_at: 'redeemed_at',
+    redeemedValue: 'redeemed_value',
+    redeemed_value: 'redeemed_value',
+    redeemedTx: 'redeemed_tx',
+    redeemed_tx: 'redeemed_tx',
+};
+
 export function updatePosition(id, updates) {
     const db = getDb();
     const fields = [];
     const values = [];
     for (const [key, val] of Object.entries(updates)) {
-        const col = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+        const col = ALLOWED_POSITION_UPDATE_FIELDS[key];
+        if (!col) continue; // silently ignore unknown fields
         fields.push(`${col} = ?`);
         values.push(val);
     }
+    if (fields.length === 0) return { changes: 0 };
     values.push(id);
     return db.prepare(`UPDATE positions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
 }
@@ -407,6 +451,21 @@ export function insertAlert({ sessionId, timestamp, type, message, data }) {
     `,
         )
         .run(sessionId, timestamp, type, message, data ? JSON.stringify(data) : null);
+}
+
+/**
+ * Insert multiple alerts in a single transaction (batch)
+ */
+export function insertAlertsBatch(alerts) {
+    if (!alerts || alerts.length === 0) return;
+    const db = getDb();
+    const stmt = db.prepare(`INSERT INTO alerts (session_id, timestamp, type, message, data) VALUES (?, ?, ?, ?, ?)`);
+    const insertMany = db.transaction((items) => {
+        for (const a of items) {
+            stmt.run(a.sessionId, a.timestamp, a.type, a.message, a.data ? JSON.stringify(a.data) : null);
+        }
+    });
+    insertMany(alerts);
 }
 
 // ── Analytics ────────────────────────────────────────────────────────────

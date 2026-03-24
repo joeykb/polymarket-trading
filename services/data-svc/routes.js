@@ -21,6 +21,7 @@ import {
     positionsInsertSchema,
     positionSoldSchema,
     positionRedeemedSchema,
+    positionUpdateSchema,
     snapshotSchema,
     alertSchema,
     spendSchema,
@@ -38,6 +39,29 @@ import {
     loadConfigOverrides,
     saveConfigOverrides,
 } from './storage.js';
+
+/**
+ * FK constraint recovery helper.
+ * If an insert fails with a FOREIGN KEY error (stale sessionId after pod restart),
+ * looks up the existing session by market+date and retries with the correct ID.
+ * Returns null on success, or an error message string on failure.
+ */
+function insertWithFkRecovery(insertFn, body) {
+    try {
+        insertFn();
+        return null;
+    } catch (err) {
+        if (err.message.includes('FOREIGN KEY') && body.sessionId) {
+            const existing = queries.getSession('nyc', body.targetDate || '');
+            if (existing) {
+                body.sessionId = existing.id;
+                insertFn();
+                return null;
+            }
+        }
+        return err.message;
+    }
+}
 
 /**
  * Main request handler — dispatches to route-specific logic.
@@ -174,7 +198,9 @@ export async function handleRequest(req, res) {
             }
             if (m.match && method === 'PATCH') {
                 const body = await readBody(req);
-                queries.updatePosition(parseInt(m.params.id), body);
+                const { data, error: validationError } = validate(positionUpdateSchema, body);
+                if (validationError) return error(res, validationError, 400);
+                queries.updatePosition(parseInt(m.params.id), data);
                 return json(res, { updated: true });
             }
         }
@@ -212,21 +238,8 @@ export async function handleRequest(req, res) {
             const { data: validatedBody, error: validationError } = validate(snapshotSchema, body);
             if (validationError) return error(res, validationError, 400);
             body = validatedBody;
-            try {
-                queries.insertSnapshot(body);
-            } catch (err) {
-                if (err.message.includes('FOREIGN KEY') && body.sessionId) {
-                    const existing = queries.getSession('nyc', body.targetDate || '');
-                    if (existing) {
-                        body.sessionId = existing.id;
-                        queries.insertSnapshot(body);
-                    } else {
-                        return error(res, err.message, 409);
-                    }
-                } else {
-                    return error(res, err.message, 409);
-                }
-            }
+            const fkErr = insertWithFkRecovery(() => queries.insertSnapshot(body), body);
+            if (fkErr) return error(res, fkErr, 409);
             return json(res, { inserted: true }, 201);
         }
 
@@ -244,14 +257,29 @@ export async function handleRequest(req, res) {
             const { data: validatedAlert, error: validationError } = validate(alertSchema, body);
             if (validationError) return error(res, validationError, 400);
             body = validatedAlert;
+            const fkErr = insertWithFkRecovery(() => queries.insertAlert(body), body);
+            if (fkErr) return error(res, fkErr, 409);
+            return json(res, { inserted: true }, 201);
+        }
+
+        if (pathname === '/api/alerts/batch' && method === 'POST') {
+            const body = await readBody(req);
+            if (!Array.isArray(body.alerts) || body.alerts.length === 0) {
+                return error(res, 'alerts array is required and must be non-empty', 400);
+            }
+            // Validate each alert
+            for (const a of body.alerts) {
+                const { error: validationError } = validate(alertSchema, a);
+                if (validationError) return error(res, validationError, 400);
+            }
             try {
-                queries.insertAlert(body);
+                queries.insertAlertsBatch(body.alerts);
             } catch (err) {
-                if (err.message.includes('FOREIGN KEY') && body.sessionId) {
-                    const existing = queries.getSession('nyc', body.targetDate || '');
+                if (err.message.includes('FOREIGN KEY') && body.alerts[0]?.sessionId) {
+                    const existing = queries.getSession('nyc', body.alerts[0].targetDate || '');
                     if (existing) {
-                        body.sessionId = existing.id;
-                        queries.insertAlert(body);
+                        for (const a of body.alerts) a.sessionId = existing.id;
+                        queries.insertAlertsBatch(body.alerts);
                     } else {
                         return error(res, err.message, 409);
                     }
@@ -259,7 +287,7 @@ export async function handleRequest(req, res) {
                     return error(res, err.message, 409);
                 }
             }
-            return json(res, { inserted: true }, 201);
+            return json(res, { inserted: body.alerts.length }, 201);
         }
 
         // ── Spend Tracking ──────────────────────────────
