@@ -45,13 +45,23 @@ export const CONFIG_SCHEMA = {
     'monitor.rebalanceThreshold': {
         key: 'REBALANCE_THRESHOLD',
         default: 3.0,
-        description: '°F change to trigger auto-sell of out-of-range strikes',
+        description: '°F change to trigger rebalance at T+3+. T+1 uses 1°F and T+2 uses 2°F (fixed).',
     },
     'monitor.buyHourEST': { key: 'BUY_HOUR_EST', default: 9.5, description: 'Hour (ET, decimal) to trigger buy (9.5 = 9:30am)' },
     'monitor.evThreshold': {
         key: 'EV_THRESHOLD',
         default: 0.05,
-        description: 'Min expected value ($) to place a buy. EV = (confidence × $1) - cost. Set to 0 to disable.',
+        description: 'Min expected value ($) to place a buy. EV = (confidence × $1) - totalDeployedCost. Set to 0 to disable.',
+    },
+    'monitor.maxEntryPrice': {
+        key: 'MAX_ENTRY_PRICE',
+        default: 0.40,
+        description: 'Max target range price ($) to consider for entry. Prices above this are skipped.',
+    },
+    'monitor.maxHedgeCost': {
+        key: 'MAX_HEDGE_COST',
+        default: 0.10,
+        description: 'Max price ($) for a hedge range in medium-tier trades. Above this, hedge is skipped.',
     },
     'monitor.stopLossEnabled': {
         key: 'STOP_LOSS_ENABLED',
@@ -92,8 +102,8 @@ export const CONFIG_SCHEMA = {
     },
     'liquidity.requireAllLiquid': {
         key: 'LIQUIDITY_ALL_REQUIRED',
-        default: 1,
-        description: 'Require ALL tokens liquid or ANY',
+        default: 0,
+        description: 'Require ALL tokens liquid (1) or ANY (0). Set to 0 for tier-filtered trades.',
         choices: [0, 1],
     },
     'liquidity.spreadThreshold': {
@@ -221,6 +231,9 @@ export function buildFlatConfig(overrides = {}) {
             forecastShiftThreshold: 2,
             priceSpikeThreshold: 0.05,
             buyHourEST: 9.5,
+            evThreshold: 0.05,
+            maxEntryPrice: 0.40,
+            maxHedgeCost: 0.10,
             stopLossEnabled: false,
             stopLossPct: 50,
             stopLossFloor: -1.5,

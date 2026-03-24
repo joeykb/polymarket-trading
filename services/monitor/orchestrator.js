@@ -405,6 +405,8 @@ function startLiquidityGatedBuy(session, snapshot) {
                 session.trend,
                 {
                     evThreshold: _config.monitor.evThreshold ?? 0.05,
+                    maxEntryPrice: _config.monitor.maxEntryPrice ?? 0.40,
+                    maxHedgeCost: _config.monitor.maxHedgeCost ?? 0.10,
                 },
                 session.trajectory,
             );
@@ -677,6 +679,8 @@ export async function runMonitoringCycle(session) {
             session.trend,
             {
                 evThreshold: _config.monitor.evThreshold ?? 0.05,
+                maxEntryPrice: _config.monitor.maxEntryPrice ?? 0.40,
+                maxHedgeCost: _config.monitor.maxHedgeCost ?? 0.10,
             },
             session.trajectory,
         );
@@ -785,11 +789,14 @@ export async function runMonitoringCycle(session) {
 
         // MONITOR/BUY: rebalance on forecast shift
         // Multi-rebalance: measures shift from last rebalance point (not just initial forecast)
+        // Dynamic threshold: tighter closer to target (T+1=1°F, T+2=2°F, T+3+=3°F)
         if ((snapshot.phase === 'monitor' || snapshot.phase === 'buy') && session.buyOrder) {
             const rebalanceRef = session.lastRebalanceForecastF ?? session.initialForecastTempF;
             const totalShift = Math.abs(snapshot.forecastTempF - rebalanceRef);
-            if (totalShift >= _config.monitor.rebalanceThreshold) {
-                console.log(`\n  🔄 REBALANCE: forecast shifted ${totalShift.toFixed(1)}°F from reference ${rebalanceRef.toFixed(1)}°F`);
+            const daysOut = snapshot.daysUntilTarget ?? 2;
+            const dynamicThreshold = daysOut <= 1 ? 1.0 : daysOut === 2 ? 2.0 : (_config.monitor.rebalanceThreshold || 3);
+            if (totalShift >= dynamicThreshold) {
+                console.log(`\n  🔄 REBALANCE: forecast shifted ${totalShift.toFixed(1)}°F from reference ${rebalanceRef.toFixed(1)}°F (threshold: ${dynamicThreshold}°F for T+${daysOut})`);
 
                 const currentRangeQuestions = new Set(
                     [snapshot.target?.question, snapshot.below?.question, snapshot.above?.question].filter(Boolean),

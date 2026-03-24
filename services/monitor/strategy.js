@@ -222,6 +222,13 @@ export function computeEdge(snapshot, trend, config = {}, trajectory = null) {
         return result;
     }
 
+    // Hard cap: never buy a target priced above $0.40 — risk:reward is terrible
+    const maxEntryPrice = config.maxEntryPrice ?? 0.40;
+    if (targetCost > maxEntryPrice) {
+        result.reason = `Target price $${targetCost.toFixed(2)} exceeds $${maxEntryPrice.toFixed(2)} max entry cap`;
+        return result;
+    }
+
     // ── Build confidence from independent signals ────────────────────
 
     let confidence = 0.45; // base — slightly below coin-flip
@@ -241,7 +248,7 @@ export function computeEdge(snapshot, trend, config = {}, trajectory = null) {
 
     // Signal 3: Days to target (closer = more accurate forecasts)
     if (daysOut <= 1) confidence += 0.12;
-    else if (daysOut === 2) confidence += 0.05;
+    else if (daysOut === 2) confidence += 0.08;
     else if (daysOut >= 4) confidence -= 0.1;
     else if (daysOut >= 3) confidence -= 0.05;
 
@@ -293,41 +300,62 @@ export function computeEdge(snapshot, trend, config = {}, trajectory = null) {
     confidence = Math.max(0.15, Math.min(0.85, confidence));
     result.confidence = parseFloat(confidence.toFixed(2));
 
-    // ── Expected value ──────────────────────────────────────────────
+    // ── Position sizing tier (determines capital deployment) ─────────
+    //
+    // Tier is determined BEFORE EV so we can include hedge costs in the
+    // expected-value calculation. This is critical: the old formula used
+    // only targetCost, but medium-tier deploys target + hedge.
 
-    const ev = confidence * 1.0 - targetCost;
-    result.ev = parseFloat(ev.toFixed(4));
+    const maxHedgeCost = config.maxHedgeCost ?? 0.10;
 
-    // ── Position sizing tier ────────────────────────────────────────
-
-    if (confidence >= 0.55) {
+    if (confidence >= 0.50) {
         result.tier = 'high';
         result.rangesToBuy = ['target']; // target only — max ROI
-    } else if (confidence >= 0.4) {
+    } else if (confidence >= 0.40) {
         result.tier = 'medium';
-        // Pick target + the cheaper adjacent hedge
+        // Only add a hedge if it's truly cheap (≤ $0.10 = lottery ticket)
         const belowCost = snapshot.below?.yesPrice ?? Infinity;
         const aboveCost = snapshot.above?.yesPrice ?? Infinity;
-        if (belowCost <= aboveCost && snapshot.below) {
-            result.rangesToBuy = ['target', 'below'];
-        } else if (snapshot.above) {
-            result.rangesToBuy = ['target', 'above'];
+        const cheaperHedge = belowCost <= aboveCost ? 'below' : 'above';
+        const cheaperCost = Math.min(belowCost, aboveCost);
+        if (cheaperCost <= maxHedgeCost && snapshot[cheaperHedge]) {
+            result.rangesToBuy = ['target', cheaperHedge];
         } else {
-            result.rangesToBuy = ['target'];
+            result.rangesToBuy = ['target']; // hedge too expensive, skip it
         }
     } else {
+        // Low confidence = SKIP entirely. Buying all 3 adjacent ranges
+        // sums to ~$0.85-$0.96, guaranteeing near-zero profit.
         result.tier = 'low';
-        result.rangesToBuy = ['target', 'below', 'above']; // full coverage
+        result.action = 'skip';
+        result.reason = `Confidence ${(confidence * 100).toFixed(0)}% below 40% minimum — skipping`;
+        return result;
     }
+
+    // ── Expected value (uses TOTAL deployed capital) ─────────────────
+    //
+    // EV = (confidence × payout) − totalCostOfAllRangesBeingBought
+    // Previously this only subtracted targetCost, which hid the true
+    // cost of medium-tier trades that include a hedge.
+
+    let totalDeployedCost = targetCost;
+    for (const label of result.rangesToBuy) {
+        if (label === 'target') continue; // already counted
+        totalDeployedCost += snapshot[label]?.yesPrice ?? 0;
+    }
+
+    const ev = confidence * 1.0 - totalDeployedCost;
+    result.ev = parseFloat(ev.toFixed(4));
+    result.totalDeployedCost = parseFloat(totalDeployedCost.toFixed(4));
 
     // ── Action decision ─────────────────────────────────────────────
 
     if (ev > evThreshold) {
         result.action = 'buy';
-        result.reason = `EV $${ev.toFixed(3)} at ${(confidence * 100).toFixed(0)}% confidence (tier: ${result.tier})`;
+        result.reason = `EV $${ev.toFixed(3)} on $${totalDeployedCost.toFixed(2)} deployed at ${(confidence * 100).toFixed(0)}% confidence (tier: ${result.tier})`;
     } else {
         result.action = 'skip';
-        result.reason = `EV $${ev.toFixed(3)} below $${evThreshold.toFixed(2)} threshold (${(confidence * 100).toFixed(0)}% confidence)`;
+        result.reason = `EV $${ev.toFixed(3)} below $${evThreshold.toFixed(2)} threshold ($${totalDeployedCost.toFixed(2)} deployed, ${(confidence * 100).toFixed(0)}% confidence)`;
     }
 
     return result;

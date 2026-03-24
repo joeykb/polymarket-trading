@@ -383,26 +383,27 @@ describe('computeEdge', () => {
         expect(result.action).toBe('buy');
         expect(result.tier).toBe('high');
         expect(result.rangesToBuy).toEqual(['target']);
-        expect(result.confidence).toBeGreaterThanOrEqual(0.55);
+        expect(result.confidence).toBeGreaterThanOrEqual(0.50);
         expect(result.ev).toBeGreaterThan(0.05);
     });
 
-    it('returns buy with low tier for bad conditions', () => {
+    it('skips on low confidence instead of buying all 3 ranges', () => {
         // T+4, diverging, high vol, neutral, 1 point
         // base 0.45 - 0.12 (diverging) - 0.08 (vol>3) - 0.10 (T+4) + 0 (neutral) - 0.05 (1pt) = 0.10 -> clamped to 0.15
-        // EV = 0.15 - 0.05 = 0.10 > 0.05 threshold
+        // Confidence 15% < 40% minimum -> SKIP (no more "low tier" all-3-range trades)
         const snap = makeSnapshot(0.05, 4);
         const result = computeEdge(snap, badTrend);
+        expect(result.action).toBe('skip');
         expect(result.tier).toBe('low');
-        expect(result.rangesToBuy).toEqual(['target', 'below', 'above']);
+        expect(result.reason).toContain('below 40%');
     });
 
-    it('skips when EV is below threshold', () => {
-        // Expensive target ($0.80) + bad trend = negative EV
+    it('skips when target exceeds max entry price cap', () => {
+        // $0.80 target exceeds $0.40 max entry cap (blocked before EV calculation)
         const snap = makeSnapshot(0.8, 4);
         const result = computeEdge(snap, badTrend);
         expect(result.action).toBe('skip');
-        expect(result.ev).toBeLessThanOrEqual(0.05);
+        expect(result.reason).toContain('max entry cap');
     });
 
     it('respects custom evThreshold', () => {
@@ -413,23 +414,36 @@ describe('computeEdge', () => {
         expect(result.action).toBe('skip');
 
         // With threshold of 0, should buy
-        const result2 = computeEdge(snap, neutral, { evThreshold: 0 });
+        const result2 = computeEdge(snap, neutral, { evThreshold: 0, maxEntryPrice: 0.5 });
         expect(result2.action).toBe('buy');
     });
 
-    it('medium tier picks cheaper hedge', () => {
-        // Force medium tier: confidence around 0.45-0.54
+    it('medium tier only includes hedge if cheap enough', () => {
+        // Force medium tier: confidence around 0.40-0.49
         const neutral = { direction: 'neutral', convergence: 'stable', volatility: 1.5, points: [1, 2, 3] };
+        // above at $0.05 is <= $0.10 hedge cap, should be included
         const snap = makeSnapshot(0.25, 2, {
             below: { question: 'below', yesPrice: 0.2 },
             above: { question: 'above', yesPrice: 0.05 },
         });
         const result = computeEdge(snap, neutral);
         if (result.tier === 'medium') {
-            // Should pick the cheaper hedge (above at $0.05)
             expect(result.rangesToBuy).toContain('target');
-            expect(result.rangesToBuy).toContain('above');
-            expect(result.rangesToBuy).not.toContain('below');
+            expect(result.rangesToBuy).toContain('above'); // $0.05 <= $0.10 cap
+            expect(result.rangesToBuy).not.toContain('below'); // $0.20 > $0.10 cap
+        }
+    });
+
+    it('medium tier skips hedge if too expensive', () => {
+        // Both hedges above $0.10 cap -> target only even at medium tier
+        const neutral = { direction: 'neutral', convergence: 'stable', volatility: 1.5, points: [1, 2, 3] };
+        const snap = makeSnapshot(0.25, 2, {
+            below: { question: 'below', yesPrice: 0.20 },
+            above: { question: 'above', yesPrice: 0.15 },
+        });
+        const result = computeEdge(snap, neutral);
+        if (result.tier === 'medium') {
+            expect(result.rangesToBuy).toEqual(['target']);
         }
     });
 
@@ -447,10 +461,11 @@ describe('computeEdge', () => {
         const r1 = computeEdge(snap1, goodTrend);
         expect(r1.confidence).toBeLessThanOrEqual(0.85);
 
-        // Worst case: should not go below 0.15
+        // Worst case: should not go below 0.15 (but low confidence now skips)
         const snap2 = makeSnapshot(0.1, 5);
         const r2 = computeEdge(snap2, badTrend);
         expect(r2.confidence).toBeGreaterThanOrEqual(0.15);
+        expect(r2.action).toBe('skip'); // below 40% minimum
     });
 
     it('includes reason in result', () => {
@@ -469,6 +484,31 @@ describe('computeEdge', () => {
         const r1 = computeEdge(snap1, goodTrend);
         const r4 = computeEdge(snap4, badTrend);
         expect(r1.confidence).toBeGreaterThan(r4.confidence);
+    });
+
+    it('skips when target exceeds custom maxEntryPrice', () => {
+        const snap = makeSnapshot(0.35, 2);
+        const result = computeEdge(snap, goodTrend, { maxEntryPrice: 0.30 });
+        expect(result.action).toBe('skip');
+        expect(result.reason).toContain('max entry cap');
+    });
+
+    it('includes totalDeployedCost in result', () => {
+        const snap = makeSnapshot(0.2, 2, {
+            below: { question: 'below', yesPrice: 0.05 },
+            above: { question: 'above', yesPrice: 0.08 },
+        });
+        const neutral = { direction: 'neutral', convergence: 'stable', volatility: 1.5, points: [1, 2, 3] };
+        const result = computeEdge(snap, neutral);
+        expect(result.totalDeployedCost).toBeDefined();
+        // If target-only, deployed cost = target price
+        if (result.rangesToBuy.length === 1) {
+            expect(result.totalDeployedCost).toBe(0.2);
+        }
+        // If target + hedge, deployed cost includes hedge
+        if (result.rangesToBuy.length === 2) {
+            expect(result.totalDeployedCost).toBeGreaterThan(0.2);
+        }
     });
 });
 
@@ -577,6 +617,8 @@ describe('analyzeTrajectory', () => {
 
         const rStable = computeEdge(snap, trend, {}, stableTrajectory);
         const rVolatile = computeEdge(snap, trend, {}, volatileTrajectory);
+        // Volatile trajectory should have lower confidence
+        // (volatile may skip due to <40% confidence, but we can still compare)
         expect(rStable.confidence).toBeGreaterThan(rVolatile.confidence);
     });
 });

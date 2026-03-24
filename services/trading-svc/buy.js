@@ -183,7 +183,7 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
                 tickSize,
                 negRisk,
             },
-            OrderType.GTC,
+            OrderType.FOK, // Fill-or-Kill: immediate fill or clean rejection in illiquid markets
         );
 
         console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
@@ -218,6 +218,12 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             verified: fill.verified,
         });
 
+        // Track slippage: delta between ask price at decision time and actual fill
+        const slippage = parseFloat((actualPrice - price).toFixed(4)); // positive = paid more
+        if (slippage !== 0) {
+            console.log(`  📉 Slippage: ${slippage > 0 ? '+' : ''}$${slippage.toFixed(4)} (asked $${price.toFixed(4)}, filled $${actualPrice.toFixed(4)})`);
+        }
+
         return {
             success: true,
             dryRun: false,
@@ -228,6 +234,8 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             cost: actualCost,
             tokenId,
             verified: fill.verified,
+            slippage,
+            askPriceAtDecision: price,
         };
     } catch (err) {
         const detail = err.response?.data || err.data || '';

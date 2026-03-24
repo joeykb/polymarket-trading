@@ -46,7 +46,7 @@ export function getConfig() {
         minOrderValue: remote.minOrderValue ?? parseFloat(process.env.MIN_ORDER_VALUE || '1.05'),
         clobHost: process.env.CLOB_HOST || 'https://clob.polymarket.com',
         chainId: parseInt(process.env.CHAIN_ID || '137'),
-        maxSpreadPct: remote.maxSpreadPct ?? parseFloat(process.env.MAX_SPREAD_PCT || '0.4'),
+        maxSpreadPct: remote.maxSpreadPct ?? parseFloat(process.env.MAX_SPREAD_PCT || '0.2'),
         minAskDepth: remote.minAskDepth ?? parseFloat(process.env.MIN_ASK_DEPTH || '3'),
     };
 }
