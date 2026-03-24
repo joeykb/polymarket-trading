@@ -122,3 +122,55 @@ export function shouldPlaceBuy(session, snapshot, config = {}) {
 export function computePnL(buyOrder, snapshot, liquidityBids) {
     return _computePnLCore(buyOrder, snapshot, liquidityBids);
 }
+
+// ── Stop-Loss Guardrails ────────────────────────────────────────────────
+
+/**
+ * Check if current P&L breaches stop-loss thresholds.
+ *
+ * Two independent triggers (either one fires the stop-loss):
+ *   1. Percentage: totalPnL / totalCost <= -stopLossPct%
+ *   2. Absolute floor: totalPnL <= stopLossFloor
+ *
+ * @param {Object} session - Session with buyOrder and pnl
+ * @param {Object} snapshot - Current snapshot
+ * @param {Object} config - { stopLossEnabled, stopLossPct, stopLossFloor }
+ * @returns {{ triggered: boolean, reason: string|null, pnlPct: number, totalPnL: number }}
+ */
+export function checkStopLoss(session, snapshot, config = {}) {
+    const result = { triggered: false, reason: null, pnlPct: 0, totalPnL: 0 };
+
+    // Guard: disabled, no positions, already sold/completed, or resolve phase
+    if (!config.stopLossEnabled) return result;
+    if (!session.buyOrder || !session.pnl) return result;
+    if (session.stopLossExecuted) return result;
+    if (session.status === 'completed') return result;
+    if (snapshot.phase === 'resolve') return result; // Don't stop-loss on settle day
+
+    const totalCost = session.buyOrder.totalCost || 0;
+    const totalPnL = session.pnl.totalPnL ?? 0;
+    result.totalPnL = totalPnL;
+
+    if (totalCost <= 0) return result;
+
+    const pnlPct = (totalPnL / totalCost) * 100;
+    result.pnlPct = parseFloat(pnlPct.toFixed(1));
+
+    // Check percentage threshold (e.g., -50%)
+    const pctThreshold = -(config.stopLossPct || 50);
+    if (pnlPct <= pctThreshold) {
+        result.triggered = true;
+        result.reason = `P&L ${result.pnlPct}% breached -${config.stopLossPct || 50}% stop-loss threshold`;
+        return result;
+    }
+
+    // Check absolute floor (e.g., -$1.50)
+    const floor = config.stopLossFloor ?? -1.5;
+    if (totalPnL <= floor) {
+        result.triggered = true;
+        result.reason = `P&L $${totalPnL.toFixed(2)} breached $${floor.toFixed(2)} stop-loss floor`;
+        return result;
+    }
+
+    return result;
+}

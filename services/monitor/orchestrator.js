@@ -18,7 +18,7 @@ import { createClient } from '../../shared/httpClient.js';
 import { nowISO, getTodayET, getDateOffsetET, daysUntil, getPhase } from '../../shared/dates.js';
 import { takeSnapshot } from './snapshot.js';
 import { detectAlerts } from './alerts.js';
-import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL } from './strategy.js';
+import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss } from './strategy.js';
 
 // ── Service URLs (from shared config) ───────────────────────────────────
 
@@ -766,6 +766,67 @@ export async function runMonitoringCycle(session) {
             }
         }
         session.pnl = computePnL(session.buyOrder, snapshot, liquidityBids);
+
+        // ── Stop-Loss Check ─────────────────────────────────────────────
+        const stopLoss = checkStopLoss(session, snapshot, {
+            stopLossEnabled: _config.monitor.stopLossEnabled,
+            stopLossPct: _config.monitor.stopLossPct,
+            stopLossFloor: _config.monitor.stopLossFloor,
+        });
+        if (stopLoss.triggered) {
+            console.log(`\n  🛑 STOP-LOSS TRIGGERED: ${stopLoss.reason}`);
+            const positionsToSell = [];
+            for (const pos of session.buyOrder.positions) {
+                if (pos.status === 'failed' || pos.status === 'rejected' || pos.soldAt) continue;
+                let tokenId = pos.clobTokenId || pos.clobTokenIds?.[0] || pos.tokenId;
+                if (!tokenId) {
+                    for (const key of ['target', 'below', 'above']) {
+                        const snapRange = snapshot[key];
+                        if (snapRange && snapRange.question === pos.question && snapRange.clobTokenIds?.[0]) {
+                            tokenId = snapRange.clobTokenIds[0];
+                            pos.clobTokenIds = snapRange.clobTokenIds;
+                            break;
+                        }
+                    }
+                }
+                positionsToSell.push({
+                    label: pos.label,
+                    question: pos.question,
+                    clobTokenId: tokenId,
+                    conditionId: pos.conditionId,
+                    shares: pos.shares || 1,
+                });
+            }
+            if (positionsToSell.length > 0) {
+                const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
+                const sellResult = await executeSellOrder(positionsToSell, sellCtx);
+                if (sellResult) {
+                    if (!session.sellOrders) session.sellOrders = [];
+                    session.sellOrders.push(sellResult);
+                    session.stopLossExecuted = true;
+                    for (const sold of sellResult.positions) {
+                        const original = session.buyOrder.positions.find((p) => p.question === sold.question);
+                        if (original) {
+                            original.soldAt = nowISO();
+                            original.sellPrice = sold.sellPrice;
+                            original.soldOrderId = sold.orderId;
+                            original.soldStatus = sold.status;
+                        }
+                    }
+                    alerts.push({
+                        timestamp: nowISO(),
+                        type: 'stop_loss',
+                        message: `🛑 Stop-loss: sold ${positionsToSell.length} positions — ${stopLoss.reason}`,
+                        data: {
+                            pnlPct: stopLoss.pnlPct,
+                            totalPnL: stopLoss.totalPnL,
+                            proceeds: sellResult.totalProceeds,
+                            positionsSold: positionsToSell.length,
+                        },
+                    });
+                }
+            }
+        }
     }
 
     session.snapshots.push(snapshot);

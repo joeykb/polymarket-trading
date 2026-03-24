@@ -48,6 +48,22 @@ export const CONFIG_SCHEMA = {
         description: '°F change to trigger auto-sell of out-of-range strikes',
     },
     'monitor.buyHourEST': { key: 'BUY_HOUR_EST', default: 9.5, description: 'Hour (ET, decimal) to trigger buy (9.5 = 9:30am)' },
+    'monitor.stopLossEnabled': {
+        key: 'STOP_LOSS_ENABLED',
+        default: 0,
+        description: 'Enable automatic stop-loss sell when P&L drops below threshold',
+        choices: [0, 1],
+    },
+    'monitor.stopLossPct': {
+        key: 'STOP_LOSS_PCT',
+        default: 50,
+        description: 'Stop-loss trigger: sell all if P&L % drops below -N% (e.g. 50 = sell at -50%)',
+    },
+    'monitor.stopLossFloor': {
+        key: 'STOP_LOSS_FLOOR',
+        default: -1.5,
+        description: 'Stop-loss absolute floor: sell all if P&L drops below -$N (e.g. -1.5)',
+    },
 
     // ── Liquidity ────────────────────────────────────────────────────
     'liquidity.wsEnabled': {
@@ -194,7 +210,16 @@ export function buildAdminConfig(overrides = {}) {
  */
 export function buildFlatConfig(overrides = {}) {
     const defaults = {
-        monitor: { intervalMinutes: 15, rebalanceThreshold: 3, forecastShiftThreshold: 2, priceSpikeThreshold: 0.05, buyHourEST: 9.5 },
+        monitor: {
+            intervalMinutes: 15,
+            rebalanceThreshold: 3,
+            forecastShiftThreshold: 2,
+            priceSpikeThreshold: 0.05,
+            buyHourEST: 9.5,
+            stopLossEnabled: false,
+            stopLossPct: 50,
+            stopLossFloor: -1.5,
+        },
         liquidity: {
             wsEnabled: true,
             checkIntervalSecs: 30,

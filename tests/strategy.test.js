@@ -4,7 +4,7 @@
  * Covers: analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL } from '../services/monitor/strategy.js';
+import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss } from '../services/monitor/strategy.js';
 
 // ── analyzeTrend ────────────────────────────────────────────────────────
 
@@ -243,5 +243,86 @@ describe('computePnL (via strategy.js)', () => {
 
     it('returns null for null buyOrder', () => {
         expect(computePnL(null, {})).toBeNull();
+    });
+});
+
+// ── checkStopLoss ───────────────────────────────────────────────────────
+
+describe('checkStopLoss', () => {
+    const makeSession = (overrides = {}) => ({
+        buyOrder: { totalCost: 2.0, positions: [] },
+        pnl: { totalPnL: -0.5 },
+        status: 'active',
+        ...overrides,
+    });
+    const makeSnapshot = (overrides = {}) => ({ phase: 'monitor', ...overrides });
+    const enabledConfig = { stopLossEnabled: true, stopLossPct: 50, stopLossFloor: -1.5 };
+
+    it('returns not triggered when disabled', () => {
+        const result = checkStopLoss(makeSession(), makeSnapshot(), { stopLossEnabled: false });
+        expect(result.triggered).toBe(false);
+    });
+
+    it('returns not triggered when no buyOrder', () => {
+        const result = checkStopLoss(makeSession({ buyOrder: null }), makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(false);
+    });
+
+    it('returns not triggered when no pnl', () => {
+        const result = checkStopLoss(makeSession({ pnl: null }), makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(false);
+    });
+
+    it('returns not triggered when already executed', () => {
+        const result = checkStopLoss(makeSession({ stopLossExecuted: true }), makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(false);
+    });
+
+    it('returns not triggered when session completed', () => {
+        const result = checkStopLoss(makeSession({ status: 'completed' }), makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(false);
+    });
+
+    it('returns not triggered on resolve phase', () => {
+        const session = makeSession({ pnl: { totalPnL: -1.8 } });
+        const result = checkStopLoss(session, makeSnapshot({ phase: 'resolve' }), enabledConfig);
+        expect(result.triggered).toBe(false);
+    });
+
+    it('triggers on percentage threshold breach', () => {
+        // -1.2 / 2.0 = -60%, threshold is -50%
+        const session = makeSession({ pnl: { totalPnL: -1.2 } });
+        const result = checkStopLoss(session, makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(true);
+        expect(result.pnlPct).toBe(-60);
+        expect(result.reason).toContain('-50%');
+    });
+
+    it('triggers on absolute floor breach', () => {
+        // -1.6 < -1.5 floor, but -1.6 / 5.0 = -32% (under 50% threshold)
+        const session = makeSession({
+            buyOrder: { totalCost: 5.0, positions: [] },
+            pnl: { totalPnL: -1.6 },
+        });
+        const result = checkStopLoss(session, makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(true);
+        expect(result.reason).toContain('$-1.50');
+    });
+
+    it('does not trigger when within bounds', () => {
+        // -0.5 / 2.0 = -25%, above both thresholds
+        const session = makeSession({ pnl: { totalPnL: -0.5 } });
+        const result = checkStopLoss(session, makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(false);
+        expect(result.pnlPct).toBe(-25);
+    });
+
+    it('handles zero totalCost gracefully', () => {
+        const session = makeSession({
+            buyOrder: { totalCost: 0, positions: [] },
+            pnl: { totalPnL: -0.5 },
+        });
+        const result = checkStopLoss(session, makeSnapshot(), enabledConfig);
+        expect(result.triggered).toBe(false);
     });
 });
