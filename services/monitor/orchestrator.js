@@ -183,9 +183,11 @@ async function saveSession(session) {
 
 async function dbUpsertSession(data) {
     try {
-        await svcPost(DATA_SVC, '/api/db/sessions', data);
+        const result = await svcPost(DATA_SVC, '/api/db/sessions', data);
+        return result; // { upserted: true, existingId: ... }
     } catch (err) {
         console.warn(`  ⚠️  DB session upsert failed: ${err.message}`);
+        return null;
     }
 }
 
@@ -602,6 +604,15 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         }
 
         await saveSession(existing);
+        // Reconcile session ID with DB — the DB may hold a different ID from a prior pod lifecycle
+        try {
+            const dbSession = await svcGet(DATA_SVC, `/api/db/sessions/nyc/${targetDate}`);
+            if (dbSession && dbSession.id && dbSession.id !== existing.id) {
+                existing.id = dbSession.id;
+            }
+        } catch {
+            /* intentional: DB lookup best-effort */
+        }
         console.log(`  📋 Resuming session (${existing.snapshots.length} snapshots, phase: ${existing.phase})`);
         return existing;
     }
@@ -655,8 +666,8 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
 
     await saveSession(session);
 
-    // DB persist
-    await dbUpsertSession({
+    // DB persist — upsert returns existingId if session already existed
+    const upsertResult = await dbUpsertSession({
         id: session.id,
         marketId: 'nyc',
         targetDate,
@@ -668,6 +679,10 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
         intervalMinutes,
         rebalanceThreshold: _config.monitor.rebalanceThreshold,
     });
+    // If DB already had a session for this date, adopt its ID for FK integrity
+    if (upsertResult?.existingId && upsertResult.existingId !== session.id) {
+        session.id = upsertResult.existingId;
+    }
     await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
 
     return session;
@@ -892,10 +907,8 @@ export async function runMonitoringCycle(session) {
 
     await saveSession(session);
 
-    // DB writes
-    await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
-    for (const a of alerts) await dbInsertAlert({ sessionId: session.id, ...a });
-    await dbUpsertSession({
+    // DB writes — upsert first to resolve correct session ID for FK integrity
+    const upsertResult = await dbUpsertSession({
         id: session.id,
         marketId: 'nyc',
         targetDate: session.targetDate,
@@ -907,6 +920,11 @@ export async function runMonitoringCycle(session) {
         intervalMinutes: session.intervalMinutes,
         rebalanceThreshold: session.rebalanceThreshold,
     });
+    if (upsertResult?.existingId && upsertResult.existingId !== session.id) {
+        session.id = upsertResult.existingId;
+    }
+    await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+    for (const a of alerts) await dbInsertAlert({ sessionId: session.id, ...a });
 
     return { snapshot, alerts, resolution };
 }

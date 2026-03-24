@@ -332,6 +332,15 @@ export async function handleRequest(req, res) {
             }
         }
 
+        {
+            const m = matchRoute('/api/db/sessions/:marketId/:targetDate', pathname);
+            if (m.match && method === 'GET') {
+                const session = queries.getSession(m.params.marketId, m.params.targetDate);
+                if (!session) return error(res, 'Session not found', 404);
+                return json(res, session);
+            }
+        }
+
         // ── Restart Signal ──────────────────────────────
         if (pathname === '/api/restart-signal' && method === 'GET') {
             const signalPath = path.join(OUTPUT_DIR, '.restart-requested');
