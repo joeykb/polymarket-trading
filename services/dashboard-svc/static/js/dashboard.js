@@ -50,13 +50,14 @@ function _renderTradeGaugeInner(play) {
     // Scouting/tracking — no edge calc yet, show dim state
     if (phase === 'scout' || phase === 'track') {
         var phaseLabel = phase === 'scout' ? 'SCOUTING' : 'TRACKING';
-        var phaseColor = phase === 'scout' ? '#22d3ee' : '#c084fc';
-        var phaseBg = phase === 'scout' ? 'rgba(6,182,212,0.15)' : 'rgba(168,85,247,0.15)';
+        var phaseColor = phase === 'scout' ? '#22d3ee' : '#fbbf24';
+        var phaseBg = phase === 'scout' ? 'rgba(6,182,212,0.15)' : 'rgba(251,191,36,0.15)';
         // Show a low mercury based on days out (farther = colder)
         var daysOut = play.daysUntil || 3;
         var warmth = Math.max(5, Math.min(30, 35 - daysOut * 8));
+        var mercuryFill = phase === 'scout' ? '#22d3ee' : '#fbbf24';
         return '<div class="gauge-container">' +
-            _gaugeThermometerSVG(warmth, '#3b82f6', '#2a3550') +
+            _gaugeThermometerSVG(warmth, mercuryFill, '#2a3550') +
             '<div class="gauge-tier-label" style="background:' + phaseBg + ';color:' + phaseColor + ';">' + phaseLabel + '</div>' +
             '</div>';
     }
