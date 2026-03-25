@@ -294,7 +294,7 @@ async function main() {
                     console.log('  ├────────────┬──────────────┬───────────┬─────────────────┬────────────────────────────┬────────────┤');
                 }
             } catch (err) {
-                console.log(`  │ ${date} │ ❌ ERROR      │ ${err.message.slice(0, 50).padEnd(52)} │`);
+                console.log(`  │ ${date} │ ❌ ERROR      │ ${err.message.slice(0, 80).padEnd(52)} │`);
             }
         }
 

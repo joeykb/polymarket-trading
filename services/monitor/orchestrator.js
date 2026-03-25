@@ -194,8 +194,24 @@ async function dbUpsertSession(data) {
     }
 }
 
-async function dbInsertSnapshot(data) {
+async function dbInsertSnapshot(data, session) {
     try {
+        // If session was never successfully upserted to DB, retry now
+        if (session && !session._dbSessionReady) {
+            const retryResult = await dbUpsertSession({
+                id: session.id,
+                marketId: 'nyc',
+                targetDate: session.targetDate,
+                status: session.status,
+                phase: session.phase,
+                initialForecastTemp: session.initialForecastTempF,
+                initialTargetRange: session.initialTargetRange,
+                forecastSource: session.forecastSource,
+                intervalMinutes: parseInt(session.intervalMinutes) || 5,
+                rebalanceThreshold: parseFloat(session.rebalanceThreshold) || 3.0,
+            });
+            if (retryResult) session._dbSessionReady = true;
+        }
         await svcPost(DATA_SVC, '/api/snapshots', data);
     } catch (err) {
         console.warn(`  ⚠️  DB snapshot insert failed: ${err.message}`);
@@ -535,6 +551,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
             if (dbSession && dbSession.id && dbSession.id !== existing.id) {
                 existing.id = dbSession.id;
             }
+            existing._dbSessionReady = true;
         } catch {
             // Session not in DB — upsert it so snapshots/alerts have a valid FK target
             const upsertResult = await dbUpsertSession({
@@ -552,6 +569,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
             if (upsertResult?.existingId && upsertResult.existingId !== existing.id) {
                 existing.id = upsertResult.existingId;
             }
+            if (upsertResult) existing._dbSessionReady = true;
         }
         console.log(`  📋 Resuming session (${existing.snapshots.length} snapshots, phase: ${existing.phase})`);
         return existing;
@@ -623,7 +641,8 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
     if (upsertResult?.existingId && upsertResult.existingId !== session.id) {
         session.id = upsertResult.existingId;
     }
-    await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+    if (upsertResult) session._dbSessionReady = true;
+    await dbInsertSnapshot({ sessionId: session.id, ...snapshot }, session);
 
     return session;
 }
@@ -665,7 +684,7 @@ export async function runMonitoringCycle(session) {
         session.snapshots.push(snapshot);
         session.alerts = [...(session.alerts || []), ...alerts];
         await saveSession(session);
-        await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+        await dbInsertSnapshot({ sessionId: session.id, ...snapshot }, session);
         await dbInsertAlertsBatch(alerts.map((a) => ({ sessionId: session.id, ...a })));
         return { snapshot, alerts };
     }
@@ -972,7 +991,8 @@ export async function runMonitoringCycle(session) {
     if (upsertResult?.existingId && upsertResult.existingId !== session.id) {
         session.id = upsertResult.existingId;
     }
-    await dbInsertSnapshot({ sessionId: session.id, ...snapshot });
+    if (upsertResult) session._dbSessionReady = true;
+    await dbInsertSnapshot({ sessionId: session.id, ...snapshot }, session);
     await dbInsertAlertsBatch(alerts.map((a) => ({ sessionId: session.id, ...a })));
 
     return { snapshot, alerts, resolution };
