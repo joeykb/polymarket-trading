@@ -10,9 +10,19 @@ let refreshTimer = null;
 let lastRenderState = null;
 let currentPlay = null;
 let manualSellEnabled = CFG.manualSellEnabled || false;
+var _gaugeIdCounter = 0;
 
 // ── Trade Readiness Gauge (SVG Thermometer) ─────────────────────────────
 function renderTradeGauge(play) {
+    try {
+    return _renderTradeGaugeInner(play);
+    } catch (e) {
+        console.warn('Gauge render error:', e);
+        return '<div class="gauge-container"><div class="gauge-tier-label" style="background:rgba(107,114,128,0.15);color:#9ca3af;">ERR</div></div>';
+    }
+}
+
+function _renderTradeGaugeInner(play) {
     const session = play.session;
     const edge = session?.lastEdge;
     const phase = play.phase || session?.phase || '';
