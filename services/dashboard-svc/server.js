@@ -166,6 +166,8 @@ const server = http.createServer(
                         redeemResult: session.redeemResult || null,
                         awaitingLiquidity: session.awaitingLiquidity || false,
                         liquidityWaitStart: session.liquidityWaitStart || null,
+                        lastEdge: session.lastEdge || null,
+                        trajectory: session.trajectory || null,
                         snapshots: recentSnaps,
                         alerts: session.alerts || [],
                     };
@@ -225,6 +227,8 @@ const server = http.createServer(
                                       buyOrder: await enrichBuyOrderWithDbIds(session.buyOrder, date),
                                       manualSellEnabled: !!cfg.dashboard?.manualSellEnabled,
                                       pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
+                                      lastEdge: session.lastEdge || null,
+                                      trajectory: session.trajectory || null,
                                   }
                                 : null,
                             latest: latest
