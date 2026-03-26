@@ -44,7 +44,26 @@ export function buildSnapshotRange(range, previous) {
  * @returns {Object} snapshot
  */
 export async function takeSnapshot(targetDate, previous, { fetchWeatherData, discoverMarket, selectRanges }) {
-    const [weatherData, event] = await Promise.all([fetchWeatherData(targetDate), discoverMarket(targetDate)]);
+    const days = daysUntil(targetDate);
+
+    // For past dates, weather APIs won't have forecast data — use last known values
+    let weatherData, event;
+    if (days < 0 && previous) {
+        const [weatherResult, eventResult] = await Promise.allSettled([
+            fetchWeatherData(targetDate),
+            discoverMarket(targetDate),
+        ]);
+        event = eventResult.status === 'fulfilled' ? eventResult.value : null;
+        if (!event) throw new Error(`Market discovery failed for past date ${targetDate}`);
+        weatherData = weatherResult.status === 'fulfilled'
+            ? weatherResult.value
+            : {
+                  forecast: { highTempF: previous.forecastTempF, source: previous.forecastSource || 'cached' },
+                  current: { tempF: previous.currentTempF, maxSince7amF: previous.maxTodayF, conditions: previous.currentConditions },
+              };
+    } else {
+        [weatherData, event] = await Promise.all([fetchWeatherData(targetDate), discoverMarket(targetDate)]);
+    }
 
     const { forecast, current } = weatherData;
     const selection = await selectRanges(forecast.highTempF, event.ranges, targetDate);
@@ -54,7 +73,6 @@ export async function takeSnapshot(targetDate, previous, { fetchWeatherData, dis
     const shiftedFrom = rangeShifted ? previous.target.question : null;
 
     const phase = getPhase(targetDate);
-    const days = daysUntil(targetDate);
 
     return {
         timestamp: nowISO(),
