@@ -98,7 +98,12 @@ export async function redeemPositions(session) {
 
     const dryRun = tradingCfg.mode === 'dry-run';
     const provider = getPolygonProvider();
-    const wallet = new Wallet(tradingCfg.privateKey, provider);
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY || '';
+    if (!privateKey) {
+        console.log('  ⚠️  POLYMARKET_PRIVATE_KEY not set — skipping redeem');
+        return null;
+    }
+    const wallet = new Wallet(privateKey, provider);
     const ctf = new Contract(CTF_ADDRESS, CTF_ABI, wallet);
     const adapter = new Contract(NEG_RISK_ADAPTER, NEG_RISK_ADAPTER_ABI, wallet);
 

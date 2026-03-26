@@ -45,10 +45,11 @@ export function computePnL(buyOrder, snapshot, liquidityBids) {
             sold = false,
             sellPrice = null;
 
-        if (pos.soldAt && pos.soldStatus === 'placed') {
-            // Position was sold — use sell price as current value
+        // A position is "sold" if it has a soldAt timestamp OR soldStatus indicates completion
+        if ((pos.soldAt || pos.sold_at) && (pos.soldStatus === 'placed' || pos.sell_price > 0 || pos.sellPrice > 0)) {
             sold = true;
-            sellPrice = typeof pos.soldAt === 'number' ? pos.soldAt : parseFloat(pos.soldAt) || 0;
+            // Use the actual sell price field, NOT soldAt (which is a timestamp)
+            sellPrice = pos.sellPrice || pos.sell_price || 0;
             currentPrice = sellPrice;
         } else {
             const currentRange = currentRanges[pos.label];

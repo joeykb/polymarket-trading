@@ -22,6 +22,7 @@ import { healthResponse } from '../../shared/health.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
 import { nowISO, formatDateForSlug, extractDateFromTitle } from '../../shared/dates.js';
 import { jsonResponse as jsonRes, errorResponse as errRes } from '../../shared/httpServer.js';
+import { TtlCache } from '../../shared/cache.js';
 
 const log = createLogger('market-svc');
 
@@ -218,10 +219,81 @@ function findTargetRange(forecastTempF, ranges) {
     return sorted[sorted.length - 1];
 }
 
+/**
+ * Compute a 0-100 liquidity score for a range.
+ *
+ * Components:
+ *   - volume (0-40):  normalized against maxVolume across all ranges
+ *   - spread (0-35):  tighter bid-ask spread = higher score
+ *   - depth  (0-25):  having non-zero bid AND ask = live order book
+ */
+function computeLiquidityScore(range, maxVolume) {
+    let score = 0;
+
+    // Volume component (0-40)
+    if (maxVolume > 0 && range.volume > 0) {
+        score += Math.min(40, Math.round((range.volume / maxVolume) * 40));
+    }
+
+    // Spread component (0-35): lower spread = better
+    const bid = range.bestBid || 0;
+    const ask = range.bestAsk || 0;
+    if (bid > 0 && ask > 0) {
+        const spread = (ask - bid) / ask;
+        if (spread <= 0.05)
+            score += 35; // ≤5% spread: excellent
+        else if (spread <= 0.1)
+            score += 28; // ≤10%: good
+        else if (spread <= 0.2)
+            score += 18; // ≤20%: fair
+        else if (spread <= 0.3) score += 8; // ≤30%: poor
+        // >30%: 0 points
+    }
+
+    // Depth component (0-25): bid AND ask present = live book
+    if (bid > 0 && ask > 0) score += 25;
+    else if (bid > 0 || ask > 0) score += 10;
+
+    return score;
+}
+
+/**
+ * Min score below which a range is considered illiquid and may be swapped.
+ */
+const MIN_LIQUIDITY_SCORE = 20;
+
 function selectRanges(forecastTempF, ranges, targetDate) {
     const sorted = [...ranges].sort((a, b) => a.lowTemp - b.lowTemp);
-    const target = findTargetRange(forecastTempF, sorted);
-    const targetIndex = sorted.findIndex((r) => r.marketId === target.marketId);
+    const maxVolume = Math.max(...sorted.map((r) => r.volume || 0), 1);
+
+    // Score every range
+    for (const r of sorted) {
+        r.liquidityScore = computeLiquidityScore(r, maxVolume);
+    }
+
+    let target = findTargetRange(forecastTempF, sorted);
+    let targetIndex = sorted.findIndex((r) => r.marketId === target.marketId);
+    let selectionMethod = 'forecast';
+
+    // Liquidity-weighted adjustment: if the forecast target is illiquid,
+    // consider sliding ±1 range if an adjacent range is significantly more liquid
+    // AND still within 2°F of the forecast.
+    if (target.liquidityScore < MIN_LIQUIDITY_SCORE) {
+        const candidates = [];
+        if (targetIndex > 0) candidates.push({ range: sorted[targetIndex - 1], idx: targetIndex - 1 });
+        if (targetIndex < sorted.length - 1) candidates.push({ range: sorted[targetIndex + 1], idx: targetIndex + 1 });
+
+        for (const c of candidates) {
+            const tempDist = Math.min(Math.abs(forecastTempF - (c.range.lowTemp || 0)), Math.abs(forecastTempF - (c.range.highTemp || 0)));
+            // Only consider if within 2°F and significantly better liquidity (1.5x)
+            if (tempDist <= 2 && c.range.liquidityScore >= target.liquidityScore * 1.5 && c.range.liquidityScore >= MIN_LIQUIDITY_SCORE) {
+                target = c.range;
+                targetIndex = c.idx;
+                selectionMethod = 'liquidity-adjusted';
+                break;
+            }
+        }
+    }
 
     const below = targetIndex > 0 ? sorted[targetIndex - 1] : null;
     const above = targetIndex < sorted.length - 1 ? sorted[targetIndex + 1] : null;
@@ -238,6 +310,7 @@ function selectRanges(forecastTempF, ranges, targetDate) {
         forecastSource: 'weather-company',
         targetDate,
         selectionTimestamp: nowISO(),
+        selectionMethod,
         totalCost,
         potentialProfit,
         roi,
@@ -245,6 +318,14 @@ function selectRanges(forecastTempF, ranges, targetDate) {
 }
 
 // (HTTP helpers now imported from shared/httpServer.js)
+
+// ── TTL Cache ───────────────────────────────────────────────────────────
+// Market data changes slowly; avoid redundant Gamma API calls.
+// Uses shared TtlCache — always async, with automatic eviction.
+
+const cache = new TtlCache({ evictIntervalMs: 60_000, maxEntries: 50 });
+
+const MARKET_TTL = 2 * 60 * 1000; // 2 min — ranges update slowly
 
 // ── Request Handler ─────────────────────────────────────────────────────
 
@@ -255,18 +336,18 @@ async function handleRequest(req, res) {
 
     try {
         if (path === '/health') {
-            return jsonRes(res, healthResponse('market-svc', { gammaBase: GAMMA_BASE }));
+            return jsonRes(res, healthResponse('market-svc', { gammaBase: GAMMA_BASE, cache: cache.stats() }));
         }
 
         if (path === '/api/market') {
             if (!query.date) return errRes(res, 'date parameter required');
-            const event = await discoverMarket(query.date);
+            const event = await cache.get(`market:${query.date}`, MARKET_TTL, () => discoverMarket(query.date));
             return jsonRes(res, event);
         }
 
         if (path === '/api/ranges') {
             if (!query.date || !query.forecastF) return errRes(res, 'date and forecastF parameters required');
-            const event = await discoverMarket(query.date);
+            const event = await cache.get(`market:${query.date}`, MARKET_TTL, () => discoverMarket(query.date));
             const selection = selectRanges(parseFloat(query.forecastF), event.ranges, query.date);
             return jsonRes(res, { ...selection, eventId: event.id, eventTitle: event.title, closed: event.closed });
         }

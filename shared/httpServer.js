@@ -37,13 +37,23 @@ export function errorResponse(res, message, status = 400) {
 /**
  * Parse JSON request body from an incoming request.
  * Returns empty object if body is empty.
+ * Rejects payloads exceeding maxSize (default 1MB) to prevent DoS.
  * @param {import('http').IncomingMessage} req
+ * @param {number} [maxSize=1048576] - Max body size in bytes
  * @returns {Promise<Object>}
  */
-export function readJsonBody(req) {
+export function readJsonBody(req, maxSize = 1048576) {
     return new Promise((resolve, reject) => {
         let body = '';
-        req.on('data', (chunk) => (body += chunk));
+        let size = 0;
+        req.on('data', (chunk) => {
+            size += chunk.length;
+            if (size > maxSize) {
+                req.destroy();
+                return reject(new Error('Request body too large'));
+            }
+            body += chunk;
+        });
         req.on('end', () => {
             try {
                 resolve(body ? JSON.parse(body) : {});
@@ -72,8 +82,23 @@ export function parseUrl(urlStr) {
 export function handleCors(res) {
     res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Request-Id',
     });
     res.end();
+}
+
+/**
+ * Wrap an HTTP handler to automatically handle CORS preflight (OPTIONS).
+ * Usage:
+ *   http.createServer(withCors(handleRequest));
+ *
+ * @param {Function} handler - Original request handler
+ * @returns {Function} Wrapped handler
+ */
+export function withCors(handler) {
+    return (req, res) => {
+        if (req.method === 'OPTIONS') return handleCors(res);
+        return handler(req, res);
+    };
 }

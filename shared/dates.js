@@ -31,9 +31,10 @@ export function getTodayET() {
  * @returns {string}
  */
 export function getDateOffsetET(offset) {
-    const d = new Date();
-    d.setDate(d.getDate() + offset);
-    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // Compute entirely in ET to avoid DST boundary issues when server TZ != ET
+    const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    nowET.setDate(nowET.getDate() + offset);
+    return nowET.toLocaleDateString('en-CA');
 }
 
 /**

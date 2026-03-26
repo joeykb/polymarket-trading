@@ -183,7 +183,7 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
                 tickSize,
                 negRisk,
             },
-            OrderType.GTC,
+            OrderType.GTC, // createAndPostOrder only supports GTC|GTD; FOK requires createAndPostMarketOrder
         );
 
         console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
@@ -218,6 +218,12 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             verified: fill.verified,
         });
 
+        // Track slippage: delta between ask price at decision time and actual fill
+        const slippage = parseFloat((actualPrice - price).toFixed(4)); // positive = paid more
+        if (slippage !== 0) {
+            console.log(`  📉 Slippage: ${slippage > 0 ? '+' : ''}$${slippage.toFixed(4)} (asked $${price.toFixed(4)}, filled $${actualPrice.toFixed(4)})`);
+        }
+
         return {
             success: true,
             dryRun: false,
@@ -228,6 +234,8 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             cost: actualCost,
             tokenId,
             verified: fill.verified,
+            slippage,
+            askPriceAtDecision: price,
         };
     } catch (err) {
         const detail = err.response?.data || err.data || '';
@@ -293,13 +301,15 @@ export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionConte
         });
     }
 
-    // Place orders, passing live WS liquidity data when available
-    const results = [];
-    for (const position of positions) {
+    // Place orders concurrently — each position targets a different conditionId,
+    // so there's no self-trade risk from parallel execution.
+    const orderPromises = positions.map((position) => {
         const liqTokenData = liqByQuestion.get(position.question) || null;
-        const result = await placeSingleOrder(position, tradingCfg, liqTokenData);
-        results.push({ ...position, ...result });
-    }
+        return placeSingleOrder(position, tradingCfg, liqTokenData)
+            .then((result) => ({ ...position, ...result }))
+            .catch((err) => ({ ...position, success: false, error: err.message }));
+    });
+    const results = await Promise.all(orderPromises);
 
     // Build buyOrder object compatible with existing P&L logic
     const successfulOrders = results.filter((r) => r.success);

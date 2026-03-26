@@ -550,3 +550,62 @@ body {
     color: var(--accent-cyan);
     border-color: var(--accent-cyan);
 }
+
+/* ── Trade Readiness Gauge ────────────────── */
+.gauge-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-width: 56px;
+}
+
+.gauge-svg {
+    filter: drop-shadow(0 2px 8px rgba(0,0,0,0.3));
+    transition: filter 0.3s;
+}
+
+.gauge-svg:hover {
+    filter: drop-shadow(0 2px 12px rgba(59,130,246,0.4));
+}
+
+@keyframes mercuryRise {
+    from { height: 0; }
+}
+
+@keyframes gaugeGlow {
+    0%, 100% { filter: drop-shadow(0 0 4px var(--glow-color, rgba(16,185,129,0.6))); }
+    50% { filter: drop-shadow(0 0 10px var(--glow-color, rgba(16,185,129,0.8))); }
+}
+
+.gauge-bulb-glow {
+    animation: gaugeGlow 2s ease-in-out infinite;
+}
+
+.gauge-tier-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.gauge-verdict {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.gauge-verdict-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+}
+

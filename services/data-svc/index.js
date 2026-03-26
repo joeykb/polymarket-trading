@@ -24,6 +24,7 @@ import { createLogger, requestLogger } from '../../shared/logger.js';
 import { getDb, closeDb } from './db.js';
 import { compressExistingFiles, listSessionFiles, OUTPUT_DIR } from './storage.js';
 import { handleRequest } from './routes.js';
+import { withCors } from '../../shared/httpServer.js';
 
 const PORT = parseInt(process.env.DATA_SVC_PORT || '3005');
 
@@ -33,7 +34,7 @@ getDb();
 // ── Server ──────────────────────────────────────────────────────────────
 
 const log = createLogger('data-svc');
-const server = http.createServer(requestLogger(log, handleRequest));
+const server = http.createServer(requestLogger(log, withCors(handleRequest)));
 
 server.listen(PORT, () => {
     log.info('started', { port: PORT, outputDir: OUTPUT_DIR, sessions: listSessionFiles().length });

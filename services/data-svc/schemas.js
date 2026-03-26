@@ -108,24 +108,58 @@ export const positionRedeemedSchema = z.object({
     redeemedTx: z.string().nullable().optional(),
 });
 
+export const positionUpdateSchema = z
+    .object({
+        status: z.enum(['placed', 'filled', 'partial', 'failed', 'sold', 'redeemed']).optional(),
+        label: z.string().optional(),
+        orderId: z.string().nullable().optional(),
+        order_id: z.string().nullable().optional(),
+        tokenId: z.string().nullable().optional(),
+        token_id: z.string().nullable().optional(),
+        price: z.number().min(0).optional(),
+        shares: z.number().min(0).optional(),
+        fillPrice: z.number().nullable().optional(),
+        fill_price: z.number().nullable().optional(),
+        fillShares: z.number().nullable().optional(),
+        fill_shares: z.number().nullable().optional(),
+        error: z.string().nullable().optional(),
+        soldAt: z.string().nullable().optional(),
+        sold_at: z.string().nullable().optional(),
+        sellPrice: z.number().min(0).nullable().optional(),
+        sell_price: z.number().min(0).nullable().optional(),
+        sellOrderId: z.string().nullable().optional(),
+        sell_order_id: z.string().nullable().optional(),
+        redeemedAt: z.string().nullable().optional(),
+        redeemed_at: z.string().nullable().optional(),
+        redeemedValue: z.number().min(0).nullable().optional(),
+        redeemed_value: z.number().min(0).nullable().optional(),
+        redeemedTx: z.string().nullable().optional(),
+        redeemed_tx: z.string().nullable().optional(),
+    })
+    .refine((data) => Object.keys(data).length > 0, {
+        message: 'At least one field is required for update',
+    });
+
 // ── Snapshots ───────────────────────────────────────────────────────────
 
-export const snapshotSchema = z.object({
-    sessionId: z.string().min(1, 'sessionId is required'),
-    timestamp: z.string().min(1, 'timestamp is required'),
-    forecastTempF: z.number().optional(),
-    forecast_temp: z.number().optional(),
-    forecastSource: z.string().optional(),
-    forecast_source: z.string().optional(),
-    forecastChange: z.number().optional(),
-    forecast_change: z.number().optional(),
-    phase: z.string().optional(),
-    daysUntilTarget: z.number().int().optional(),
-    days_until_target: z.number().int().optional(),
-    target: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
-    below: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
-    above: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
-}).passthrough();
+export const snapshotSchema = z
+    .object({
+        sessionId: z.string().min(1, 'sessionId is required'),
+        timestamp: z.string().min(1, 'timestamp is required'),
+        forecastTempF: z.number().optional(),
+        forecast_temp: z.number().optional(),
+        forecastSource: z.string().optional(),
+        forecast_source: z.string().optional(),
+        forecastChange: z.number().optional(),
+        forecast_change: z.number().optional(),
+        phase: z.string().optional(),
+        daysUntilTarget: z.number().int().optional(),
+        days_until_target: z.number().int().optional(),
+        target: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
+        below: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
+        above: z.object({ question: z.string(), yesPrice: z.number() }).passthrough().nullable().optional(),
+    })
+    .passthrough();
 
 // ── Alerts ───────────────────────────────────────────────────────────────
 

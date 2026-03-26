@@ -141,8 +141,10 @@ CREATE INDEX IF NOT EXISTS idx_positions_condition ON positions(condition_id);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON snapshots(timestamp);
+CREATE INDEX IF NOT EXISTS idx_snapshots_session_ts ON snapshots(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_alerts_session ON alerts(session_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(type);
+CREATE INDEX IF NOT EXISTS idx_alerts_session_ts ON alerts(session_id, timestamp);
 
 -- ── Config Overrides ────────────────────────────────────────────────────
 -- Admin overrides stored in DB (previously in config-overrides.json).

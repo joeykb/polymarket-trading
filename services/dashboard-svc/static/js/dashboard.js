@@ -10,6 +10,180 @@ let refreshTimer = null;
 let lastRenderState = null;
 let currentPlay = null;
 let manualSellEnabled = CFG.manualSellEnabled || false;
+var _gaugeIdCounter = 0;
+
+// ── Trade Readiness Gauge (SVG Thermometer) ─────────────────────────────
+function renderTradeGauge(play) {
+    try {
+    return _renderTradeGaugeInner(play);
+    } catch (e) {
+        console.warn('Gauge render error:', e);
+        return '<div class="gauge-container"><div class="gauge-tier-label" style="background:rgba(107,114,128,0.15);color:#9ca3af;">ERR</div></div>';
+    }
+}
+
+function _renderTradeGaugeInner(play) {
+    const session = play.session;
+    const edge = session?.lastEdge;
+    const phase = play.phase || session?.phase || '';
+    const hasBuy = !!session?.buyOrder;
+    const eventClosed = play.latest?.eventClosed === true;
+
+    // Completed/closed events show a done state
+    if (eventClosed || session?.status === 'completed') {
+        return '<div class="gauge-container">' +
+            _gaugeThermometerSVG(100, '#10b981', '#10b981') +
+            '<div class="gauge-tier-label" style="background:rgba(16,185,129,0.15);color:#34d399;">DONE</div>' +
+            '</div>';
+    }
+
+    // Already bought — show "HOLDING" with the confidence we had at entry
+    if (hasBuy) {
+        var conf = edge ? Math.round(edge.confidence * 100) : 50;
+        var mercuryColor = conf >= 50 ? '#10b981' : '#f59e0b';
+        return '<div class="gauge-container">' +
+            _gaugeThermometerSVG(conf, mercuryColor, mercuryColor) +
+            '<div class="gauge-tier-label" style="background:rgba(16,185,129,0.15);color:#34d399;">HOLDING</div>' +
+            '</div>';
+    }
+
+    // Scouting/tracking — no edge calc yet, show dim state
+    if (phase === 'scout' || phase === 'track') {
+        var phaseLabel = phase === 'scout' ? 'SCOUTING' : 'TRACKING';
+        var phaseColor = phase === 'scout' ? '#22d3ee' : '#fbbf24';
+        var phaseBg = phase === 'scout' ? 'rgba(6,182,212,0.15)' : 'rgba(251,191,36,0.15)';
+        // Show a low mercury based on days out (farther = colder)
+        var daysOut = play.daysUntil || 3;
+        var warmth = Math.max(5, Math.min(30, 35 - daysOut * 8));
+        var mercuryFill = phase === 'scout' ? '#22d3ee' : '#fbbf24';
+        return '<div class="gauge-container">' +
+            _gaugeThermometerSVG(warmth, mercuryFill, '#2a3550') +
+            '<div class="gauge-tier-label" style="background:' + phaseBg + ';color:' + phaseColor + ';">' + phaseLabel + '</div>' +
+            '</div>';
+    }
+
+    // Buy phase with edge data — the main event
+    if (edge) {
+        var confidence = Math.round(edge.confidence * 100);
+        var ev = edge.ev || 0;
+        var tier = edge.tier || 'low';
+        var willTrade = edge.action === 'buy';
+
+        // Mercury color: cold blue → warm amber → hot green/red
+        var mColor, glowColor, tierBg, tierColor, tierText;
+        if (tier === 'high' && willTrade) {
+            mColor = '#10b981';
+            glowColor = 'rgba(16,185,129,0.7)';
+            tierBg = 'rgba(16,185,129,0.15)';
+            tierColor = '#34d399';
+            tierText = 'HIGH';
+        } else if (tier === 'medium' && willTrade) {
+            mColor = '#f59e0b';
+            glowColor = 'rgba(245,158,11,0.7)';
+            tierBg = 'rgba(245,158,11,0.15)';
+            tierColor = '#fbbf24';
+            tierText = 'MED';
+        } else {
+            mColor = '#ef4444';
+            glowColor = 'rgba(239,68,68,0.5)';
+            tierBg = 'rgba(239,68,68,0.12)';
+            tierColor = '#f87171';
+            tierText = 'SKIP';
+        }
+
+        var verdictDot = willTrade
+            ? '<span class="gauge-verdict-dot" style="background:#10b981;"></span>'
+            : '<span class="gauge-verdict-dot" style="background:#ef4444;animation:none;opacity:0.5;"></span>';
+        var verdictLabel = willTrade ? 'WILL TRADE' : 'SKIP';
+        var verdictColor = willTrade ? '#34d399' : '#f87171';
+        var evStr = ev >= 0 ? '+$' + ev.toFixed(2) : '-$' + Math.abs(ev).toFixed(2);
+
+        return '<div class="gauge-container" title="Confidence: ' + confidence + '% | EV: ' + evStr + ' | Tier: ' + tier + '">' +
+            _gaugeThermometerSVG(confidence, mColor, glowColor) +
+            '<div class="gauge-tier-label" style="background:' + tierBg + ';color:' + tierColor + ';">' + tierText + '</div>' +
+            '<div class="gauge-verdict" style="color:' + verdictColor + ';">' + verdictDot + verdictLabel + '</div>' +
+            '</div>';
+    }
+
+    // No edge data yet for buy phase
+    return '<div class="gauge-container">' +
+        _gaugeThermometerSVG(15, '#3b82f6', '#2a3550') +
+        '<div class="gauge-tier-label" style="background:rgba(59,130,246,0.12);color:#60a5fa;">CALC...</div>' +
+        '</div>';
+}
+
+function _gaugeThermometerSVG(fillPct, mercuryColor, glowColor) {
+    // SVG thermometer: 32px wide × 100px tall
+    var clipId = 'tc' + (_gaugeIdCounter = (_gaugeIdCounter || 0) + 1);
+    var W = 32, H = 100;
+    var tubeX = 10, tubeW = 12;
+    var tubeTop = 6, tubeBot = 72;
+    var tubeH = tubeBot - tubeTop; // 66px
+    var bulbCX = 16, bulbCY = 84, bulbR = 12;
+    var capR = tubeW / 2;
+
+    // Clamp fill
+    var fill = Math.max(0, Math.min(100, fillPct));
+    var fillH = (fill / 100) * tubeH;
+    var fillY = tubeBot - fillH;
+
+    // Tick marks at 25/50/75
+    var ticks = '';
+    var tickLevels = [25, 50, 75];
+    for (var ti = 0; ti < tickLevels.length; ti++) {
+        var tPct = tickLevels[ti];
+        var tY = tubeBot - (tPct / 100) * tubeH;
+        ticks += '<line x1="' + (tubeX - 2) + '" y1="' + tY + '" x2="' + tubeX + '" y2="' + tY +
+            '" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>';
+        ticks += '<line x1="' + (tubeX + tubeW) + '" y1="' + tY + '" x2="' + (tubeX + tubeW + 2) + '" y2="' + tY +
+            '" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>';
+    }
+
+    // Percentage label beside tube
+    var labelY = Math.max(tubeTop + 10, fillY + 4);
+    var label = fill > 0
+        ? '<text x="' + (tubeX + tubeW + 5) + '" y="' + labelY +
+          '" fill="' + mercuryColor + '" font-size="9" font-weight="700" font-family="JetBrains Mono,monospace">' +
+          fill + '%</text>'
+        : '';
+
+    // Bulb glow for high confidence
+    var bulbGlow = fill >= 50
+        ? '<circle cx="' + bulbCX + '" cy="' + bulbCY + '" r="' + (bulbR + 3) +
+          '" fill="none" stroke="' + mercuryColor + '" stroke-width="1" opacity="0.3" class="gauge-bulb-glow" style="--glow-color:' + glowColor + '"/>'
+        : '';
+
+    return '<svg class="gauge-svg" width="' + W + '" height="' + H +
+        '" viewBox="0 0 ' + W + ' ' + H + '">' +
+        // Tube background
+        '<rect x="' + tubeX + '" y="' + tubeTop + '" width="' + tubeW + '" height="' + tubeH +
+        '" rx="' + capR + '" fill="#1a2235" stroke="#2a3550" stroke-width="1"/>' +
+        // Mercury fill (rises from bottom)
+        '<clipPath id="' + clipId + '"><rect x="' + tubeX + '" y="' + tubeTop + '" width="' + tubeW + '" height="' + tubeH + '" rx="' + capR + '"/></clipPath>' +
+        '<rect x="' + tubeX + '" y="' + fillY + '" width="' + tubeW + '" height="' + fillH +
+        '" fill="' + mercuryColor + '" clip-path="url(#' + clipId + ')" opacity="0.85">' +
+        '<animate attributeName="height" from="0" to="' + fillH + '" dur="0.8s" fill="freeze"/>' +
+        '<animate attributeName="y" from="' + tubeBot + '" to="' + fillY + '" dur="0.8s" fill="freeze"/>' +
+        '</rect>' +
+        // Mercury shine highlight
+        '<rect x="' + (tubeX + 2) + '" y="' + fillY + '" width="3" height="' + fillH +
+        '" fill="rgba(255,255,255,0.15)" clip-path="url(#' + clipId + ')" rx="1.5">' +
+        '<animate attributeName="height" from="0" to="' + fillH + '" dur="0.8s" fill="freeze"/>' +
+        '<animate attributeName="y" from="' + tubeBot + '" to="' + fillY + '" dur="0.8s" fill="freeze"/>' +
+        '</rect>' +
+        // Tick marks
+        ticks +
+        // Bulb (bottom circle)
+        bulbGlow +
+        '<circle cx="' + bulbCX + '" cy="' + bulbCY + '" r="' + bulbR +
+        '" fill="' + mercuryColor + '" stroke="#2a3550" stroke-width="1"/>' +
+        // Bulb highlight
+        '<circle cx="' + (bulbCX - 3) + '" cy="' + (bulbCY - 3) + '" r="4" fill="rgba(255,255,255,0.15)"/>' +
+        // Percentage label
+        label +
+        '</svg>';
+}
+
 
 // ── Data Fetching ─────────────────────────
 async function fetchStatus(date) {
@@ -239,6 +413,8 @@ function renderPortfolioCard(play) {
         '" onclick="switchDate(\'' +
         play.date +
         '\')">' +
+        '<div style="display:flex;gap:12px;">' +
+        '<div style="flex:1;min-width:0;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
         '<div style="display:flex;align-items:center;gap:8px;">' +
         '<span style="font-size:18px;font-weight:700;color:var(--text-primary);">' +
@@ -303,6 +479,9 @@ function renderPortfolioCard(play) {
               ' alerts</div>'
             : '<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">Awaiting market data</div>') +
         resolutionHtml +
+        '</div>' +
+        renderTradeGauge(play) +
+        '</div>' +
         '</div>'
     );
 }

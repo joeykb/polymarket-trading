@@ -63,6 +63,7 @@ export async function enrichBuyOrderWithDbIds(buyOrder, targetDate) {
                 ...p,
                 positionId: dbPos?.id || p.positionId || null,
                 soldAt: dbPos?.sold_at || p.soldAt || null,
+                sellPrice: dbPos?.sell_price || p.sellPrice || null,
             };
         });
     } catch {

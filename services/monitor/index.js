@@ -294,7 +294,7 @@ async function main() {
                     console.log('  ├────────────┬──────────────┬───────────┬─────────────────┬────────────────────────────┬────────────┤');
                 }
             } catch (err) {
-                console.log(`  │ ${date} │ ❌ ERROR      │ ${err.message.slice(0, 50).padEnd(52)} │`);
+                console.log(`  │ ${date} │ ❌ ERROR      │ ${err.message.slice(0, 80).padEnd(52)} │`);
             }
         }
 
@@ -313,13 +313,15 @@ async function main() {
     console.log(`\n  ⏱️  Next check in ${intervalMinutes} minutes... (Ctrl+C to stop)`);
 
     // Graceful shutdown
-    const shutdown = () => {
+    const shutdown = async () => {
         console.log('\n\n  🛑 Shutting down monitor...');
         clearInterval(timer);
         clearInterval(restartWatcher);
-        for (const [, session] of sessions) {
-            if (session.status === 'active') stopSession(session);
-        }
+        await Promise.all(
+            [...sessions.values()]
+                .filter((s) => s.status === 'active')
+                .map((s) => stopSession(s)),
+        );
         const totalSnapshots = [...sessions.values()].reduce((sum, s) => sum + s.snapshots.length, 0);
         console.log(`  💾 ${sessions.size} sessions saved (${totalSnapshots} snapshots)`);
         process.exit(0);
