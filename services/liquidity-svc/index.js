@@ -264,18 +264,16 @@ async function discoverSessions() {
 
     try {
         // Get all session file dates from data-svc
-        const listRes = await fetch(`${DATA_SVC}/api/session-files`, { signal: AbortSignal.timeout(10000) });
-        if (!listRes.ok) return result;
-        const { dates } = await listRes.json();
+        const listData = await svcGet(`${DATA_SVC}/api/session-files`, { timeoutMs: 10000 });
+        if (!listData) return result;
+        const dates = listData.dates;
         if (!dates?.length) return result;
 
         // Fetch each session and extract tokens
         for (const date of dates) {
             try {
-                const sessRes = await fetch(`${DATA_SVC}/api/session-files/${date}`, { signal: AbortSignal.timeout(10000) });
-                if (!sessRes.ok) continue;
-                const data = await sessRes.json();
-                if (!data.targetDate) continue;
+                const data = await svcGet(`${DATA_SVC}/api/session-files/${date}`, { timeoutMs: 10000 });
+                if (!data?.targetDate) continue;
 
                 const latest = data.snapshots?.[data.snapshots.length - 1];
                 if (!latest) continue;

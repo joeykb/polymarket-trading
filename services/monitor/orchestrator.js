@@ -13,20 +13,21 @@
  */
 
 import 'dotenv/config';
-import { services } from '../../shared/services.js';
-import { createClient } from '../../shared/httpClient.js';
+import { createLogger } from '../../shared/logger.js';
 import { nowISO, getTodayET, getDateOffsetET, daysUntil, getPhase } from '../../shared/dates.js';
 import { takeSnapshot } from './snapshot.js';
 import { detectAlerts } from './alerts.js';
 import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge, analyzeTrajectory } from './strategy.js';
+import {
+    svcGet,
+    fetchWeatherData, discoverMarket, selectRanges,
+    tryPlaceBuyOrder, tryRedeemPositions, fetchLiquidityFromService,
+    DATA_SVC,
+} from './svcClients.js';
+import { loadSession, saveSession, dbUpsertSession, dbInsertSnapshot, dbInsertAlertsBatch } from './persistence.js';
+import { executeResolveDaySell, executeRebalanceSell, executeStopLossSell } from './sellFlow.js';
 
-// ── Service URLs (from shared config) ───────────────────────────────────
-
-const WEATHER_SVC = services.weatherSvc;
-const MARKET_SVC = services.marketSvc;
-const TRADING_SVC = services.tradingSvc;
-const DATA_SVC = services.dataSvc;
-const LIQUIDITY_SVC = services.liquiditySvc;
+const log = createLogger('monitor');
 
 // ── Config defaults (overridden by data-svc /api/config) ───────────────
 
@@ -52,9 +53,8 @@ const _config = {
 
 async function refreshConfig() {
     try {
-        const res = await fetch(`${DATA_SVC}/api/config`);
-        if (res.ok) {
-            const remote = await res.json();
+        const remote = await svcGet(DATA_SVC, '/api/config');
+        if (remote) {
             if (remote.monitor) Object.assign(_config.monitor, remote.monitor);
             if (remote.liquidity) Object.assign(_config.liquidity, remote.liquidity);
             if (remote.phases) Object.assign(_config.phases, remote.phases);
@@ -66,175 +66,6 @@ async function refreshConfig() {
 
 function getConfigVal() {
     return _config;
-}
-
-// ── Service Clients (shared HTTP client) ────────────────────────────────
-
-const weatherClient = createClient(WEATHER_SVC);
-const marketClient = createClient(MARKET_SVC);
-const tradingClient = createClient(TRADING_SVC);
-const dataClient = createClient(DATA_SVC);
-const liquidityClient = createClient(LIQUIDITY_SVC);
-
-// Convenience wrappers matching the original call signatures: svcGet(BASE, path) → data
-async function svcGet(base, path) {
-    const client = clientForBase(base);
-    return client.get(path, { timeoutMs: 30000 });
-}
-async function svcPost(base, path, body) {
-    const client = clientForBase(base);
-    return client.post(path, body, { timeoutMs: 60000 });
-}
-async function svcPut(base, path, body) {
-    const client = clientForBase(base);
-    return client.put(path, body, { timeoutMs: 15000 });
-}
-
-function clientForBase(base) {
-    if (base === WEATHER_SVC) return weatherClient;
-    if (base === MARKET_SVC) return marketClient;
-    if (base === TRADING_SVC) return tradingClient;
-    if (base === DATA_SVC) return dataClient;
-    if (base === LIQUIDITY_SVC) return liquidityClient;
-    return createClient(base);
-}
-
-// ── Service Clients ─────────────────────────────────────────────────────
-
-async function fetchWeatherData(targetDate) {
-    const [forecast, current] = await Promise.all([
-        svcGet(WEATHER_SVC, `/api/forecast?date=${targetDate}`),
-        svcGet(WEATHER_SVC, `/api/current`).catch(() => ({ tempF: null, maxSince7amF: null, conditions: null })),
-    ]);
-    return { forecast, current };
-}
-
-async function discoverMarket(targetDate) {
-    return svcGet(MARKET_SVC, `/api/market?date=${targetDate}`);
-}
-
-async function selectRanges(forecastTempF, ranges, targetDate) {
-    return svcGet(MARKET_SVC, `/api/ranges?date=${targetDate}&forecastF=${forecastTempF}`);
-}
-
-async function tryPlaceBuyOrder(snapshot, liqTokens = [], context = {}) {
-    try {
-        const result = await svcPost(TRADING_SVC, '/api/buy', { snapshot, liqTokens, context });
-        if (!result || result.error) {
-            console.warn(`  ⚠️  Buy order failed: ${result?.error || 'unknown'}`);
-            return null;
-        }
-        if (result.allUnfilled) {
-            console.warn('  ⚠️  Order placed but no fills confirmed — treating as failed');
-            return null;
-        }
-        return result;
-    } catch (err) {
-        console.warn(`  ⚠️  Buy order failed: ${err.message}`);
-        return null;
-    }
-}
-
-async function executeSellOrder(positions, context = {}) {
-    try {
-        const result = await svcPost(TRADING_SVC, '/api/sell', { positions, context });
-        if (!result || result.error) return null;
-        return result;
-    } catch (err) {
-        console.warn(`  ⚠️  Sell order failed: ${err.message}`);
-        return null;
-    }
-}
-
-async function tryRedeemPositions(session) {
-    try {
-        const result = await svcPost(TRADING_SVC, '/api/redeem', { session });
-        if (!result || result.error) return null;
-        return result;
-    } catch (err) {
-        console.warn(`  ⚠️  Redeem failed: ${err.message}`);
-        return null;
-    }
-}
-
-async function fetchLiquidityFromService(date) {
-    try {
-        return await svcGet(LIQUIDITY_SVC, `/api/liquidity?date=${date}`);
-    } catch {
-        return null; /* intentional: liquidity-svc may not be ready */
-    }
-}
-
-// ── Session Persistence (via data-svc) ──────────────────────────────────
-
-async function loadSession(targetDate) {
-    try {
-        const data = await svcGet(DATA_SVC, `/api/session-files/${targetDate}`);
-        return data;
-    } catch {
-        return null; /* intentional: session may not exist yet */
-    }
-}
-
-async function saveSession(session) {
-    try {
-        await svcPut(DATA_SVC, `/api/session-files/${session.targetDate}`, session);
-    } catch (err) {
-        console.warn(`  ⚠️  Session save failed: ${err.message}`);
-    }
-}
-
-async function dbUpsertSession(data) {
-    try {
-        const result = await svcPost(DATA_SVC, '/api/db/sessions', data);
-        return result; // { upserted: true, existingId: ... }
-    } catch (err) {
-        console.warn(`  ⚠️  DB session upsert failed: ${err.message}`);
-        return null;
-    }
-}
-
-async function dbInsertSnapshot(data, session) {
-    try {
-        // If session was never successfully upserted to DB, retry now
-        if (session && !session._dbSessionReady) {
-            const retryResult = await dbUpsertSession({
-                id: session.id,
-                marketId: 'nyc',
-                targetDate: session.targetDate,
-                status: session.status,
-                phase: session.phase,
-                initialForecastTemp: session.initialForecastTempF,
-                initialTargetRange: session.initialTargetRange,
-                forecastSource: session.forecastSource,
-                intervalMinutes: parseInt(session.intervalMinutes) || 5,
-                rebalanceThreshold: parseFloat(session.rebalanceThreshold) || 3.0,
-            });
-            if (retryResult) session._dbSessionReady = true;
-        }
-        await svcPost(DATA_SVC, '/api/snapshots', data);
-    } catch (err) {
-        console.warn(`  ⚠️  DB snapshot insert failed: ${err.message}`);
-    }
-}
-
-async function dbInsertAlert(data) {
-    try {
-        await svcPost(DATA_SVC, '/api/alerts', data);
-    } catch (err) {
-        console.warn(`  ⚠️  DB alert insert failed: ${err.message}`);
-    }
-}
-
-async function dbInsertAlertsBatch(alerts) {
-    if (!alerts || alerts.length === 0) return;
-    try {
-        await svcPost(DATA_SVC, '/api/alerts/batch', { alerts });
-    } catch (err) {
-        // Fallback to sequential inserts if batch endpoint is unavailable
-        console.warn(`  ⚠️  Batch alert insert failed (${err.message}), falling back to sequential`);
-        for (const a of alerts) await dbInsertAlert(a);
-    }
 }
 
 // ── Snapshot (delegated to snapshot.js) ─────────────────────────────────
@@ -470,7 +301,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
     const existing = await loadSession(targetDate);
 
     if (existing && existing.status === 'completed') {
-        console.log(`  ✅ Session ${targetDate} already completed — skipping`);
+        log.info('session_completed', { targetDate });
         return existing;
     }
 
@@ -571,7 +402,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes) {
             }
             if (upsertResult) existing._dbSessionReady = true;
         }
-        console.log(`  📋 Resuming session (${existing.snapshots.length} snapshots, phase: ${existing.phase})`);
+        log.info('session_resumed', { targetDate, snapshots: existing.snapshots.length, phase: existing.phase });
         return existing;
     }
 
@@ -682,6 +513,8 @@ export async function runMonitoringCycle(session) {
     // Scout/Track: observation only
     if (snapshot.phase === 'scout' || snapshot.phase === 'track') {
         session.snapshots.push(snapshot);
+        // Cap in-memory snapshots (older ones are persisted to DB)
+        if (session.snapshots.length > 96) session.snapshots = session.snapshots.slice(-96);
         session.alerts = [...(session.alerts || []), ...alerts];
         await saveSession(session);
         await dbInsertSnapshot({ sessionId: session.id, ...snapshot }, session);
@@ -704,12 +537,10 @@ export async function runMonitoringCycle(session) {
             session.trajectory,
         );
         session.lastEdge = edge;
-        console.log(
-            `  📊 Edge: EV=$${edge.ev.toFixed(3)} | conf=${(edge.confidence * 100).toFixed(0)}% | tier=${edge.tier} | ${edge.action}`,
-        );
+        log.info('edge_computed', { ev: edge.ev, confidence: edge.confidence, tier: edge.tier, action: edge.action, targetDate: session.targetDate });
 
         if (edge.action === 'skip') {
-            console.log(`  ⏭️  SKIP BUY: ${edge.reason}`);
+            log.info('buy_skipped', { reason: edge.reason, ev: edge.ev, tier: edge.tier });
             alerts.push({
                 timestamp: nowISO(),
                 type: 'ev_skip',
@@ -736,142 +567,15 @@ export async function runMonitoringCycle(session) {
         }
     }
 
-    // ── Sell Strategy ───────────────────────────────────────────────────
+    // ── Sell Strategy (delegated to sellFlow.js) ───────────────────────────
 
-    if (session.buyOrder && !snapshot.eventClosed) {
-        // RESOLVE DAY: sell hedge positions (after 9:30am EST)
-        const resolveSellHour = _config.monitor.buyHourEST || 9.5; // Default 9:30am EST
-        const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-        const nowDate = new Date(nowET);
-        const currentHour = nowDate.getHours() + nowDate.getMinutes() / 60;
-        if (snapshot.phase === 'resolve' && !session.resolveSellExecuted && currentHour >= resolveSellHour) {
-            const currentTargetQ = snapshot.target?.question;
-            if (currentTargetQ) {
-                const positionsToSell = [];
-                for (const pos of session.buyOrder.positions) {
-                    if (pos.status === 'failed' || pos.status === 'rejected') continue;
-                    if (pos.soldAt) continue;
+    // Resolve-day: sell hedge positions when target range clarifies
+    const resolveSellAlerts = await executeResolveDaySell(session, snapshot, _config.monitor);
+    alerts.push(...resolveSellAlerts);
 
-                    let tokenId = pos.clobTokenId || pos.clobTokenIds?.[0] || pos.tokenId;
-                    if (!tokenId) {
-                        for (const key of ['target', 'below', 'above']) {
-                            const snapRange = snapshot[key];
-                            if (snapRange && snapRange.question === pos.question && snapRange.clobTokenIds?.[0]) {
-                                tokenId = snapRange.clobTokenIds[0];
-                                pos.clobTokenIds = snapRange.clobTokenIds;
-                                pos.tokenId = tokenId;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (pos.question !== currentTargetQ) {
-                        positionsToSell.push({
-                            label: pos.label,
-                            question: pos.question,
-                            clobTokenId: tokenId,
-                            conditionId: pos.conditionId,
-                            shares: pos.shares || 1,
-                        });
-                    }
-                }
-
-                if (positionsToSell.length > 0) {
-                    console.log(`\n  🎯 RESOLVE-DAY SELL: selling ${positionsToSell.length} hedge position(s)`);
-                    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
-                    const sellResult = await executeSellOrder(positionsToSell, sellCtx);
-                    if (sellResult) {
-                        if (!session.sellOrders) session.sellOrders = [];
-                        session.sellOrders.push(sellResult);
-                        session.resolveSellExecuted = true;
-                        for (const sold of sellResult.positions) {
-                            const original = session.buyOrder.positions.find((p) => p.question === sold.question);
-                            if (original) {
-                                original.soldAt = nowISO();
-                                original.sellPrice = sold.sellPrice;
-                                original.soldOrderId = sold.orderId;
-                                original.soldStatus = sold.status;
-                            }
-                        }
-                        alerts.push({
-                            timestamp: nowISO(),
-                            type: 'resolve_sell',
-                            message: `Resolve-day sell: sold ${positionsToSell.length} hedge position(s)`,
-                            data: { forecast: snapshot.forecastTempF, sold: positionsToSell.map((p) => p.question) },
-                        });
-                    }
-                } else {
-                    session.resolveSellExecuted = true;
-                }
-            }
-        }
-
-        // MONITOR/BUY: rebalance on forecast shift
-        // Multi-rebalance: measures shift from last rebalance point (not just initial forecast)
-        // Dynamic threshold: tighter closer to target (T+1=1°F, T+2=2°F, T+3+=3°F)
-        if ((snapshot.phase === 'monitor' || snapshot.phase === 'buy') && session.buyOrder) {
-            const rebalanceRef = session.lastRebalanceForecastF ?? session.initialForecastTempF;
-            const totalShift = Math.abs(snapshot.forecastTempF - rebalanceRef);
-            const daysOut = snapshot.daysUntilTarget ?? 2;
-            const dynamicThreshold = daysOut <= 1 ? 1.0 : daysOut === 2 ? 2.0 : (_config.monitor.rebalanceThreshold || 3);
-            if (totalShift >= dynamicThreshold) {
-                console.log(`\n  🔄 REBALANCE: forecast shifted ${totalShift.toFixed(1)}°F from reference ${rebalanceRef.toFixed(1)}°F (threshold: ${dynamicThreshold}°F for T+${daysOut})`);
-
-                const currentRangeQuestions = new Set(
-                    [snapshot.target?.question, snapshot.below?.question, snapshot.above?.question].filter(Boolean),
-                );
-                const positionsToSell = [];
-                for (const pos of session.buyOrder.positions) {
-                    if (pos.status === 'failed' || pos.status === 'rejected' || pos.soldAt) continue;
-                    let tokenId = pos.clobTokenId || pos.clobTokenIds?.[0] || pos.tokenId;
-                    if (!tokenId) {
-                        for (const key of ['target', 'below', 'above']) {
-                            const snapRange = snapshot[key];
-                            if (snapRange && snapRange.question === pos.question && snapRange.clobTokenIds?.[0]) {
-                                tokenId = snapRange.clobTokenIds[0];
-                                pos.clobTokenIds = snapRange.clobTokenIds;
-                                break;
-                            }
-                        }
-                    }
-                    if (!currentRangeQuestions.has(pos.question)) {
-                        positionsToSell.push({
-                            label: pos.label,
-                            question: pos.question,
-                            clobTokenId: tokenId,
-                            conditionId: pos.conditionId,
-                            shares: pos.shares || 1,
-                        });
-                    }
-                }
-
-                if (positionsToSell.length > 0) {
-                    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
-                    const sellResult = await executeSellOrder(positionsToSell, sellCtx);
-                    if (sellResult) {
-                        if (!session.sellOrders) session.sellOrders = [];
-                        session.sellOrders.push(sellResult);
-                        session.lastRebalanceForecastF = snapshot.forecastTempF;
-                        for (const sold of sellResult.positions) {
-                            const original = session.buyOrder.positions.find((p) => p.question === sold.question);
-                            if (original) {
-                                original.soldAt = nowISO();
-                                original.sellPrice = sold.sellPrice;
-                                original.soldOrderId = sold.orderId;
-                                original.soldStatus = sold.status;
-                            }
-                        }
-                        alerts.push({
-                            timestamp: nowISO(),
-                            type: 'rebalance_sell',
-                            message: `Sold ${positionsToSell.length} out-of-range positions (shift: ${totalShift.toFixed(1)}°F from ${rebalanceRef.toFixed(1)}°F)`,
-                            data: { shift: totalShift, rebalanceRef, proceeds: sellResult.totalProceeds },
-                        });
-                    }
-                }
-            }
-        }
-    }
+    // Rebalance: sell out-of-range positions when forecast shifts
+    const rebalanceAlerts = await executeRebalanceSell(session, snapshot, _config.monitor);
+    alerts.push(...rebalanceAlerts);
 
     // P&L update
     if (session.buyOrder) {
@@ -884,69 +588,19 @@ export async function runMonitoringCycle(session) {
         }
         session.pnl = computePnL(session.buyOrder, snapshot, liquidityBids);
 
-        // ── Stop-Loss Check ─────────────────────────────────────────────
+        // Stop-loss: sell all positions when P&L breaches floor
         const stopLoss = checkStopLoss(session, snapshot, {
             stopLossEnabled: _config.monitor.stopLossEnabled,
             stopLossPct: _config.monitor.stopLossPct,
             stopLossFloor: _config.monitor.stopLossFloor,
         });
-        if (stopLoss.triggered) {
-            console.log(`\n  🛑 STOP-LOSS TRIGGERED: ${stopLoss.reason}`);
-            const positionsToSell = [];
-            for (const pos of session.buyOrder.positions) {
-                if (pos.status === 'failed' || pos.status === 'rejected' || pos.soldAt) continue;
-                let tokenId = pos.clobTokenId || pos.clobTokenIds?.[0] || pos.tokenId;
-                if (!tokenId) {
-                    for (const key of ['target', 'below', 'above']) {
-                        const snapRange = snapshot[key];
-                        if (snapRange && snapRange.question === pos.question && snapRange.clobTokenIds?.[0]) {
-                            tokenId = snapRange.clobTokenIds[0];
-                            pos.clobTokenIds = snapRange.clobTokenIds;
-                            break;
-                        }
-                    }
-                }
-                positionsToSell.push({
-                    label: pos.label,
-                    question: pos.question,
-                    clobTokenId: tokenId,
-                    conditionId: pos.conditionId,
-                    shares: pos.shares || 1,
-                });
-            }
-            if (positionsToSell.length > 0) {
-                const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
-                const sellResult = await executeSellOrder(positionsToSell, sellCtx);
-                if (sellResult) {
-                    if (!session.sellOrders) session.sellOrders = [];
-                    session.sellOrders.push(sellResult);
-                    session.stopLossExecuted = true;
-                    for (const sold of sellResult.positions) {
-                        const original = session.buyOrder.positions.find((p) => p.question === sold.question);
-                        if (original) {
-                            original.soldAt = nowISO();
-                            original.sellPrice = sold.sellPrice;
-                            original.soldOrderId = sold.orderId;
-                            original.soldStatus = sold.status;
-                        }
-                    }
-                    alerts.push({
-                        timestamp: nowISO(),
-                        type: 'stop_loss',
-                        message: `🛑 Stop-loss: sold ${positionsToSell.length} positions — ${stopLoss.reason}`,
-                        data: {
-                            pnlPct: stopLoss.pnlPct,
-                            totalPnL: stopLoss.totalPnL,
-                            proceeds: sellResult.totalProceeds,
-                            positionsSold: positionsToSell.length,
-                        },
-                    });
-                }
-            }
-        }
+        const stopLossAlerts = await executeStopLossSell(session, snapshot, stopLoss);
+        alerts.push(...stopLossAlerts);
     }
 
     session.snapshots.push(snapshot);
+    // Cap in-memory snapshots (older ones are persisted to DB)
+    if (session.snapshots.length > 96) session.snapshots = session.snapshots.slice(-96);
     session.alerts.push(...alerts);
 
     let resolution = null;
@@ -975,23 +629,31 @@ export async function runMonitoringCycle(session) {
 
     await saveSession(session);
 
-    // DB writes — upsert first to resolve correct session ID for FK integrity
-    const upsertResult = await dbUpsertSession({
-        id: session.id,
-        marketId: 'nyc',
-        targetDate: session.targetDate,
-        status: session.status,
-        phase: session.phase,
-        initialForecastTemp: session.initialForecastTempF,
-        initialTargetRange: session.initialTargetRange,
-        forecastSource: session.forecastSource,
-        intervalMinutes: parseInt(session.intervalMinutes) || 5,
-        rebalanceThreshold: session.rebalanceThreshold,
-    });
-    if (upsertResult?.existingId && upsertResult.existingId !== session.id) {
-        session.id = upsertResult.existingId;
+    // DB writes — only upsert session when state changes or not yet synced (debounced)
+    const phaseChanged = session.phase !== session._lastDbPhase;
+    const statusChanged = session.status !== session._lastDbStatus;
+    if (!session._dbSessionReady || phaseChanged || statusChanged) {
+        const upsertResult = await dbUpsertSession({
+            id: session.id,
+            marketId: 'nyc',
+            targetDate: session.targetDate,
+            status: session.status,
+            phase: session.phase,
+            initialForecastTemp: session.initialForecastTempF,
+            initialTargetRange: session.initialTargetRange,
+            forecastSource: session.forecastSource,
+            intervalMinutes: parseInt(session.intervalMinutes) || 5,
+            rebalanceThreshold: session.rebalanceThreshold,
+        });
+        if (upsertResult?.existingId && upsertResult.existingId !== session.id) {
+            session.id = upsertResult.existingId;
+        }
+        if (upsertResult) {
+            session._dbSessionReady = true;
+            session._lastDbPhase = session.phase;
+            session._lastDbStatus = session.status;
+        }
     }
-    if (upsertResult) session._dbSessionReady = true;
     await dbInsertSnapshot({ sessionId: session.id, ...snapshot }, session);
     await dbInsertAlertsBatch(alerts.map((a) => ({ sessionId: session.id, ...a })));
 

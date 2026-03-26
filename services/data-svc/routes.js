@@ -552,6 +552,7 @@ function handleGetSessionFile(res, date, query) {
     if (query.slim) {
         const limit = parseInt(query.slim) || 20;
         if (data.snapshots && data.snapshots.length > limit) {
+            const totalSnapshots = data.snapshots.length;
             const lastSnaps = data.snapshots.slice(-limit);
             for (const snap of lastSnaps) {
                 if (snap.allRanges && lastSnaps.indexOf(snap) < lastSnaps.length - 1) {
@@ -560,7 +561,7 @@ function handleGetSessionFile(res, date, query) {
             }
             data.snapshots = lastSnaps;
             data._slimmed = true;
-            data._totalSnapshots = data.snapshots.length + (data.snapshots.length - limit);
+            data._totalSnapshots = totalSnapshots;
         }
     }
 

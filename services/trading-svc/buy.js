@@ -301,13 +301,15 @@ export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionConte
         });
     }
 
-    // Place orders, passing live WS liquidity data when available
-    const results = [];
-    for (const position of positions) {
+    // Place orders concurrently — each position targets a different conditionId,
+    // so there's no self-trade risk from parallel execution.
+    const orderPromises = positions.map((position) => {
         const liqTokenData = liqByQuestion.get(position.question) || null;
-        const result = await placeSingleOrder(position, tradingCfg, liqTokenData);
-        results.push({ ...position, ...result });
-    }
+        return placeSingleOrder(position, tradingCfg, liqTokenData)
+            .then((result) => ({ ...position, ...result }))
+            .catch((err) => ({ ...position, success: false, error: err.message }));
+    });
+    const results = await Promise.all(orderPromises);
 
     // Build buyOrder object compatible with existing P&L logic
     const successfulOrders = results.filter((r) => r.success);

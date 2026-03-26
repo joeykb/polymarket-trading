@@ -38,6 +38,7 @@ const DATA_SVC_URL = process.env.DATA_SVC_URL || 'http://data-svc:3005';
 // ── HTTP Helpers (shared) ───────────────────────────────────────────────
 
 import { jsonResponse as jsonRes, errorResponse as errRes, readJsonBody as readBody } from '../../shared/httpServer.js';
+import { svcGet } from '../../shared/httpClient.js';
 
 // ── Request Handler ─────────────────────────────────────────────────────
 
@@ -98,15 +99,13 @@ async function handleRequest(req, res) {
         }
 
         if (path === '/api/spend' && method === 'GET') {
-            // Proxy to data-svc
-            const spendRes = await fetch(`${DATA_SVC_URL}/api/spend`);
-            const data = await spendRes.json();
-            return jsonRes(res, data);
+            const data = await svcGet(`${DATA_SVC_URL}/api/spend`);
+            return jsonRes(res, data || { error: 'spend data unavailable' });
         }
 
         errRes(res, `Not found: ${method} ${path}`, 404);
     } catch (err) {
-        console.error(`❌ ${method} ${path}:`, err.message);
+        log.error('request_error', { method, path, error: err.message });
         errRes(res, err.message, 500);
     }
 }

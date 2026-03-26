@@ -50,10 +50,10 @@ spec:
               value: "http://trading-svc-green:3004"
             - name: LIQUIDITY_SVC_URL
               value: "http://liquidity-svc-green:3001"
-            - name: WEATHER_SVC_URL
-              value: "http://weather-svc-green:3002"
             - name: MARKET_SVC_URL
               value: "http://market-svc-green:3003"
+            - name: WEATHER_SVC_URL
+              value: "http://weather-svc-green:3002"
           resources:
             requests:
               cpu: 25m

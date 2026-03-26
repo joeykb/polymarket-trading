@@ -220,38 +220,38 @@ export function buildAdminConfig(overrides = {}) {
 
 /**
  * Build the flat config response for service consumption.
+ * Dynamically resolves all values from CONFIG_SCHEMA — no hardcoded defaults.
+ *
+ * Boolean coercion: schema entries with choices [0, 1] are emitted as
+ * true/false so consumers don't need to parse them.
+ *
  * @param {Object} overrides
  * @returns {Object} - Section-keyed flat config, e.g. { trading: { mode: 'live', ... } }
  */
 export function buildFlatConfig(overrides = {}) {
-    const defaults = {
-        monitor: {
-            intervalMinutes: 15,
-            rebalanceThreshold: 3,
-            forecastShiftThreshold: 2,
-            priceSpikeThreshold: 0.05,
-            buyHourEST: 9.5,
-            evThreshold: 0.05,
-            maxEntryPrice: 0.40,
-            maxHedgeCost: 0.10,
-            stopLossEnabled: false,
-            stopLossPct: 50,
-            stopLossFloor: -1.5,
-        },
-        liquidity: {
-            wsEnabled: true,
-            checkIntervalSecs: 30,
-            buyDeadlineHour: 10.5,
-            requireAllLiquid: false,
-            spreadThreshold: 0.2,
-            depthThreshold: 5,
-        },
-        phases: { scoutDaysMax: 4, trendThreshold: 2 },
-        trading: {},
-    };
-    for (const section of Object.keys(overrides)) {
-        if (!defaults[section]) defaults[section] = {};
-        Object.assign(defaults[section], overrides[section]);
+    const result = {};
+    const booleanFields = new Set();
+
+    // Identify fields that use 0/1 choices (boolean-like)
+    for (const [dotPath, schema] of Object.entries(CONFIG_SCHEMA)) {
+        if (Array.isArray(schema.choices) && schema.choices.length === 2 && schema.choices.includes(0) && schema.choices.includes(1)) {
+            booleanFields.add(dotPath);
+        }
     }
-    return defaults;
+
+    for (const [dotPath] of Object.entries(CONFIG_SCHEMA)) {
+        const [section, field] = dotPath.split('.');
+        if (!result[section]) result[section] = {};
+        const { value } = resolveConfigValue(dotPath, overrides);
+        // Coerce 0/1 fields to booleans for consumer convenience
+        result[section][field] = booleanFields.has(dotPath) ? Boolean(value) : value;
+    }
+
+    // Merge any override sections not in CONFIG_SCHEMA (forward compatibility)
+    for (const section of Object.keys(overrides)) {
+        if (!result[section]) result[section] = {};
+        Object.assign(result[section], overrides[section]);
+    }
+
+    return result;
 }
