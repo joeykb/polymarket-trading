@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TempEdge — Historical Performance</title>
+    <meta name="description" content="Historical trading performance analytics for TempEdge temperature prediction markets">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/analytics.css">
+</head>
+<body>
+    <header class="header" id="pageHeader">
+        <div class="header-left">
+            <a href="/" class="logo-link">
+                <span class="logo">🌡️ TempEdge</span>
+            </a>
+            <nav class="nav-pills">
+                <a href="/" class="nav-pill">Dashboard</a>
+                <a href="/analytics" class="nav-pill active">Analytics</a>
+                <a href="/admin" class="nav-pill">Admin</a>
+            </nav>
+        </div>
+        <div class="header-right">
+            <span class="refresh-indicator" id="lastUpdated">
+                <span class="dot"></span>Loading...
+            </span>
+        </div>
+    </header>
+
+    <main class="container" id="app">
+        <!-- Period Filter Bar -->
+        <div class="filter-bar" id="filterBar">
+            <div class="period-pills">
+                <button class="period-pill" data-period="7">7d</button>
+                <button class="period-pill" data-period="30">30d</button>
+                <button class="period-pill" data-period="90">90d</button>
+                <button class="period-pill active" data-period="all">All</button>
+            </div>
+            <div class="date-range">
+                <label>From</label>
+                <input type="date" id="dateFrom" class="date-input">
+                <label>To</label>
+                <input type="date" id="dateTo" class="date-input">
+                <button class="filter-apply" id="applyFilter">Apply</button>
+            </div>
+        </div>
+
+        <!-- KPI Summary Cards -->
+        <div class="stats-row" id="summaryCards">
+            <div class="stat-card">
+                <div class="stat-label">Net P&L</div>
+                <div class="stat-value" id="kpiNetPnL">—</div>
+                <div class="stat-sub" id="kpiNetPnLSub"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value" id="kpiWinRate">—</div>
+                <div class="stat-sub" id="kpiWinRateSub"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Trades</div>
+                <div class="stat-value" id="kpiTotalTrades">—</div>
+                <div class="stat-sub" id="kpiTotalTradesSub"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg P&L / Trade</div>
+                <div class="stat-value" id="kpiAvgPnL">—</div>
+                <div class="stat-sub" id="kpiAvgPnLSub"></div>
+            </div>
+        </div>
+
+        <!-- Cumulative P&L Chart -->
+        <div class="card chart-card" id="chartCard">
+            <div class="card-header">
+                <span class="card-title">📈 Cumulative P&L</span>
+                <span class="card-subtitle" id="chartRange"></span>
+            </div>
+            <div class="card-body">
+                <div class="chart-container" id="cumulativeChart">
+                    <svg id="chartSvg" width="100%" height="240"></svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trade History Table -->
+        <div class="card" id="tradeHistoryCard">
+            <div class="card-header">
+                <span class="card-title">📋 Trade History</span>
+                <span class="card-subtitle" id="tradeCount"></span>
+            </div>
+            <div class="card-body trades-body">
+                <table class="trades-table" id="tradesTable">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Range</th>
+                            <th>Buy Price</th>
+                            <th>Forecast @ Buy</th>
+                            <th>Final Forecast</th>
+                            <th>Trend</th>
+                            <th>Cost</th>
+                            <th>Proceeds</th>
+                            <th>P&L</th>
+                            <th>Outcome</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesBody">
+                        <tr><td colspan="10" class="empty-state">Loading trade data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/js/analytics.js"></script>
+</body>
+</html>

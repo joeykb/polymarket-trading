@@ -8,7 +8,7 @@ metadata:
     component: monitor-green
     version: green
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: tempedge

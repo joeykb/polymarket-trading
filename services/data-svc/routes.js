@@ -12,6 +12,9 @@ import path from 'path';
 import { healthResponse } from '../../shared/health.js';
 import { jsonResponse as json, errorResponse as error, readJsonBody as readBody, parseUrl } from '../../shared/httpServer.js';
 import { buildAdminConfig, buildFlatConfig } from '../../shared/configSchema.js';
+import { requireServiceAuth } from '../../shared/serviceAuth.js';
+import { createLogger } from '../../shared/logger.js';
+import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
 import { getDb } from './db.js';
 import {
     sessionSchema,
@@ -39,6 +42,13 @@ import {
     loadConfigOverrides,
     saveConfigOverrides,
 } from './storage.js';
+
+const log = createLogger('data-svc');
+
+// ── Prometheus Metrics ──────────────────────────────────────────────────
+export const metrics = createMetrics('data_svc');
+export const { wrapHandler: metricsWrap } = createHttpMetrics(metrics);
+const dbOps = metrics.counter('db_operations_total', 'DB operations executed', ['table', 'operation']);
 
 /**
  * FK constraint recovery helper.
@@ -71,6 +81,14 @@ export async function handleRequest(req, res) {
     const method = req.method;
 
     try {
+        // Auth gate: GETs are public (dashboard reads), writes require service key
+        if (!requireServiceAuth(req, res, { allowPublicGet: true })) return;
+
+        // ── Prometheus Metrics ────────────────────────────────
+        if (pathname === '/metrics' && method === 'GET') {
+            return metrics.handleRequest(res);
+        }
+
         // ── Health ───────────────────────────────────────
         if (pathname === '/health' && method === 'GET') {
             const dbPath = process.env.DB_PATH || path.join(OUTPUT_DIR, 'tempedge.db');
@@ -202,6 +220,20 @@ export async function handleRequest(req, res) {
                 if (validationError) return error(res, validationError, 400);
                 queries.updatePosition(parseInt(m.params.id), data);
                 return json(res, { updated: true });
+            }
+        }
+
+        // ── Historical Analytics ─────────────────────────────
+        if (pathname === '/api/analytics/performance' && method === 'GET') {
+            const result = queries.getTradePerformance(query.from, query.to);
+            return json(res, result);
+        }
+
+        {
+            const m = matchRoute('/api/analytics/forecast-timeline/:sessionId', pathname);
+            if (m.match && method === 'GET') {
+                const timeline = queries.getForecastTimeline(m.params.sessionId);
+                return json(res, { timeline });
             }
         }
 
@@ -355,7 +387,7 @@ export async function handleRequest(req, res) {
                 const result = queries.upsertSession(data);
                 return json(res, { upserted: true, existingId: result?.existingId || null }, 201);
             } catch (err) {
-                console.error(`❌ POST /api/db/sessions: ${err.message}`);
+                log.error('session_upsert_error', { error: err.message });
                 return error(res, err.message, 409);
             }
         }
@@ -405,7 +437,7 @@ export async function handleRequest(req, res) {
         // ── 404 ─────────────────────────────────────────
         error(res, `Not found: ${method} ${pathname}`, 404);
     } catch (err) {
-        console.error(`❌ ${method} ${pathname}:`, err.message);
+        log.error('request_error', { method, path: pathname, error: err.message });
         error(res, err.message, 500);
     }
 }
@@ -534,7 +566,7 @@ function handleTradeSummary(res, query) {
             });
         }
     } catch (err) {
-        console.warn('DB trade merge failed: ' + err.message);
+        log.warn('db_trade_merge_failed', { error: err.message });
     }
 
     trades.sort((a, b) => b.date.localeCompare(a.date));

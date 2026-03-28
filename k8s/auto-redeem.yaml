@@ -1,0 +1,88 @@
+# TempEdge Auto-Redeem CronJob
+# Runs the original src/scripts/redeem.js every 6 hours to:
+#   1. Scan on-chain CTF token balances from session files
+#   2. Redeem winning positions via NegRiskAdapter or CTF
+#   3. Burn losing positions to clear portfolio
+#   4. Update session files with redemption results
+#
+# Uses the trading-svc image (has ethers + clob-client).
+# Mounts the same PVC as data-svc for direct session file access.
+# CLOB calls go through the VPN init (gluetun sidecar not needed —
+# Polygon RPC is not geo-blocked and CLOB resolution check is best-effort).
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: auto-redeem
+  namespace: tempedge
+  labels:
+    app: tempedge
+    component: auto-redeem
+spec:
+  # Run at 00:00, 06:00, 12:00, 18:00 UTC
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app: tempedge
+            component: auto-redeem
+        spec:
+          restartPolicy: Never
+          # Fix PVC permissions (same pattern as data-svc)
+          initContainers:
+            - name: fix-permissions
+              image: busybox:1.36
+              command: ['sh', '-c', 'chown -R 1001:1001 /app/output']
+              volumeMounts:
+                - name: output
+                  mountPath: /app/output
+          containers:
+            - name: redeem
+              image: tempedge-trading-svc:latest
+              imagePullPolicy: Never
+              # Run from /app so OUTPUT_DIR resolves to /app/output
+              workingDir: /app
+              command: ["node", "src/scripts/redeem.js"]
+              env:
+                - name: POLYGON_RPC_URL
+                  value: "https://polygon.drpc.org"
+                # Map K8s secret keys to the env vars the redeem script expects
+                - name: CLOB_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: polymarket-trading
+                      key: POLYMARKET_BUILDER_API_KEY
+                - name: CLOB_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: polymarket-trading
+                      key: POLYMARKET_BUILDER_SECRET
+                - name: CLOB_PASSPHRASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: polymarket-trading
+                      key: POLYMARKET_BUILDER_PASSPHRASE
+              envFrom:
+                - secretRef:
+                    name: polymarket-trading
+              volumeMounts:
+                - name: output
+                  mountPath: /app/output
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+          volumes:
+            - name: output
+              persistentVolumeClaim:
+                claimName: tempedge-output

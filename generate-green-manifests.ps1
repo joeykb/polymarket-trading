@@ -109,19 +109,116 @@ spec:
     return $yaml
 }
 
+# ── PVC for green data-svc (separate from production) ────────────────────
+# Production uses tempedge-output (RWO). Green needs its own to avoid lock conflicts.
+$pvcYaml = @"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempedge-output-$suffix
+  namespace: $namespace
+  labels:
+    app: tempedge
+    component: storage
+    version: $suffix
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+  storageClassName: local-path
+"@
+$pvcYaml | Out-File "$outDir/pvc-green.yaml" -Encoding utf8
+Write-Host "[OK] pvc-green.yaml" -ForegroundColor Green
+
 # ── data-svc-green ───────────────────────────────────────────────────────
-$env = @{ OUTPUT_DIR = "/app/output"; DATA_SVC_PORT = "3005" }
-$yaml = Write-SimpleService -Name "data-svc" -Port 3005 -Image "tempedge-data-svc" -Env $env
-
-# data-svc needs PVC mount and Recreate strategy
-$yaml = $yaml -replace "spec:`n  replicas: 1", "spec:`n  replicas: 1`n  strategy:`n    type: Recreate"
-# Add volume mount + volume (insert before resources)
-$yaml = $yaml -replace "(resources:)", "volumeMounts:`n            - name: output`n              mountPath: /app/output`n          `$1"
-$yaml = $yaml -replace "(readinessProbe:)", "readinessProbe:"
-# Add volumes section
-$yaml = $yaml -replace "(---`napiVersion: v1)", "      volumes:`n        - name: output`n          persistentVolumeClaim:`n            claimName: tempedge-output`n`$1"
-
-$yaml | Out-File "$outDir/data-svc-green.yaml" -Encoding utf8
+$dataSvcYaml = @"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-svc-$suffix
+  namespace: $namespace
+  labels:
+    app: tempedge
+    component: data-svc-$suffix
+    version: $suffix
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tempedge
+      component: data-svc-$suffix
+      version: $suffix
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: data-svc-$suffix
+        version: $suffix
+    spec:
+      containers:
+        - name: data-svc-$suffix
+          image: tempedge-data-svc:$suffix
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3005
+          env:
+            - name: OUTPUT_DIR
+              value: "/app/output"
+            - name: DATA_SVC_PORT
+              value: "3005"
+          volumeMounts:
+            - name: output
+              mountPath: /app/output
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3005
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: output
+          persistentVolumeClaim:
+            claimName: tempedge-output-green
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-svc-$suffix
+  namespace: $namespace
+  labels:
+    app: tempedge
+    component: data-svc-$suffix
+    version: $suffix
+spec:
+  type: ClusterIP
+  selector:
+    app: tempedge
+    component: data-svc-$suffix
+    version: $suffix
+  ports:
+    - name: http
+      port: 3005
+      targetPort: 3005
+      protocol: TCP
+"@
+$dataSvcYaml | Out-File "$outDir/data-svc-green.yaml" -Encoding utf8
 Write-Host "[OK] data-svc-green.yaml" -ForegroundColor Green
 
 # ── weather-svc-green ────────────────────────────────────────────────────
@@ -268,22 +365,31 @@ $tradingYaml | Out-File "$outDir/trading-svc-green.yaml" -Encoding utf8
 Write-Host "[OK] trading-svc-green.yaml" -ForegroundColor Green
 
 # ── dashboard-svc-green (NodePort 30302) ─────────────────────────────────
-$dashEnv = @{
-    DASHBOARD_PORT   = "3000"
-    DATA_SVC_URL     = $greenUrls.DATA_SVC_URL
-    TRADING_SVC_URL  = $greenUrls.TRADING_SVC_URL
-    LIQUIDITY_SVC_URL = $greenUrls.LIQUIDITY_SVC_URL
-    WEATHER_SVC_URL  = $greenUrls.WEATHER_SVC_URL
-    MARKET_SVC_URL   = $greenUrls.MARKET_SVC_URL
-}
-$dashYaml = Write-SimpleService -Name "dashboard-svc" -Port 3000 -Image "tempedge-dashboard-svc" -Env $dashEnv -HealthPath "/health"
-
-# Change service type to NodePort with 30302
-$dashYaml = $dashYaml -replace "type: ClusterIP", "type: NodePort"
-$dashYaml = $dashYaml -replace "(port: 3000`n      targetPort: 3000)", "`$1`n      nodePort: 30302"
-
-# Add init containers to wait for green dependencies
-$initContainerYaml = @"
+# Direct template — regex init container injection was producing broken YAML indentation
+$dashboardYaml = @"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-svc-$suffix
+  namespace: $namespace
+  labels:
+    app: tempedge
+    component: dashboard-svc-$suffix
+    version: $suffix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempedge
+      component: dashboard-svc-$suffix
+      version: $suffix
+  template:
+    metadata:
+      labels:
+        app: tempedge
+        component: dashboard-svc-$suffix
+        version: $suffix
+    spec:
       initContainers:
         - name: wait-for-deps
           image: busybox:1.36
@@ -292,16 +398,74 @@ $initContainerYaml = @"
             - -c
             - |
               echo "Waiting for data-svc-green..."
-              until wget -qO- http://data-svc-green:3005/health > /dev/null 2>&1; do sleep 2; done
+              until wget -qO- http://data-svc-$($suffix):3005/health > /dev/null 2>&1; do sleep 2; done
               echo "Waiting for trading-svc-green..."
-              until wget -qO- http://trading-svc-green:3004/health > /dev/null 2>&1; do sleep 2; done
+              until wget -qO- http://trading-svc-$($suffix):3004/health > /dev/null 2>&1; do sleep 2; done
               echo "Waiting for liquidity-svc-green..."
-              until wget -qO- http://liquidity-svc-green:3001/health > /dev/null 2>&1; do sleep 2; done
+              until wget -qO- http://liquidity-svc-$($suffix):3001/health > /dev/null 2>&1; do sleep 2; done
               echo "All green dependencies ready."
+      containers:
+        - name: dashboard-svc-$suffix
+          image: tempedge-dashboard-svc:$suffix
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3000
+          env:
+            - name: DASHBOARD_PORT
+              value: "3000"
+            - name: DATA_SVC_URL
+              value: "$($greenUrls.DATA_SVC_URL)"
+            - name: TRADING_SVC_URL
+              value: "$($greenUrls.TRADING_SVC_URL)"
+            - name: LIQUIDITY_SVC_URL
+              value: "$($greenUrls.LIQUIDITY_SVC_URL)"
+            - name: MARKET_SVC_URL
+              value: "$($greenUrls.MARKET_SVC_URL)"
+            - name: WEATHER_SVC_URL
+              value: "$($greenUrls.WEATHER_SVC_URL)"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-svc-$suffix
+  namespace: $namespace
+  labels:
+    app: tempedge
+    component: dashboard-svc-$suffix
+    version: $suffix
+spec:
+  type: NodePort
+  selector:
+    app: tempedge
+    component: dashboard-svc-$suffix
+    version: $suffix
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30302
+      protocol: TCP
 "@
-$dashYaml = $dashYaml -replace "(containers:)", "$initContainerYaml`n      containers:"
-
-$dashYaml | Out-File "$outDir/dashboard-svc-green.yaml" -Encoding utf8
+$dashboardYaml | Out-File "$outDir/dashboard-svc-green.yaml" -Encoding utf8
 Write-Host "[OK] dashboard-svc-green.yaml (NodePort 30302)" -ForegroundColor Green
 
 # ── monitor-green (starts paused) ────────────────────────────────────────
@@ -324,7 +488,7 @@ metadata:
     component: monitor-$suffix
     version: $suffix
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: tempedge
@@ -373,7 +537,7 @@ spec:
               memory: 512Mi
 "@
 $monYaml | Out-File "$outDir/monitor-green.yaml" -Encoding utf8
-Write-Host "[OK] monitor-green.yaml (replicas: 0 - paused)" -ForegroundColor Green
+Write-Host "[OK] monitor-green.yaml" -ForegroundColor Green
 
 Write-Host "`n[DONE] Green manifests generated in $outDir/" -ForegroundColor Cyan
 Write-Host "  Apply with: kubectl apply -f $outDir/" -ForegroundColor DarkGray

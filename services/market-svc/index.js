@@ -23,6 +23,10 @@ import { createLogger, requestLogger } from '../../shared/logger.js';
 import { nowISO, formatDateForSlug, extractDateFromTitle } from '../../shared/dates.js';
 import { jsonResponse as jsonRes, errorResponse as errRes } from '../../shared/httpServer.js';
 import { TtlCache } from '../../shared/cache.js';
+import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
+
+const metrics = createMetrics('market_svc');
+const { wrapHandler } = createHttpMetrics(metrics);
 
 const log = createLogger('market-svc');
 
@@ -154,7 +158,7 @@ async function searchAllTemperatureEvents() {
             if (results.length > 0) break;
         }
     } catch (err) {
-        console.warn(`  ⚠️  Series search failed: ${err.message}`);
+        log.warn('series_search_failed', { error: err.message });
     }
 
     if (results.length === 0) {
@@ -335,6 +339,10 @@ async function handleRequest(req, res) {
     const query = Object.fromEntries(url.searchParams);
 
     try {
+        if (path === '/metrics') {
+            return metrics.handleRequest(res);
+        }
+
         if (path === '/health') {
             return jsonRes(res, healthResponse('market-svc', { gammaBase: GAMMA_BASE, cache: cache.stats() }));
         }
@@ -354,23 +362,29 @@ async function handleRequest(req, res) {
 
         errRes(res, `Not found: ${path}`, 404);
     } catch (err) {
-        console.error(`❌ ${path}:`, err.message);
+        log.error('request_error', { path, error: err.message });
         errRes(res, err.message, 500);
     }
 }
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-const server = http.createServer(requestLogger(log, handleRequest));
+const server = http.createServer(wrapHandler(requestLogger(log, handleRequest)));
 server.listen(PORT, () => {
     log.info('started', { port: PORT, gammaBase: GAMMA_BASE });
 });
 
-process.on('SIGINT', () => {
-    server.close();
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    server.close();
-    process.exit(0);
-});
+function gracefulShutdown(signal) {
+    log.info('shutdown_initiated', { signal });
+    server.close(() => {
+        log.info('shutdown_complete', { signal });
+        process.exit(0);
+    });
+    setTimeout(() => {
+        log.warn('shutdown_forced', { signal, reason: 'timeout after 10s' });
+        process.exit(1);
+    }, 10_000).unref();
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

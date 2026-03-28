@@ -21,6 +21,10 @@ spec:
       labels:
         app: tempedge
         component: trading-svc
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3004"
+        prometheus.io/path: "/metrics"
     spec:
       # Wait for data-svc to be ready before starting
       initContainers:
@@ -122,6 +126,8 @@ spec:
                 name: tempedge-config
             - secretRef:
                 name: polymarket-trading
+            - secretRef:
+                name: tempedge-service-auth
           resources:
             requests:
               cpu: 50m

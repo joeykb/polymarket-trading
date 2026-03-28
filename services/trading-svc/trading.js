@@ -38,14 +38,17 @@ export async function getWalletBalance() {
         const _client = await getClient();
         return null; // TODO: implement balance check via Polygon RPC
     } catch (err) {
-        console.warn(`  ⚠️  Could not check balance: ${err.message}`);
+        log.warn(`  ⚠️  Could not check balance: ${err.message}`);
         return null;
     }
 }
 
 // ── Retry Single Position (lightweight, stays here) ─────────────────────
 import { placeSingleOrder } from './buy.js';
+import { createLogger } from '../../shared/logger.js';
 
+
+const log = createLogger('trading-svc');
 /**
  * Retry a single failed position — called from the dashboard API.
  */
@@ -56,7 +59,7 @@ export async function retrySinglePosition(position, liqTokenData = null) {
         return { success: false, error: 'Trading disabled' };
     }
 
-    console.log(`\n  🔄 Retry: ${position.label}`);
+    log.info(`\n  🔄 Retry: ${position.label}`);
     const result = await placeSingleOrder(position, tradingCfg, liqTokenData);
     return result;
 }

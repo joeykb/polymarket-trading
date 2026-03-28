@@ -14,6 +14,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createLogger } from '../../shared/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +23,8 @@ const __dirname = path.dirname(__filename);
 const DB_DIR = process.env.OUTPUT_DIR || path.resolve(__dirname, '../output');
 const DB_PATH = process.env.DB_PATH || path.join(DB_DIR, 'tempedge.db');
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
+
+const log = createLogger('data-svc-db');
 
 let _db = null;
 
@@ -61,7 +64,7 @@ export function getDb() {
         } catch (err) {
             // Ignore "already exists" — schema is idempotent via IF NOT EXISTS
             if (!err.message.includes('already exists')) {
-                console.warn(`DB schema warning: ${err.message}`);
+                log.warn('schema_warning', { error: err.message });
             }
         }
     }
@@ -73,7 +76,7 @@ export function getDb() {
     `);
     insertMarket.run('nyc', 'NYC Temperature', 'highest-temperature-in-nyc-on-{date}', 'F', 40.7769, -73.874, 'KLGA');
 
-    console.log(`📦 Database connected: ${DB_PATH}`);
+    log.info('db_connected', { path: DB_PATH });
     return _db;
 }
 
@@ -85,7 +88,7 @@ export function closeDb() {
     if (_db) {
         _db.close();
         _db = null;
-        console.log('📦 Database closed');
+        log.info('db_closed');
     }
 }
 

@@ -10,6 +10,9 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createLogger } from '../../shared/logger.js';
+
+const log = createLogger('data-svc-storage');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const OUTPUT_DIR = process.env.OUTPUT_DIR || path.resolve(__dirname, '../output');
@@ -97,9 +100,9 @@ export function saveSessionFile(date, data) {
             const patch = JSON.parse(fs.readFileSync(patchPath, 'utf-8'));
             Object.assign(data, patch);
             fs.unlinkSync(patchPath);
-            console.log(`  🔧 HOT-PATCH applied for ${date}`);
+            log.info('hot_patch_applied', { date });
         } catch (err) {
-            console.warn(`  ⚠️  Patch failed: ${err.message}`);
+            log.warn('hot_patch_failed', { date, error: err.message });
         }
     }
     // Delta-compress snapshots before writing
@@ -135,15 +138,13 @@ export function compressExistingFiles() {
             fs.writeFileSync(filePath, JSON.stringify(writeData, null, 2), 'utf-8');
             const afterSize = fs.statSync(filePath).size;
             const pct = ((1 - afterSize / beforeSize) * 100).toFixed(0);
-            console.log(
-                `  📦 Compressed ${date}: ${(beforeSize / 1024 / 1024).toFixed(1)}MB → ${(afterSize / 1024 / 1024).toFixed(1)}MB (${pct}% reduction)`,
-            );
+            log.info('file_compressed', { date, beforeMB: (beforeSize / 1024 / 1024).toFixed(1), afterMB: (afterSize / 1024 / 1024).toFixed(1), reductionPct: pct });
             compressed++;
         } catch (err) {
-            console.warn(`  ⚠️  Failed to compress ${date}: ${err.message}`);
+            log.warn('compress_failed', { date, error: err.message });
         }
     }
-    if (compressed > 0) console.log(`  📦 Compressed ${compressed} session files`);
+    if (compressed > 0) log.info('compression_complete', { count: compressed });
 }
 
 // ── Spend Tracking ──────────────────────────────────────────────────────
@@ -203,15 +204,15 @@ function _migrateJsonToDb(db) {
                     }
                 });
                 migrate();
-                console.log(`  📦 Migrated config overrides from JSON file → DB`);
+                log.info('config_migrated_to_db');
             } catch (err) {
-                console.warn(`  ⚠️  Config override migration failed: ${err.message}`);
+                log.warn('config_migration_failed', { error: err.message });
             }
         }
         // Rename old file as backup (don't delete immediately)
         try {
             fs.renameSync(CONFIG_OVERRIDES_PATH, CONFIG_OVERRIDES_PATH + '.bak');
-            console.log(`  📦 Renamed config-overrides.json → .bak`);
+            log.info('config_json_renamed_to_bak');
         } catch {
             /* intentional: rename may fail if read-only */
         }

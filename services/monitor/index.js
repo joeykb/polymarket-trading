@@ -20,8 +20,14 @@ import {
     getPhase,
     getDateOffsetET,
     refreshConfig,
+    loadSession,
 } from './orchestrator.js';
+import { tryRedeemPositions } from './svcClients.js';
+import { saveSession } from './persistence.js';
 import { services } from '../../shared/services.js';
+import { createLogger } from '../../shared/logger.js';
+
+const log = createLogger('monitor');
 
 const DATA_SVC = services.dataSvc;
 
@@ -163,10 +169,12 @@ async function initializeSessions(dates) {
     const sessions = new Map();
     for (const { date, phase } of dates) {
         try {
+            log.info('session_init', { date, phase: PHASE_LABELS[phase] });
             console.log(`\n  📅 Initializing ${date} (${PHASE_LABELS[phase]})...`);
             const session = await createOrResumeSession(date, intervalMinutes);
             sessions.set(date, session);
         } catch (err) {
+            log.warn('session_skip', { date, error: err.message });
             console.log(`  ⚠️  Skipping ${date}: ${err.message}`);
         }
     }
@@ -196,6 +204,71 @@ async function clearRestartSignal() {
     }
 }
 
+// ── Startup Redeem Sweep ────────────────────────────────────────────────
+// Scans ALL persisted session files for unredeemed positions.
+// This catches sessions from past dates that the monitor no longer watches
+// (only T+0 through T+4 are in the active portfolio).
+
+async function sweepUnredeemedSessions() {
+    try {
+        const res = await fetch(`${DATA_SVC}/api/session-files`, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return;
+        const { dates } = await res.json();
+        if (!dates || dates.length === 0) return;
+
+        const today = getDateOffsetET(0);
+        let redeemed = 0;
+
+        for (const date of dates) {
+            // Skip today/future — those are actively monitored
+            if (date >= today) continue;
+
+            const session = await loadSession(date);
+            if (!session) continue;
+
+            // Already redeemed or no positions to redeem
+            if (session.redeemExecuted || !session.buyOrder?.positions?.length) continue;
+
+            // Check if all positions were already sold
+            const unsold = session.buyOrder.positions.filter(p => !p.soldAt);
+            if (unsold.length === 0) {
+                log.info('redeem_sweep_skip_sold', { date, reason: 'all_positions_sold' });
+                continue;
+            }
+
+            log.info('redeem_sweep_attempt', { date, positions: unsold.length });
+            console.log(`  🔄 Redeem sweep: ${date} — ${unsold.length} unredeemed positions`);
+
+            try {
+                const result = await tryRedeemPositions(session);
+                if (result && !result.error) {
+                    session.redeemExecuted = true;
+                    session.redeemResult = result;
+                    session.status = 'completed';
+                    await saveSession(session);
+                    redeemed++;
+                    log.info('redeem_sweep_success', { date, redeemed: result.redeemed, value: result.totalValue });
+                    console.log(`  ✅ Redeemed ${date}: ${result.redeemed} positions, $${result.totalValue?.toFixed(2) || '?'}`);
+                } else {
+                    log.warn('redeem_sweep_failed', { date, error: result?.error || 'no result' });
+                    console.log(`  ⚠️  Redeem failed for ${date}: ${result?.error || 'no result'}`);
+                }
+            } catch (err) {
+                log.warn('redeem_sweep_error', { date, error: err.message });
+                console.log(`  ⚠️  Redeem error for ${date}: ${err.message}`);
+            }
+        }
+
+        if (redeemed > 0) {
+            console.log(`  💰 Sweep complete: ${redeemed} session(s) redeemed`);
+        } else {
+            log.info('redeem_sweep_none');
+        }
+    } catch (err) {
+        log.warn('redeem_sweep_error', { error: err.message });
+    }
+}
+
 // ── Main ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -203,6 +276,10 @@ async function main() {
     await refreshConfig();
     const cfg = getConfig();
     intervalMinutes = cfg.monitor.intervalMinutes || intervalMinutes;
+
+    // Sweep unredeemed past sessions before starting active monitoring
+    console.log('\n  🔍 Checking for unredeemed past sessions...');
+    await sweepUnredeemedSessions();
 
     const dates = getPortfolioDates();
 
@@ -225,6 +302,7 @@ async function main() {
     const sessions = await initializeSessions(dates);
 
     if (sessions.size === 0) {
+        log.error('no_markets_found', { reason: 'exiting' });
         console.error('\n  ❌ No markets found for any date. Exiting.');
         process.exit(1);
     }
@@ -247,15 +325,18 @@ async function main() {
         if (await checkRestartSignal()) {
             clearInterval(restartWatcher);
             clearInterval(timer);
+            log.info('restart_signal_detected');
             console.log('\n  🔄 Restart signal detected');
             await clearRestartSignal();
             for (const [, session] of sessions) await stopSession(session);
+            log.info('sessions_saved_shutdown');
             console.log('  💾 Sessions saved. Exiting...');
             process.exit(0);
         }
     }, 5000);
 
     const timer = setInterval(async () => {
+        log.info('monitoring_cycle', { time: formatTime(new Date().toISOString()) });
         console.log(`\n${'═'.repeat(65)}`);
         console.log(`  ⏱️  Monitoring cycle @ ${formatTime(new Date().toISOString())}`);
 
@@ -273,6 +354,7 @@ async function main() {
                     console.log(`  ✅ Initialized ${date} (${phase})`);
                 } catch (err) {
                     console.log(`  ⚠️  ${date} unavailable: ${err.message.slice(0, 80)}`);
+                    log.warn('session_retry_failed', { date, error: err.message });
                 }
             }
         }
@@ -295,6 +377,7 @@ async function main() {
                 }
             } catch (err) {
                 console.log(`  │ ${date} │ ❌ ERROR      │ ${err.message.slice(0, 80).padEnd(52)} │`);
+                log.error('cycle_error', { date, error: err.message });
             }
         }
 
@@ -314,6 +397,7 @@ async function main() {
 
     // Graceful shutdown
     const shutdown = async () => {
+        log.info('shutdown_initiated', { signal: 'manual' });
         console.log('\n\n  🛑 Shutting down monitor...');
         clearInterval(timer);
         clearInterval(restartWatcher);
@@ -323,6 +407,7 @@ async function main() {
                 .map((s) => stopSession(s)),
         );
         const totalSnapshots = [...sessions.values()].reduce((sum, s) => sum + s.snapshots.length, 0);
+        log.info('shutdown_complete', { sessions: sessions.size, totalSnapshots });
         console.log(`  💾 ${sessions.size} sessions saved (${totalSnapshots} snapshots)`);
         process.exit(0);
     };
@@ -332,6 +417,7 @@ async function main() {
 }
 
 main().catch((err) => {
+    log.error('fatal_error', { error: err.message, stack: err.stack });
     console.error('\n❌ Fatal error:', err.message);
     console.error(err.stack);
     process.exit(1);

@@ -8,4 +8,5 @@ output/
 _deprecated/
 specs/
 src/
+!src/scripts/redeem.js
 *.md

@@ -58,6 +58,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: tempedge-config
+            - secretRef:
+                name: tempedge-service-auth
           resources:
             requests:
               cpu: 50m

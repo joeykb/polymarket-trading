@@ -11,6 +11,7 @@ output/
 !.env.example
 k8s/vpn-secret.yaml
 k8s/trading-secret.yaml
+k8s/service-auth-secret.yaml
 k8s/weather-api-keys-secret.yaml
 k8s/secrets/*
 !k8s/secrets/*.example.yaml
@@ -30,3 +31,6 @@ desktop.ini
 
 # Gemini AI
 .gemini/
+
+# Test coverage
+coverage/

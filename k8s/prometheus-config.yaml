@@ -1,0 +1,80 @@
+# TempEdge — Prometheus Scrape Configuration
+#
+# Deploy alongside Prometheus in the tempedge namespace.
+# Services are auto-discovered via K8s pod annotations,
+# but this static config works as a fallback or for local dev.
+#
+# Usage:
+#   1. Mount as ConfigMap in Prometheus pod
+#   2. Or merge into existing prometheus.yml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: tempedge
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      # ── Auto-discovery via K8s annotations ─────────────────────────
+      - job_name: 'tempedge-pods'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - tempedge
+        relabel_configs:
+          # Only scrape pods with prometheus.io/scrape annotation
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          # Use the port from the annotation
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            target_label: __address__
+            regex: (.+)
+            replacement: ${1}
+          # Use the path from the annotation
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # Add service name label from component label
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            action: replace
+            target_label: service
+
+      # ── Static fallback (for local dev / minikube) ─────────────────
+      - job_name: 'trading-svc'
+        static_configs:
+          - targets: ['trading-svc:3004']
+        metrics_path: '/metrics'
+
+      - job_name: 'data-svc'
+        static_configs:
+          - targets: ['data-svc:3005']
+        metrics_path: '/metrics'
+
+      - job_name: 'weather-svc'
+        static_configs:
+          - targets: ['weather-svc:3002']
+        metrics_path: '/metrics'
+
+      - job_name: 'market-svc'
+        static_configs:
+          - targets: ['market-svc:3003']
+        metrics_path: '/metrics'
+
+      - job_name: 'liquidity-svc'
+        static_configs:
+          - targets: ['liquidity-svc:3001']
+        metrics_path: '/metrics'
+
+      - job_name: 'dashboard-svc'
+        static_configs:
+          - targets: ['dashboard-svc:3000']
+        metrics_path: '/metrics'

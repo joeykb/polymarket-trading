@@ -13,6 +13,9 @@
 import { nowISO } from '../../shared/dates.js';
 import { collectSellablePositions } from './positions.js';
 import { executeSellOrder } from './svcClients.js';
+import { createLogger } from '../../shared/logger.js';
+
+const log = createLogger('monitor-sell');
 
 // ── Sell Result Processor ───────────────────────────────────────────────
 
@@ -74,7 +77,7 @@ export async function executeResolveDaySell(session, snapshot, config) {
         return alerts;
     }
 
-    console.log(`\n  🎯 RESOLVE-DAY SELL: selling ${positionsToSell.length} hedge position(s)`);
+    log.info('resolve_day_sell', { positions: positionsToSell.length });
     const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
     const sellResult = await executeSellOrder(positionsToSell, sellCtx);
 
@@ -119,7 +122,7 @@ export async function executeRebalanceSell(session, snapshot, config) {
 
     if (totalShift < dynamicThreshold) return alerts;
 
-    console.log(`\n  🔄 REBALANCE: forecast shifted ${totalShift.toFixed(1)}°F from reference ${rebalanceRef.toFixed(1)}°F (threshold: ${dynamicThreshold}°F for T+${daysOut})`);
+    log.info('rebalance_sell', { shiftF: totalShift.toFixed(1), refF: rebalanceRef.toFixed(1), thresholdF: dynamicThreshold, daysOut });
 
     const currentRangeQuestions = new Set(
         [snapshot.target?.question, snapshot.below?.question, snapshot.above?.question].filter(Boolean),
@@ -165,7 +168,7 @@ export async function executeStopLossSell(session, snapshot, stopLoss) {
 
     if (!stopLoss.triggered) return alerts;
 
-    console.log(`\n  🛑 STOP-LOSS TRIGGERED: ${stopLoss.reason}`);
+    log.warn('stop_loss_triggered', { reason: stopLoss.reason });
     const positionsToSell = collectSellablePositions(session, snapshot);
 
     if (positionsToSell.length === 0) return alerts;

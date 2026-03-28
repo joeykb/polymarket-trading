@@ -21,6 +21,10 @@ import { getTodayET, getTargetDateET, getTomorrowET, daysUntil, getPhase } from 
 import { jsonResponse as json, readJsonBody as readBody, handleCors } from '../../shared/httpServer.js';
 import { createClient } from '../../shared/httpClient.js';
 import { healthResponse, checkDependencies } from '../../shared/health.js';
+import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
+
+const metrics = createMetrics('dashboard_svc');
+const { wrapHandler } = createHttpMetrics(metrics);
 import {
     loadSessionData,
     listAvailableDates,
@@ -123,10 +127,15 @@ async function serveStaticFile(filePath, res) {
 // ── HTTP Server ─────────────────────────────────────────────────────────
 
 const server = http.createServer(
-    requestLogger(createLogger('dashboard-svc-http'), async (req, res) => {
+    wrapHandler(requestLogger(createLogger('dashboard-svc-http'), async (req, res) => {
         const url = new URL(req.url, `http://localhost:${port}`);
 
         try {
+            // ─── Metrics ──────────────────────────────────────────────
+            if (url.pathname === '/metrics') {
+                return metrics.handleRequest(res);
+            }
+
             // ─── Health Check ──────────────────────────────────────────
             if (url.pathname === '/health') {
                 const deps = await checkDependencies({
@@ -332,7 +341,7 @@ const server = http.createServer(
 
                     return json(res, { trades, count: trades.length, serverTime: new Date().toISOString(), source: 'session' });
                 } catch (err) {
-                    console.error('❌ /api/trades error:', err.message);
+                    log.error('trades_error', { error: err.message });
                     return json(res, { trades: [], count: 0, serverTime: new Date().toISOString(), error: err.message });
                 }
             }
@@ -346,6 +355,29 @@ const server = http.createServer(
                     /* intentional: analytics proxy best-effort */
                 }
                 return json(res, { pnlByDate: [], totals: {} });
+            }
+
+            // ─── API: GET /api/analytics/performance → data-svc ─────
+            if (url.pathname === '/api/analytics/performance') {
+                try {
+                    const from = url.searchParams.get('from') || '';
+                    const to = url.searchParams.get('to') || '';
+                    const qs = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&');
+                    const perfUrl = `${DATA_SVC}/api/analytics/performance${qs ? '?' + qs : ''}`;
+                    const perfRes = await fetch(perfUrl, { signal: AbortSignal.timeout(15000) });
+                    if (perfRes.ok) return json(res, await perfRes.json());
+                } catch { /* intentional: analytics proxy best-effort */ }
+                return json(res, { trades: [], summary: {} });
+            }
+
+            // ─── API: GET /api/analytics/forecast-timeline/:id → data-svc
+            if (url.pathname.startsWith('/api/analytics/forecast-timeline/')) {
+                const sessionId = url.pathname.split('/').pop();
+                try {
+                    const tlRes = await fetch(`${DATA_SVC}/api/analytics/forecast-timeline/${sessionId}`, { signal: AbortSignal.timeout(10000) });
+                    if (tlRes.ok) return json(res, await tlRes.json());
+                } catch { /* intentional: timeline proxy best-effort */ }
+                return json(res, { timeline: [] });
             }
 
             // ─── API: GET /api/pipeline ─────────────────────────────────
@@ -583,6 +615,12 @@ const server = http.createServer(
                 await serveStaticFile(path.join(STATIC_DIR, 'admin.html'), res);
                 return;
             }
+            if (url.pathname === '/analytics') {
+                await serveStaticFile(path.join(STATIC_DIR, 'analytics.html'), res);
+                return;
+            }
+
+
             if (url.pathname.startsWith('/static/')) {
                 const relativePath = url.pathname.slice('/static/'.length);
                 if (relativePath.includes('..') || relativePath.includes('\\')) {
@@ -598,10 +636,10 @@ const server = http.createServer(
             res.writeHead(404, { 'Content-Type': 'text/plain' });
             res.end('Not Found');
         } catch (err) {
-            console.error(`❌ ${req.method} ${url.pathname}:`, err.message);
+            log.error('request_error', { method: req.method, path: url.pathname, error: err.message });
             json(res, { error: err.message }, 500);
         }
-    }),
+    })),
 );
 
 const log = createLogger('dashboard-svc');
@@ -610,13 +648,17 @@ server.listen(port, () => {
     log.info('started', { port, date: targetDate, dataSvc: DATA_SVC, tradingSvc: TRADING_SVC, liquiditySvc: LIQUIDITY_SVC });
 });
 
-process.on('SIGINT', () => {
-    log.info('shutting down (SIGINT)');
-    server.close();
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    log.info('shutting down (SIGTERM)');
-    server.close();
-    process.exit(0);
-});
+function gracefulShutdown(signal) {
+    log.info('shutdown_initiated', { signal });
+    server.close(() => {
+        log.info('shutdown_complete', { signal });
+        process.exit(0);
+    });
+    setTimeout(() => {
+        log.warn('shutdown_forced', { signal, reason: 'timeout after 10s' });
+        process.exit(1);
+    }, 10_000).unref();
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

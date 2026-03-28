@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: data-svc-green
@@ -59,7 +59,7 @@ spec:
       volumes:
         - name: output
           persistentVolumeClaim:
-            claimName: tempedge-output
+            claimName: tempedge-output-green
 ---
 apiVersion: v1
 kind: Service
