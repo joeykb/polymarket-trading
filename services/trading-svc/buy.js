@@ -8,9 +8,12 @@
  */
 
 import { Side, OrderType } from '@polymarket/clob-client';
-import { getClient, getConfig, dataSvc, getTodaySpend, recordSpend } from './client.js';
+import { getClient, getConfig, dataSvc, getTodaySpend, recordSpend, clobCall } from './client.js';
 import { verifyOrderFill, verifyOrderFills } from './verify.js';
+import { createLogger } from '../../shared/logger.js';
 
+
+const log = createLogger('trading-svc');
 // ── Single Position Order ───────────────────────────────────────────────
 
 /**
@@ -39,41 +42,41 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             bestBid = liqTokenData.bestBid || null;
             bestAsk = liqTokenData.bestAsk || null;
             askSize = liqTokenData.askDepth || 0;
-            console.log(
+            log.info(
                 `  📡 ${position.label}: Using live WS data — bid=$${bestBid?.toFixed(4)} | ask=$${bestAsk?.toFixed(4)} | depth=${askSize}`,
             );
         } else {
             // Fallback: direct CLOB REST API call
             try {
                 const client = await getClient();
-                const book = await client.getOrderBook(tokenId);
+                const book = await clobCall(() => client.getOrderBook(tokenId));
                 bestBid = book.bids?.[0]?.price ? parseFloat(book.bids[0].price) : null;
                 bestAsk = book.asks?.[0]?.price ? parseFloat(book.asks[0].price) : null;
                 askSize = book.asks?.[0]?.size ? parseFloat(book.asks[0].size) : 0;
-                console.log(
+                log.info(
                     `  📈 ${position.label}: REST API — bid=$${bestBid?.toFixed(4)} | ask=$${bestAsk?.toFixed(4)} | depth=${askSize}`,
                 );
             } catch (err) {
-                console.log(`  ⚠️  Could not fetch order book: ${err.message} — skipping`);
+                log.info(`  ⚠️  Could not fetch order book: ${err.message} — skipping`);
                 return { success: false, error: `Order book fetch failed: ${err.message}`, position };
             }
         }
 
         if (!bestAsk || !bestBid) {
-            console.log(`  🚫 ${position.label}: No ${!bestAsk ? 'asks' : 'bids'} in order book — ILLIQUID, skipping`);
+            log.info(`  🚫 ${position.label}: No ${!bestAsk ? 'asks' : 'bids'} in order book — ILLIQUID, skipping`);
             return { success: false, error: 'No liquidity — empty order book', position };
         }
 
         const spread = bestAsk - bestBid;
         const spreadPct = spread / bestAsk;
 
-        console.log(
+        log.info(
             `  📈 ${position.label}: bid=$${bestBid.toFixed(4)} | ask=$${bestAsk.toFixed(4)} | spread=${(spreadPct * 100).toFixed(1)}% | depth=${askSize} shares`,
         );
 
         // Liquidity check 1: Spread must be reasonable
         if (spreadPct > MAX_SPREAD_PCT) {
-            console.log(
+            log.info(
                 `  🚫 ${position.label}: Spread ${(spreadPct * 100).toFixed(1)}% > ${MAX_SPREAD_PCT * 100}% max — ILLIQUID, skipping`,
             );
             return { success: false, error: `Spread ${(spreadPct * 100).toFixed(1)}% too wide (max ${MAX_SPREAD_PCT * 100}%)`, position };
@@ -81,12 +84,12 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
 
         // Liquidity check 2: Enough shares available at ask
         if (askSize < MIN_ASK_DEPTH) {
-            console.log(`  🚫 ${position.label}: Only ${askSize} shares at ask (need ${MIN_ASK_DEPTH}) — THIN, skipping`);
+            log.info(`  🚫 ${position.label}: Only ${askSize} shares at ask (need ${MIN_ASK_DEPTH}) — THIN, skipping`);
             return { success: false, error: `Ask depth ${askSize} < min ${MIN_ASK_DEPTH}`, position };
         }
 
         // Use bestAsk for immediate fill
-        console.log(`  ✅ ${position.label}: LIQUID — buying at bestAsk $${bestAsk.toFixed(4)}`);
+        log.info(`  ✅ ${position.label}: LIQUID — buying at bestAsk $${bestAsk.toFixed(4)}`);
         price = bestAsk;
     }
 
@@ -97,7 +100,7 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
     }
     let cost = parseFloat((price * size).toFixed(4));
 
-    console.log(`  📋 ${position.label}: price=$${price.toFixed(4)} × ${size} shares = $${cost.toFixed(4)}`);
+    log.info(`  📋 ${position.label}: price=$${price.toFixed(4)} × ${size} shares = $${cost.toFixed(4)}`);
 
     // Safety: per-position cap
     if (cost > tradingCfg.maxPositionCost) {
@@ -119,9 +122,9 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
     }
 
     if (tradingCfg.mode === 'dry-run') {
-        console.log(`  🧪 DRY-RUN: Would buy ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
-        console.log(`     Token: ${tokenId}`);
-        console.log(`     Cost:  $${cost.toFixed(4)}`);
+        log.info(`  🧪 DRY-RUN: Would buy ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
+        log.info(`     Token: ${tokenId}`);
+        log.info(`     Cost:  $${cost.toFixed(4)}`);
         return {
             success: true,
             dryRun: true,
@@ -138,14 +141,14 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
         const client = await getClient();
 
         // Get market details for tick size and neg risk
-        const market = await client.getMarket(position.conditionId);
+        const market = await clobCall(() => client.getMarket(position.conditionId));
         const tickSize = String(market.minimum_tick_size || '0.01');
         const negRisk = market.neg_risk || false;
         const minSize = parseFloat(market.minimum_order_size || '0');
 
         // Bump size to market minimum if needed
         if (minSize > 0 && size < minSize) {
-            console.log(`  ⚠️  Size ${size} below market min ${minSize}, bumping up`);
+            log.info(`  ⚠️  Size ${size} below market min ${minSize}, bumping up`);
             size = minSize;
             cost = parseFloat((price * size).toFixed(4));
         }
@@ -159,20 +162,20 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             };
         }
 
-        console.log(`  💰 LIVE: Buying ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
-        console.log(`     Token: ${tokenId} | Tick: ${tickSize} | NegRisk: ${negRisk} | MinSize: ${minSize}`);
+        log.info(`  💰 LIVE: Buying ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
+        log.info(`     Token: ${tokenId} | Tick: ${tickSize} | NegRisk: ${negRisk} | MinSize: ${minSize}`);
 
         // Self-trade prevention
         try {
-            await client.cancelMarketOrders({ asset_id: tokenId });
-            console.log(`  🧹 Cleared existing orders for token (self-trade prevention)`);
+            await clobCall(() => client.cancelMarketOrders({ asset_id: tokenId }));
+            log.info(`  🧹 Cleared existing orders for token (self-trade prevention)`);
         } catch (cancelErr) {
             if (!cancelErr.message?.includes('404') && !cancelErr.message?.includes('no orders')) {
-                console.log(`  ⚠️  Could not cancel existing orders: ${cancelErr.message} (proceeding)`);
+                log.info(`  ⚠️  Could not cancel existing orders: ${cancelErr.message} (proceeding)`);
             }
         }
 
-        const response = await client.createAndPostOrder(
+        const response = await clobCall(() => client.createAndPostOrder(
             {
                 tokenID: tokenId,
                 price,
@@ -184,13 +187,13 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
                 negRisk,
             },
             OrderType.GTC, // createAndPostOrder only supports GTC|GTD; FOK requires createAndPostMarketOrder
-        );
+        ));
 
-        console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
+        log.info(`  📨 CLOB Response: ${JSON.stringify(response)}`);
 
         if (!response.orderID || response.status === 400 || response.status === 'error') {
             const errMsg = response.errorMsg || response.error || response.data?.error || `status ${response.status}`;
-            console.log(`  ❌ Order REJECTED: ${errMsg}`);
+            log.info(`  ❌ Order REJECTED: ${errMsg}`);
             return {
                 success: false,
                 error: errMsg,
@@ -198,7 +201,7 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
             };
         }
 
-        console.log(`  ✅ Order placed: ${response.orderID} (status: ${response.status})`);
+        log.info(`  ✅ Order placed: ${response.orderID} (status: ${response.status})`);
 
         // Verify actual fill price
         const fill = await verifyOrderFill(response.orderID, 'BUY', price, size, position.label);
@@ -221,7 +224,7 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
         // Track slippage: delta between ask price at decision time and actual fill
         const slippage = parseFloat((actualPrice - price).toFixed(4)); // positive = paid more
         if (slippage !== 0) {
-            console.log(`  📉 Slippage: ${slippage > 0 ? '+' : ''}$${slippage.toFixed(4)} (asked $${price.toFixed(4)}, filled $${actualPrice.toFixed(4)})`);
+            log.info(`  📉 Slippage: ${slippage > 0 ? '+' : ''}$${slippage.toFixed(4)} (asked $${price.toFixed(4)}, filled $${actualPrice.toFixed(4)})`);
         }
 
         return {
@@ -239,8 +242,8 @@ export async function placeSingleOrder(position, tradingCfg, liqTokenData = null
         };
     } catch (err) {
         const detail = err.response?.data || err.data || '';
-        console.log(`  ❌ Order FAILED for "${position.question}": ${err.message}`);
-        if (detail) console.log(`     Detail: ${JSON.stringify(detail)}`);
+        log.info(`  ❌ Order FAILED for "${position.question}": ${err.message}`);
+        if (detail) log.info(`     Detail: ${JSON.stringify(detail)}`);
         return {
             success: false,
             error: err.message,
@@ -264,18 +267,18 @@ export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionConte
     const tradingCfg = getConfig();
 
     if (tradingCfg.mode === 'disabled') {
-        console.log('  ⚠️  Trading disabled (TRADING_MODE=disabled)');
+        log.info('  ⚠️  Trading disabled (TRADING_MODE=disabled)');
         return null;
     }
 
     if (snapshot.phase && snapshot.phase !== 'buy') {
-        console.log(`  ⚠️  Skipping real trade — phase is "${snapshot.phase}" (only trades in "buy" phase)`);
+        log.info(`  ⚠️  Skipping real trade — phase is "${snapshot.phase}" (only trades in "buy" phase)`);
         return null;
     }
 
-    console.log(`\n  🏦 Trading Mode: ${tradingCfg.mode.toUpperCase()}`);
-    console.log(`  💳 Max/position: $${tradingCfg.maxPositionCost} | Max/day: $${tradingCfg.maxDailySpend}`);
-    console.log(`  📈 Today's spend so far: $${(await getTodaySpend()).toFixed(4)}`);
+    log.info(`\n  🏦 Trading Mode: ${tradingCfg.mode.toUpperCase()}`);
+    log.info(`  💳 Max/position: $${tradingCfg.maxPositionCost} | Max/day: $${tradingCfg.maxDailySpend}`);
+    log.info(`  📈 Today's spend so far: $${(await getTodaySpend()).toFixed(4)}`);
 
     // Build liquidity lookup by question for matching
     const liqByQuestion = new Map();
@@ -315,12 +318,12 @@ export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionConte
     const successfulOrders = results.filter((r) => r.success);
     const totalCost = successfulOrders.reduce((sum, r) => sum + (r.cost || r.buyPrice), 0);
 
-    console.log(`\n  📋 Order Summary: ${successfulOrders.length}/${positions.length} succeeded`);
+    log.info(`\n  📋 Order Summary: ${successfulOrders.length}/${positions.length} succeeded`);
 
     if (successfulOrders.length === 0) {
-        console.log(`  ❌ All positions failed — no buy recorded, will retry`);
+        log.info(`  ❌ All positions failed — no buy recorded, will retry`);
         for (const r of results) {
-            console.log(`     • ${r.label}: ${r.error || 'unknown error'}`);
+            log.info(`     • ${r.label}: ${r.error || 'unknown error'}`);
         }
         return null;
     }
@@ -347,7 +350,7 @@ export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionConte
         simulated: tradingCfg.mode === 'dry-run',
     };
 
-    console.log(`  💰 Total cost: $${buyOrder.totalCost.toFixed(4)}`);
+    log.info(`  💰 Total cost: $${buyOrder.totalCost.toFixed(4)}`);
 
     // Post-Trade Verification
     if (tradingCfg.mode === 'live') {
@@ -373,9 +376,9 @@ export async function executeRealBuyOrder(snapshot, liqTokens = [], sessionConte
         });
         await dataSvc('POST', '/api/positions', { tradeId: dbTradeId, positions: buyOrder.positions });
         buyOrder.dbTradeId = dbTradeId;
-        console.log(`  📦 DB: buy trade #${dbTradeId} saved (${buyOrder.positions.length} positions)`);
+        log.info(`  📦 DB: buy trade #${dbTradeId} saved (${buyOrder.positions.length} positions)`);
     } catch (dbErr) {
-        console.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
+        log.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
     }
 
     return buyOrder;

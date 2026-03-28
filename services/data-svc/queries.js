@@ -468,57 +468,231 @@ export function insertAlertsBatch(alerts) {
     insertMany(alerts);
 }
 
-// ── Analytics ────────────────────────────────────────────────────────────
+// ── Historical Analytics ─────────────────────────────────────────────────
 
 /**
- * Get P&L summary across all dates
+ * Get detailed per-trade performance with forecast context.
+ * Joins trades → positions → sessions → snapshots to build
+ * a complete picture of each trade's lifecycle.
+ *
+ * @param {string} [from] - Start date (inclusive), e.g. '2026-03-01'
+ * @param {string} [to]   - End date (inclusive), e.g. '2026-03-27'
+ * @returns {{ trades: Array, summary: Object }}
  */
-export function getPnLSummary() {
+export function getTradePerformance(from, to) {
     const db = getDb();
-    return db
-        .prepare(
-            `
+
+    // Build date filter
+    let dateFilter = '';
+    const params = [];
+    if (from) { dateFilter += ' AND t.target_date >= ?'; params.push(from); }
+    if (to)   { dateFilter += ' AND t.target_date <= ?'; params.push(to); }
+
+    // Get all buy trades with session context
+    const buyTrades = db.prepare(`
         SELECT
+            t.id as trade_id,
+            t.session_id,
             t.target_date,
-            t.market_id,
-            m.name as market_name,
-            SUM(CASE WHEN t.type = 'buy' THEN t.total_cost ELSE 0 END) as total_bought,
-            SUM(CASE WHEN t.type = 'sell' THEN t.total_proceeds ELSE 0 END) as total_sold,
-            SUM(CASE WHEN t.type = 'redeem' THEN t.total_proceeds ELSE 0 END) as total_redeemed,
-            COUNT(DISTINCT t.id) as trade_count
+            t.placed_at,
+            t.mode,
+            t.total_cost,
+            t.total_proceeds,
+            t.status as trade_status,
+            t.actual_cost,
+            s.initial_forecast_temp,
+            s.initial_target_range,
+            s.status as session_status,
+            s.phase as session_phase
         FROM trades t
-        JOIN markets m ON t.market_id = m.id
-        GROUP BY t.target_date, t.market_id
-        ORDER BY t.target_date DESC
-    `,
-        )
-        .all();
+        LEFT JOIN sessions s ON t.session_id = s.id
+        WHERE t.type = 'buy'
+          AND t.status != 'failed'
+          ${dateFilter}
+        ORDER BY t.target_date DESC, t.placed_at ASC
+    `).all(...params);
+
+    // Get all sell/redeem trades indexed by target_date
+    const sellTrades = db.prepare(`
+        SELECT target_date, type, total_proceeds, placed_at
+        FROM trades
+        WHERE type IN ('sell', 'redeem')
+          AND status != 'failed'
+          ${dateFilter}
+        ORDER BY target_date, placed_at
+    `).all(...params);
+
+    const sellByDate = {};
+    for (const st of sellTrades) {
+        if (!sellByDate[st.target_date]) sellByDate[st.target_date] = [];
+        sellByDate[st.target_date].push(st);
+    }
+
+    const trades = [];
+    let totalCost = 0;
+    let totalProceeds = 0;
+    let wins = 0;
+    let losses = 0;
+    let bestTrade = null;
+    let worstTrade = null;
+
+    for (const bt of buyTrades) {
+        // Get positions for this trade
+        const positions = db.prepare(`
+            SELECT label, question, price, shares, fill_price, fill_shares,
+                   status, sell_price, sold_at, redeemed_value, redeemed_at
+            FROM positions
+            WHERE trade_id = ?
+            ORDER BY label
+        `).all(bt.trade_id);
+
+        // Get forecast at time of buy (closest snapshot to placed_at)
+        let forecastAtBuy = bt.initial_forecast_temp;
+        if (bt.session_id) {
+            const buySnap = db.prepare(`
+                SELECT forecast_temp
+                FROM snapshots
+                WHERE session_id = ?
+                  AND timestamp <= ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            `).get(bt.session_id, bt.placed_at);
+            if (buySnap) forecastAtBuy = buySnap.forecast_temp;
+        }
+
+        // Get final forecast (last snapshot for this session)
+        let finalForecast = forecastAtBuy;
+        if (bt.session_id) {
+            const lastSnap = db.prepare(`
+                SELECT forecast_temp
+                FROM snapshots
+                WHERE session_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            `).get(bt.session_id);
+            if (lastSnap) finalForecast = lastSnap.forecast_temp;
+        }
+
+        // Get forecast trend (sampled — every Nth snapshot)
+        let forecastTrend = [];
+        if (bt.session_id) {
+            const allSnaps = db.prepare(`
+                SELECT timestamp, forecast_temp, target_price, phase
+                FROM snapshots
+                WHERE session_id = ?
+                ORDER BY timestamp ASC
+            `).all(bt.session_id);
+
+            // Sample to ~30 points max for sparklines
+            const step = Math.max(1, Math.floor(allSnaps.length / 30));
+            forecastTrend = allSnaps
+                .filter((_, i) => i % step === 0 || i === allSnaps.length - 1)
+                .map(s => ({
+                    t: s.timestamp,
+                    temp: s.forecast_temp,
+                    price: s.target_price,
+                    phase: s.phase,
+                }));
+        }
+
+        // Compute realized P&L for this trade
+        const cost = bt.actual_cost || bt.total_cost || 0;
+        const dateSells = sellByDate[bt.target_date] || [];
+        const dateProceeds = dateSells.reduce((s, st) => s + (st.total_proceeds || 0), 0);
+
+        // Position-level P&L
+        const positionsOut = positions.map(p => {
+            const buyVal = (p.fill_price || p.price || 0) * (p.fill_shares || p.shares || 0);
+            let sellVal = 0;
+            if (p.status === 'sold' && p.sell_price != null) {
+                sellVal = p.sell_price * (p.fill_shares || p.shares || 0);
+            } else if (p.status === 'redeemed' && p.redeemed_value != null) {
+                sellVal = p.redeemed_value;
+            }
+            return {
+                label: p.label,
+                question: p.question,
+                buyPrice: p.fill_price || p.price,
+                shares: p.fill_shares || p.shares,
+                sellPrice: p.sell_price,
+                redeemedValue: p.redeemed_value,
+                status: p.status,
+                pnl: sellVal > 0 ? parseFloat((sellVal - buyVal).toFixed(4)) : null,
+            };
+        });
+
+        const realizedPnL = dateProceeds > 0
+            ? parseFloat((dateProceeds - cost).toFixed(4))
+            : null;
+
+        const realizedPnLPct = realizedPnL != null && cost > 0
+            ? parseFloat(((realizedPnL / cost) * 100).toFixed(1))
+            : null;
+
+        const outcome = realizedPnL == null ? 'pending'
+            : realizedPnL > 0 ? 'profit' : realizedPnL < 0 ? 'loss' : 'breakeven';
+
+        totalCost += cost;
+        if (dateProceeds > 0) totalProceeds += dateProceeds;
+        if (realizedPnL != null && realizedPnL > 0) wins++;
+        if (realizedPnL != null && realizedPnL < 0) losses++;
+        if (realizedPnL != null && (bestTrade == null || realizedPnL > bestTrade.pnl)) {
+            bestTrade = { date: bt.target_date, pnl: realizedPnL };
+        }
+        if (realizedPnL != null && (worstTrade == null || realizedPnL < worstTrade.pnl)) {
+            worstTrade = { date: bt.target_date, pnl: realizedPnL };
+        }
+
+        trades.push({
+            targetDate: bt.target_date,
+            sessionId: bt.session_id,
+            placedAt: bt.placed_at,
+            mode: bt.mode,
+            totalCost: parseFloat(cost.toFixed(4)),
+            initialForecast: bt.initial_forecast_temp,
+            initialTargetRange: bt.initial_target_range,
+            forecastAtBuy: forecastAtBuy,
+            finalForecast: finalForecast,
+            forecastTrend,
+            positions: positionsOut,
+            outcome,
+            realizedPnL,
+            realizedPnLPct,
+            sessionStatus: bt.session_status,
+            sessionPhase: bt.session_phase,
+        });
+    }
+
+    const settled = wins + losses;
+    const summary = {
+        totalTrades: buyTrades.length,
+        settledTrades: settled,
+        totalCost: parseFloat(totalCost.toFixed(4)),
+        totalProceeds: parseFloat(totalProceeds.toFixed(4)),
+        netPnL: parseFloat((totalProceeds - totalCost).toFixed(4)),
+        winRate: settled > 0 ? parseFloat((wins / settled).toFixed(3)) : null,
+        wins,
+        losses,
+        avgPnLPerTrade: settled > 0 ? parseFloat(((totalProceeds - totalCost) / settled).toFixed(4)) : null,
+        bestTrade,
+        worstTrade,
+    };
+
+    return { trades, summary };
 }
 
 /**
- * Get forecast accuracy over time
+ * Get the full forecast timeline for a specific session (for expanded sparkline view).
  */
-export function getForecastAccuracy() {
+export function getForecastTimeline(sessionId) {
     const db = getDb();
-    return db
-        .prepare(
-            `
-        SELECT
-            s.target_date,
-            s.initial_forecast_temp,
-            (SELECT sn.forecast_temp FROM snapshots sn
-             WHERE sn.session_id = s.id
-             ORDER BY sn.timestamp DESC LIMIT 1) as final_forecast,
-            (SELECT sn.current_temp FROM snapshots sn
-             WHERE sn.session_id = s.id AND sn.current_temp IS NOT NULL
-             ORDER BY sn.timestamp DESC LIMIT 1) as actual_temp,
-            s.market_id
-        FROM sessions s
-        WHERE s.phase IN ('resolve', 'monitor')
-        ORDER BY s.target_date DESC
-    `,
-        )
-        .all();
+    return db.prepare(`
+        SELECT timestamp, forecast_temp, forecast_change, target_price,
+               below_price, above_price, phase, current_temp, max_today
+        FROM snapshots
+        WHERE session_id = ?
+        ORDER BY timestamp ASC
+    `).all(sessionId);
 }
 
 // ── Markets ──────────────────────────────────────────────────────────────

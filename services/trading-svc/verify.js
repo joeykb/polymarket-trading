@@ -7,8 +7,11 @@
  * Extracted from the monolithic trading.js.
  */
 
-import { getClient } from './client.js';
+import { getClient, clobCall } from './client.js';
+import { createLogger } from '../../shared/logger.js';
 
+
+const log = createLogger('trading-svc');
 // ── Single Order Verification ───────────────────────────────────────────
 
 /**
@@ -41,7 +44,7 @@ export async function verifyOrderFill(orderId, side, intendedPrice, intendedSize
         try {
             await new Promise((r) => setTimeout(r, attempt === 1 ? initialDelay : retryDelay));
             const client = await getClient();
-            const orderInfo = await client.getOrder(orderId);
+            const orderInfo = await clobCall(() => client.getOrder(orderId));
             if (!orderInfo) continue;
 
             result.orderStatus = orderInfo.status || null;
@@ -53,11 +56,11 @@ export async function verifyOrderFill(orderId, side, intendedPrice, intendedSize
                 result.fillSize = matched > 0 ? matched : intendedSize;
                 result.fillCost = parseFloat((result.fillPrice * result.fillSize).toFixed(4));
                 result.verified = true;
-                console.log(
+                log.info(
                     `  ✅ ${label} ${side} VERIFIED (avg_price): $${result.fillPrice.toFixed(4)} × ${result.fillSize} = $${result.fillCost.toFixed(4)}`,
                 );
                 if (Math.abs(result.fillPrice - intendedPrice) > 0.005) {
-                    console.log(
+                    log.info(
                         `     ⚠️  Fill differs from intended: $${intendedPrice.toFixed(4)} → $${result.fillPrice.toFixed(4)} (Δ$${(result.fillPrice - intendedPrice).toFixed(4)})`,
                     );
                 }
@@ -76,11 +79,11 @@ export async function verifyOrderFill(orderId, side, intendedPrice, intendedSize
                     result.fillSize = totalFillSize;
                     result.fillCost = parseFloat(totalFillValue.toFixed(4));
                     result.verified = true;
-                    console.log(
+                    log.info(
                         `  ✅ ${label} ${side} VERIFIED (trades): $${result.fillPrice.toFixed(4)} × ${result.fillSize} = $${result.fillCost.toFixed(4)}`,
                     );
                     if (Math.abs(result.fillPrice - intendedPrice) > 0.005) {
-                        console.log(
+                        log.info(
                             `     ⚠️  Fill differs from intended: $${intendedPrice.toFixed(4)} → $${result.fillPrice.toFixed(4)} (Δ$${(result.fillPrice - intendedPrice).toFixed(4)})`,
                         );
                     }
@@ -91,24 +94,24 @@ export async function verifyOrderFill(orderId, side, intendedPrice, intendedSize
             // Method 3: Check if partially matched but no trade details yet
             const matched = parseFloat(orderInfo.size_matched || 0);
             if (matched > 0 && attempt < maxRetries) {
-                console.log(`  ⏳ ${label}: ${matched} shares matched but no trade details yet (attempt ${attempt}/${maxRetries})`);
+                log.info(`  ⏳ ${label}: ${matched} shares matched but no trade details yet (attempt ${attempt}/${maxRetries})`);
                 continue;
             }
 
             // If order is still LIVE (on the book), keep waiting
             if (orderInfo.status === 'LIVE' && attempt < maxRetries) {
-                console.log(`  ⏳ ${label}: order still LIVE on book (attempt ${attempt}/${maxRetries})`);
+                log.info(`  ⏳ ${label}: order still LIVE on book (attempt ${attempt}/${maxRetries})`);
                 continue;
             }
         } catch (err) {
-            console.log(`  ℹ️  ${label} fill verification attempt ${attempt} failed: ${err.message}`);
+            log.info(`  ℹ️  ${label} fill verification attempt ${attempt} failed: ${err.message}`);
         }
     }
 
     if (!result.verified) {
-        console.log(`  ⚠️  ${label}: Could not verify fill — will NOT record unverified price`);
-        console.log(`     Order ${orderId} — status: ${result.orderStatus || 'unknown'}`);
-        console.log(`     ❗ Price will be verified asynchronously before DB write`);
+        log.info(`  ⚠️  ${label}: Could not verify fill — will NOT record unverified price`);
+        log.info(`     Order ${orderId} — status: ${result.orderStatus || 'unknown'}`);
+        log.info(`     ❗ Price will be verified asynchronously before DB write`);
     }
 
     return result;
@@ -132,14 +135,14 @@ export async function verifyOrderFills(buyOrder) {
     const POLL_INTERVAL_MS = 2000;
     const MAX_POLLS = 5;
 
-    console.log(`\n  🔍 Verifying order fills (waiting ${POLL_DELAY_MS / 1000}s for settlement)...`);
+    log.info(`\n  🔍 Verifying order fills (waiting ${POLL_DELAY_MS / 1000}s for settlement)...`);
     await new Promise((r) => setTimeout(r, POLL_DELAY_MS));
 
     let client;
     try {
         client = await getClient();
     } catch (err) {
-        console.warn(`  ⚠️  Cannot verify fills — client init failed: ${err.message}`);
+        log.warn(`  ⚠️  Cannot verify fills — client init failed: ${err.message}`);
         return;
     }
 
@@ -156,7 +159,7 @@ export async function verifyOrderFills(buyOrder) {
             if (pos.fillStatus && pos.fillStatus !== 'pending') continue;
 
             try {
-                const order = await client.getOrder(pos.orderId);
+                const order = await clobCall(() => client.getOrder(pos.orderId));
                 const sizeMatched = parseFloat(order.size_matched) || 0;
                 const originalSize = parseFloat(order.original_size) || pos.shares;
 
@@ -166,14 +169,14 @@ export async function verifyOrderFills(buyOrder) {
                     pos.originalSize = originalSize;
                     pos.fillPct = parseFloat(((sizeMatched / originalSize) * 100).toFixed(1));
                     pos.status = 'filled';
-                    console.log(`  ✅ ${pos.label}: FILLED ${sizeMatched}/${originalSize} shares (${pos.fillPct}%)`);
+                    log.info(`  ✅ ${pos.label}: FILLED ${sizeMatched}/${originalSize} shares (${pos.fillPct}%)`);
                 } else if (order.status === 'CANCELLED') {
                     pos.fillStatus = 'cancelled';
                     pos.sharesMatched = sizeMatched;
                     pos.originalSize = originalSize;
                     pos.fillPct = parseFloat(((sizeMatched / originalSize) * 100).toFixed(1));
                     pos.status = sizeMatched > 0 ? 'partial' : 'cancelled';
-                    console.log(`  ❌ ${pos.label}: CANCELLED — matched ${sizeMatched}/${originalSize} shares before cancel`);
+                    log.info(`  ❌ ${pos.label}: CANCELLED — matched ${sizeMatched}/${originalSize} shares before cancel`);
                 } else if (order.status === 'LIVE') {
                     pos.fillStatus = 'pending';
                     allSettled = false;
@@ -183,20 +186,20 @@ export async function verifyOrderFills(buyOrder) {
                         pos.originalSize = originalSize;
                         pos.fillPct = parseFloat(((sizeMatched / originalSize) * 100).toFixed(1));
                         pos.status = sizeMatched > 0 ? 'partial' : 'unfilled';
-                        console.log(`  ⏳ ${pos.label}: STILL OPEN in book — ${sizeMatched}/${originalSize} matched so far`);
+                        log.info(`  ⏳ ${pos.label}: STILL OPEN in book — ${sizeMatched}/${originalSize} matched so far`);
                     }
                 } else {
-                    console.log(`  ❓ ${pos.label}: Unknown order status "${order.status}"`);
+                    log.info(`  ❓ ${pos.label}: Unknown order status "${order.status}"`);
                     allSettled = false;
                 }
             } catch (err) {
-                console.warn(`  ⚠️  ${pos.label}: Verification error — ${err.message}`);
+                log.warn(`  ⚠️  ${pos.label}: Verification error — ${err.message}`);
                 allSettled = false;
             }
         }
 
         if (!allSettled && attempt < MAX_POLLS) {
-            console.log(`  🔄 Poll ${attempt}/${MAX_POLLS}: some orders still settling...`);
+            log.info(`  🔄 Poll ${attempt}/${MAX_POLLS}: some orders still settling...`);
         }
     }
 
@@ -224,12 +227,12 @@ export async function verifyOrderFills(buyOrder) {
     buyOrder.actualTotalCost = parseFloat(actualTotalCost.toFixed(4));
     buyOrder.fillSummary = { filled: filledCount, partial: partialCount, unfilled: unfilledCount };
 
-    console.log(`\n  📋 Fill Verification Complete:`);
-    console.log(`     Filled: ${filledCount} | Partial: ${partialCount} | Unfilled: ${unfilledCount}`);
-    console.log(`     Actual cost: $${buyOrder.actualTotalCost.toFixed(4)} (estimated: $${buyOrder.totalCost.toFixed(4)})`);
+    log.info(`\n  📋 Fill Verification Complete:`);
+    log.info(`     Filled: ${filledCount} | Partial: ${partialCount} | Unfilled: ${unfilledCount}`);
+    log.info(`     Actual cost: $${buyOrder.actualTotalCost.toFixed(4)} (estimated: $${buyOrder.totalCost.toFixed(4)})`);
 
     if (filledCount === 0 && partialCount === 0) {
-        console.log(`  ❌ NO FILLS — all orders unfilled or cancelled. Clearing buy order.`);
+        log.info(`  ❌ NO FILLS — all orders unfilled or cancelled. Clearing buy order.`);
         buyOrder.allUnfilled = true;
     }
 }

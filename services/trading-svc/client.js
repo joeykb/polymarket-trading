@@ -8,6 +8,37 @@
 import { ClobClient } from '@polymarket/clob-client';
 import { Wallet } from 'ethers';
 import { svcRequest } from '../../shared/httpClient.js';
+import { CircuitBreaker } from '../../shared/circuitBreaker.js';
+import { createLogger } from '../../shared/logger.js';
+
+const log = createLogger('trading-svc');
+
+// ── CLOB Circuit Breaker ────────────────────────────────────────────────
+// Protects all outbound CLOB API calls. Opens after 3 consecutive failures
+// and stays open for 60s before probing with a single request.
+
+const clobBreaker = new CircuitBreaker('clob-api', {
+    failureThreshold: 3,
+    resetTimeMs: 60_000,
+    onStateChange: (name, oldState, newState) => {
+        log.warn('circuit_breaker_state_change', { breaker: name, from: oldState, to: newState });
+    },
+});
+
+/**
+ * Execute a function through the CLOB circuit breaker.
+ * Use this for all CLOB API calls (order book, place order, get order, etc.).
+ * @param {Function} fn - Async function that calls the CLOB API
+ * @returns {Promise<any>}
+ */
+export async function clobCall(fn) {
+    return clobBreaker.call(fn);
+}
+
+/** Get circuit breaker stats for health endpoints */
+export function getClobBreakerStats() {
+    return clobBreaker.stats();
+}
 
 // ── Data-svc Connection ─────────────────────────────────────────────────
 
@@ -73,17 +104,17 @@ export async function getClient() {
 
     const tradingCfg = getConfig();
     _signer = new Wallet(privateKey);
-    console.log(`  🔑 Wallet: ${_signer.address}`);
+    log.info('wallet_initialized', { address: _signer.address });
 
     const tempClient = new ClobClient(tradingCfg.clobHost, tradingCfg.chainId, _signer);
     let apiCreds;
     try {
         apiCreds = await tempClient.createOrDeriveApiKey();
-        console.log(`  🔐 API key derived successfully`);
+        log.info('api_key_derived', { method: 'createOrDerive' });
     } catch (_err) {
         try {
             apiCreds = await tempClient.deriveApiKey();
-            console.log(`  🔐 API key derived via fallback`);
+            log.info('api_key_derived', { method: 'deriveFallback' });
         } catch (err2) {
             throw new Error(`Cannot derive API key: ${err2.message}. You may need to log in to polymarket.com with this wallet first.`, {
                 cause: err2,
@@ -119,6 +150,6 @@ export async function recordSpend(amount, orderDetails) {
             details: orderDetails,
         });
     } catch (err) {
-        console.warn(`  ⚠️  Spend tracking failed: ${err.message}`);
+        log.warn('spend_tracking_failed', { error: err.message, amount });
     }
 }

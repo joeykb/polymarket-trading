@@ -24,6 +24,7 @@ import { healthResponse } from '../../shared/health.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
 import { svcGet } from '../../shared/httpClient.js';
 import { jsonResponse, errorResponse } from '../../shared/httpServer.js';
+import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
 
 const DATA_SVC = services.dataSvc;
 const PORT = parseInt(process.env.LIQUIDITY_PORT || '3001');
@@ -91,7 +92,7 @@ function connectDate(stream) {
     }
 
     stream.status = 'connecting';
-    console.log(`  📡 [${stream.date}] Connecting (${stream.tokens.length} tokens)...`);
+    log.info('ws_connecting', { date: stream.date, tokens: stream.tokens.length });
 
     stream.ws = new WebSocket(WS_URL);
 
@@ -103,7 +104,7 @@ function connectDate(stream) {
         const tokenIds = stream.tokens.map((t) => t.tokenId);
         const sub = { type: 'market', assets_ids: tokenIds, custom_feature_enabled: true };
         stream.ws.send(JSON.stringify(sub));
-        console.log(`  ✅ [${stream.date}] Connected — ${stream.tokens.map((t) => t.label).join(', ')}`);
+        log.info('ws_connected', { date: stream.date, labels: stream.tokens.map((t) => t.label) });
 
         clearInterval(stream.heartbeatTimer);
         stream.heartbeatTimer = setInterval(() => {
@@ -127,7 +128,7 @@ function connectDate(stream) {
     stream.ws.on('close', (code) => {
         stream.status = 'disconnected';
         clearInterval(stream.heartbeatTimer);
-        console.log(`  ⚠️  [${stream.date}] WebSocket closed (code=${code})`);
+        log.warn('ws_closed', { date: stream.date, code });
         scheduleReconnect(stream);
     });
 
@@ -183,11 +184,11 @@ function handleMessage(stream, data) {
                 }
                 break;
             case 'tick_size_change':
-                console.log(`  ⚠️  [${stream.date}] TICK SIZE CHANGE: ${entry.label} ${event.old_tick_size} → ${event.new_tick_size}`);
+                log.warn('tick_size_change', { date: stream.date, label: entry.label, old: event.old_tick_size, new: event.new_tick_size });
                 entry.tickSize = event.new_tick_size;
                 break;
             case 'market_resolved':
-                console.log(`  🏁 [${stream.date}] MARKET RESOLVED: ${entry.label} winner=${event.winning_outcome}`);
+                log.info('market_resolved', { date: stream.date, label: entry.label, winner: event.winning_outcome });
                 entry.resolved = true;
                 entry.winningOutcome = event.winning_outcome;
                 entry.winningAssetId = event.winning_asset_id;
@@ -221,9 +222,7 @@ function handleBookSnapshot(entry, event) {
     entry.lastUpdate = new Date().toISOString();
     assessLiquidity(entry);
 
-    console.log(
-        `  📊 [${entry.label}] book bid=$${bestBid.toFixed(3)} ask=$${bestAsk.toFixed(3)} spread=${(entry.spreadPct * 100).toFixed(1)}% depth=${bestAskDepth}`,
-    );
+    log.debug(`book_update`, { label: entry.label, bestBid, bestAsk, spreadPct: entry.spreadPct, depth: bestAskDepth });
 }
 
 function handlePriceChange(entry, event) {
@@ -349,7 +348,7 @@ async function discoverSessions() {
             }
         }
     } catch (err) {
-        console.warn(`  ⚠️  Session discovery failed: ${err.message}`);
+        log.warn('session_discovery_failed', { error: err.message });
     }
 
     return result;
@@ -372,7 +371,7 @@ async function syncStreams() {
                 .sort()
                 .join(',');
             if (existingIds !== newIds) {
-                console.log(`  🔄 [${date}] Tokens changed, reconnecting...`);
+                log.info('tokens_changed', { date, action: 'reconnecting' });
                 stopDateStream(date);
                 startDateStream(date, tokens);
             }
@@ -383,7 +382,7 @@ async function syncStreams() {
 
     for (const [date] of dateStreams) {
         if (!sessions.has(date)) {
-            console.log(`  🛑 [${date}] Session no longer active, stopping stream.`);
+            log.info('session_inactive', { date, action: 'stopping_stream' });
             stopDateStream(date);
         }
     }
@@ -437,7 +436,7 @@ function startDateStream(date, tokens) {
         stream.totalCount = totalCount;
     }, intervalMs);
 
-    console.log(`  📡 [${date}] Stream started (${tokens.length} tokens)`);
+    log.info('stream_started', { date, tokens: tokens.length });
 }
 
 function stopDateStream(date) {
@@ -454,7 +453,7 @@ function stopDateStream(date) {
         }
     }
     dateStreams.delete(date);
-    console.log(`  🛑 [${date}] Stream stopped.`);
+    log.info('stream_stopped', { date });
 }
 
 // ── Snapshot Building ───────────────────────────────────────────────────
@@ -515,9 +514,18 @@ function getAllSnapshots() {
 
 const log = createLogger('liquidity-svc');
 
+const metrics = createMetrics('liquidity_svc');
+const { wrapHandler } = createHttpMetrics(metrics);
+const wsStreams = metrics.gauge('ws_streams_active', 'Active WebSocket streams');
+
 const server = http.createServer(
-    requestLogger(log, (req, res) => {
+    wrapHandler(requestLogger(log, (req, res) => {
         const url = new URL(req.url, `http://${req.headers.host}`);
+
+        if (url.pathname === '/metrics') {
+            wsStreams.set(dateStreams.size);
+            return metrics.handleRequest(res);
+        }
 
         if (url.pathname === '/health') {
             return jsonResponse(res, healthResponse('liquidity-svc', { streams: dateStreams.size }));
@@ -542,7 +550,7 @@ const server = http.createServer(
         }
 
         errorResponse(res, 'Not found', 404);
-    }),
+    })),
 );
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -569,18 +577,20 @@ async function main() {
     });
 }
 
-process.on('SIGINT', () => {
-    log.info('shutting down');
+function gracefulShutdown(signal) {
+    log.info('shutdown_initiated', { signal, streams: dateStreams.size });
     for (const [date] of dateStreams) stopDateStream(date);
-    server.close();
-    process.exit(0);
-});
+    server.close(() => {
+        log.info('shutdown_complete', { signal });
+        process.exit(0);
+    });
+    setTimeout(() => {
+        log.warn('shutdown_forced', { signal, reason: 'timeout after 10s' });
+        process.exit(1);
+    }, 10_000).unref();
+}
 
-process.on('SIGTERM', () => {
-    log.info('SIGTERM received, shutting down');
-    for (const [date] of dateStreams) stopDateStream(date);
-    server.close();
-    process.exit(0);
-});
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 main();

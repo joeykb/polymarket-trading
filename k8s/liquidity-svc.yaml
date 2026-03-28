@@ -20,6 +20,10 @@ spec:
       labels:
         app: tempedge
         component: liquidity-svc
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3001"
+        prometheus.io/path: "/metrics"
     spec:
       # Wait for data-svc to be ready (session discovery + config)
       initContainers:
@@ -37,6 +41,9 @@ spec:
               value: "3001"
             - name: DATA_SVC_URL
               value: "http://data-svc:3005"
+          envFrom:
+            - secretRef:
+                name: tempedge-service-auth
           resources:
             requests:
               cpu: 25m

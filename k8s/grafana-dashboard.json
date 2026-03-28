@@ -1,0 +1,307 @@
+{
+  "annotations": { "list": [] },
+  "description": "TempEdge Polymarket Trading Infrastructure — Real-time monitoring of all microservices",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "🏥 Service Health",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [{ "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } }, "type": "value" }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Trading SVC",
+      "type": "stat",
+      "targets": [{ "expr": "up{job=~\".*trading.*\"}", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [{ "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } }, "type": "value" }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "id": 2,
+      "title": "Data SVC",
+      "type": "stat",
+      "targets": [{ "expr": "up{job=~\".*data.*\"}", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [{ "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } }, "type": "value" }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "id": 3,
+      "title": "Weather SVC",
+      "type": "stat",
+      "targets": [{ "expr": "up{job=~\".*weather.*\"}", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [{ "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } }, "type": "value" }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 4,
+      "title": "Market SVC",
+      "type": "stat",
+      "targets": [{ "expr": "up{job=~\".*market.*\"}", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [{ "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } }, "type": "value" }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 5,
+      "title": "Liquidity SVC",
+      "type": "stat",
+      "targets": [{ "expr": "up{job=~\".*liquidity.*\"}", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [{ "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } }, "type": "value" }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 6,
+      "title": "Dashboard SVC",
+      "type": "stat",
+      "targets": [{ "expr": "up{job=~\".*dashboard.*\"}", "legendFormat": "" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 200,
+      "title": "📊 HTTP Traffic",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 10,
+      "title": "Request Rate (per service)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(trading_svc_http_requests_total[5m])) by (method)", "legendFormat": "trading-svc {{method}}" },
+        { "expr": "sum(rate(data_svc_http_requests_total[5m])) by (method)", "legendFormat": "data-svc {{method}}" },
+        { "expr": "sum(rate(weather_svc_http_requests_total[5m])) by (method)", "legendFormat": "weather-svc {{method}}" },
+        { "expr": "sum(rate(market_svc_http_requests_total[5m])) by (method)", "legendFormat": "market-svc {{method}}" },
+        { "expr": "sum(rate(liquidity_svc_http_requests_total[5m])) by (method)", "legendFormat": "liquidity-svc {{method}}" },
+        { "expr": "sum(rate(dashboard_svc_http_requests_total[5m])) by (method)", "legendFormat": "dashboard-svc {{method}}" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 11,
+      "title": "Error Rate (5xx)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(trading_svc_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "trading-svc" },
+        { "expr": "sum(rate(data_svc_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "data-svc" },
+        { "expr": "sum(rate(weather_svc_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "weather-svc" },
+        { "expr": "sum(rate(dashboard_svc_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "dashboard-svc" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 300,
+      "title": "⏱️ Latency",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 20,
+      "title": "Trading SVC — Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(trading_svc_http_request_duration_ms_bucket[5m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(trading_svc_http_request_duration_ms_bucket[5m]))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, rate(trading_svc_http_request_duration_ms_bucket[5m]))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 21,
+      "title": "Data SVC — Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(data_svc_http_request_duration_ms_bucket[5m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(data_svc_http_request_duration_ms_bucket[5m]))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, rate(data_svc_http_request_duration_ms_bucket[5m]))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 400,
+      "title": "💰 Trading Operations",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "id": 30,
+      "title": "Trade Operations (cumulative)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "trading_svc_trade_operations_total{result=\"success\"}", "legendFormat": "{{type}} success" },
+        { "expr": "trading_svc_trade_operations_total{result=\"failure\"}", "legendFormat": "{{type}} failure" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "id": 31,
+      "title": "Trade Operation Latency",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(trading_svc_trade_operation_duration_ms_bucket[5m]))", "legendFormat": "p50 {{type}}" },
+        { "expr": "histogram_quantile(0.95, rate(trading_svc_trade_operation_duration_ms_bucket[5m]))", "legendFormat": "p95 {{type}}" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "id": 32,
+      "title": "DB Operations (data-svc)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(data_svc_db_operations_total[5m])) by (table, operation)", "legendFormat": "{{table}}.{{operation}}" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "id": 500,
+      "title": "🔧 System Resources",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "id": 40,
+      "title": "Heap Memory (per service)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "trading_svc_process_heap_bytes", "legendFormat": "trading-svc" },
+        { "expr": "data_svc_process_heap_bytes", "legendFormat": "data-svc" },
+        { "expr": "weather_svc_process_heap_bytes", "legendFormat": "weather-svc" },
+        { "expr": "market_svc_process_heap_bytes", "legendFormat": "market-svc" },
+        { "expr": "liquidity_svc_process_heap_bytes", "legendFormat": "liquidity-svc" },
+        { "expr": "dashboard_svc_process_heap_bytes", "legendFormat": "dashboard-svc" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "id": 41,
+      "title": "RSS Memory (per service)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "trading_svc_process_rss_bytes", "legendFormat": "trading-svc" },
+        { "expr": "data_svc_process_rss_bytes", "legendFormat": "data-svc" },
+        { "expr": "weather_svc_process_rss_bytes", "legendFormat": "weather-svc" },
+        { "expr": "market_svc_process_rss_bytes", "legendFormat": "market-svc" },
+        { "expr": "liquidity_svc_process_rss_bytes", "legendFormat": "liquidity-svc" },
+        { "expr": "dashboard_svc_process_rss_bytes", "legendFormat": "dashboard-svc" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "id": 600,
+      "title": "🌐 WebSocket Streams",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 3 }] } } },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 42 },
+      "id": 50,
+      "title": "Active WS Streams",
+      "type": "stat",
+      "targets": [{ "expr": "liquidity_svc_ws_streams_active", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" } },
+      "gridPos": { "h": 5, "w": 18, "x": 6, "y": 42 },
+      "id": 51,
+      "title": "Service Uptime",
+      "type": "bargauge",
+      "targets": [
+        { "expr": "trading_svc_process_uptime_seconds", "legendFormat": "trading" },
+        { "expr": "data_svc_process_uptime_seconds", "legendFormat": "data" },
+        { "expr": "weather_svc_process_uptime_seconds", "legendFormat": "weather" },
+        { "expr": "market_svc_process_uptime_seconds", "legendFormat": "market" },
+        { "expr": "liquidity_svc_process_uptime_seconds", "legendFormat": "liquidity" },
+        { "expr": "dashboard_svc_process_uptime_seconds", "legendFormat": "dashboard" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["tempedge", "polymarket", "trading"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "TempEdge — Infrastructure Overview",
+  "uid": "tempedge-infra",
+  "version": 1
+}

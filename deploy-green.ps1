@@ -221,11 +221,6 @@ foreach ($layer in $layers) {
     }
 }
 
-# -- Scale down monitor-green initially (don't start trading on green!) ----
-# The monitor is the orchestrator that triggers trading. We deploy it but keep
-# it paused so it doesn't interfere. Uncomment below to run it in green.
-kubectl scale deployment "monitor-$suffix" -n $namespace --replicas=0 2>&1 | Out-Null
-
 # -- Status ----------------------------------------------------------------
 
 Write-Host "`n[STATUS] Green Stack:" -ForegroundColor Cyan

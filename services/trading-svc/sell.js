@@ -8,9 +8,12 @@
  */
 
 import { Side, OrderType } from '@polymarket/clob-client';
-import { getClient, getConfig, dataSvc } from './client.js';
+import { getClient, getConfig, dataSvc, clobCall } from './client.js';
 import { verifyOrderFill } from './verify.js';
+import { createLogger } from '../../shared/logger.js';
 
+
+const log = createLogger('trading-svc');
 // ── Single Position Sell ────────────────────────────────────────────────
 
 /**
@@ -33,19 +36,19 @@ async function placeSellOrder(position, tradingCfg) {
     let price, bidSize;
     try {
         const client = await getClient();
-        const book = await client.getOrderBook(tokenId);
+        const book = await clobCall(() => client.getOrderBook(tokenId));
         const bestBid = book.bids?.[0]?.price ? parseFloat(book.bids[0].price) : null;
         bidSize = book.bids?.[0]?.size ? parseFloat(book.bids[0].size) : 0;
 
         if (!bestBid || bestBid <= 0) {
-            console.log(`  🚫 ${position.label}: No bids in order book — cannot sell`);
+            log.info(`  🚫 ${position.label}: No bids in order book — cannot sell`);
             return { success: false, error: 'No bids in order book', position };
         }
 
         price = bestBid;
-        console.log(`  📈 ${position.label} SELL: bestBid=$${price.toFixed(4)} depth=${bidSize} shares`);
+        log.info(`  📈 ${position.label} SELL: bestBid=$${price.toFixed(4)} depth=${bidSize} shares`);
     } catch (err) {
-        console.log(`  ⚠️  Could not fetch order book for sell: ${err.message}`);
+        log.info(`  ⚠️  Could not fetch order book for sell: ${err.message}`);
         return { success: false, error: `Order book fetch failed: ${err.message}`, position };
     }
 
@@ -53,9 +56,9 @@ async function placeSellOrder(position, tradingCfg) {
     const proceeds = parseFloat((price * size).toFixed(4));
 
     if (tradingCfg.mode === 'dry-run') {
-        console.log(`  🧪 DRY-RUN SELL: Would sell ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
-        console.log(`     Token: ${tokenId}`);
-        console.log(`     Proceeds: $${proceeds.toFixed(4)}`);
+        log.info(`  🧪 DRY-RUN SELL: Would sell ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
+        log.info(`     Token: ${tokenId}`);
+        log.info(`     Proceeds: $${proceeds.toFixed(4)}`);
         return {
             success: true,
             dryRun: true,
@@ -71,23 +74,23 @@ async function placeSellOrder(position, tradingCfg) {
     try {
         const client = await getClient();
 
-        const market = await client.getMarket(position.conditionId);
+        const market = await clobCall(() => client.getMarket(position.conditionId));
         const tickSize = String(market.minimum_tick_size || '0.01');
         const negRisk = market.neg_risk || false;
 
-        console.log(`  💰 LIVE SELL: Selling ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
-        console.log(`     Token: ${tokenId} | Tick: ${tickSize} | NegRisk: ${negRisk}`);
+        log.info(`  💰 LIVE SELL: Selling ${size} share(s) of "${position.question}" at $${price.toFixed(4)}`);
+        log.info(`     Token: ${tokenId} | Tick: ${tickSize} | NegRisk: ${negRisk}`);
 
         // Cancel any existing orders on this token to prevent self-matching
         try {
-            await client.cancelMarketOrders({ asset_id: tokenId });
-            console.log(`     Cleared existing orders for token (self-trade prevention)`);
+            await clobCall(() => client.cancelMarketOrders({ asset_id: tokenId }));
+            log.info(`     Cleared existing orders for token (self-trade prevention)`);
         } catch (cancelErr) {
-            console.log(`     Could not cancel existing orders: ${cancelErr.message}`);
+            log.info(`     Could not cancel existing orders: ${cancelErr.message}`);
         }
 
         // Create order first, then post separately for better error handling
-        const order = await client.createOrder(
+        const order = await clobCall(() => client.createOrder(
             {
                 tokenID: tokenId,
                 price,
@@ -98,27 +101,27 @@ async function placeSellOrder(position, tradingCfg) {
                 tickSize,
                 negRisk,
             },
-        );
+        ));
 
-        console.log(`  📝 Order signed: maker=${order.maker} sigType=${order.signatureType}`);
+        log.info(`  📝 Order signed: maker=${order.maker} sigType=${order.signatureType}`);
 
-        const response = await client.postOrder(order, OrderType.GTC);
+        const response = await clobCall(() => client.postOrder(order, OrderType.GTC));
 
-        console.log(`  📨 CLOB Response: ${JSON.stringify(response)}`);
+        log.info(`  📨 CLOB Response: ${JSON.stringify(response)}`);
 
         if (response.error || response.status === 400) {
             const errMsg = response.error || response.errorMsg || `status ${response.status}`;
-            console.log(`  ❌ Sell order REJECTED: ${errMsg}`);
+            log.info(`  ❌ Sell order REJECTED: ${errMsg}`);
             return { success: false, error: errMsg, position };
         }
 
         const orderID = response.orderID || response.order_id;
         if (!orderID) {
-            console.log(`  ❌ Sell order REJECTED: no orderID in response`);
+            log.info(`  ❌ Sell order REJECTED: no orderID in response`);
             return { success: false, error: 'No orderID in response', position };
         }
 
-        console.log(`  ✅ Sell order placed: ${orderID}`);
+        log.info(`  ✅ Sell order placed: ${orderID}`);
 
         // Verify actual fill price — SELLs get extra retries (GTC may not fill instantly)
         const fill = await verifyOrderFill(orderID, 'SELL', price, size, position.label);
@@ -136,8 +139,8 @@ async function placeSellOrder(position, tradingCfg) {
         };
     } catch (err) {
         const detail = err.response?.data || err.data || '';
-        console.log(`  ❌ Sell order FAILED for "${position.question}": ${err.message}`);
-        if (detail) console.log(`     Detail: ${JSON.stringify(detail)}`);
+        log.info(`  ❌ Sell order FAILED for "${position.question}": ${err.message}`);
+        if (detail) log.info(`     Detail: ${JSON.stringify(detail)}`);
         return { success: false, error: err.message, position };
     }
 }
@@ -156,21 +159,24 @@ export async function executeSellOrder(positions, sessionContext = {}) {
     const tradingCfg = getConfig();
 
     if (tradingCfg.mode === 'disabled') {
-        console.log('  ⚠️  Trading disabled — skipping sell');
+        log.info('  ⚠️  Trading disabled — skipping sell');
         return null;
     }
 
-    console.log(`\n  📉 Rebalance Sell — ${tradingCfg.mode.toUpperCase()} mode`);
-    console.log(`  Selling ${positions.length} out-of-range position(s):`);
+    log.info(`\n  📉 Rebalance Sell — ${tradingCfg.mode.toUpperCase()} mode`);
+    log.info(`  Selling ${positions.length} out-of-range position(s):`);
     for (const p of positions) {
-        console.log(`    • ${p.label}: "${p.question}"`);
+        log.info(`    • ${p.label}: "${p.question}"`);
     }
 
-    const results = [];
-    for (const position of positions) {
-        const result = await placeSellOrder(position, tradingCfg);
-        results.push({ ...position, ...result });
-    }
+    // Execute sell orders concurrently — each position targets a different conditionId,
+    // so there's no self-trade risk from parallel execution (same pattern as buy.js).
+    const orderPromises = positions.map((position) =>
+        placeSellOrder(position, tradingCfg)
+            .then((result) => ({ ...position, ...result }))
+            .catch((err) => ({ ...position, success: false, error: err.message })),
+    );
+    const results = await Promise.all(orderPromises);
 
     const successCount = results.filter((r) => r.success).length;
     const totalProceeds = results.filter((r) => r.success).reduce((sum, r) => sum + (r.proceeds || 0), 0);
@@ -196,8 +202,8 @@ export async function executeSellOrder(positions, sessionContext = {}) {
         totalProceeds: parseFloat(totalProceeds.toFixed(4)),
     };
 
-    console.log(`\n  📋 Sell Summary: ${successCount}/${positions.length} succeeded, ${verifiedCount} verified`);
-    console.log(`  💰 Total proceeds: $${sellOrder.totalProceeds.toFixed(4)}`);
+    log.info(`\n  📋 Sell Summary: ${successCount}/${positions.length} succeeded, ${verifiedCount} verified`);
+    log.info(`  💰 Total proceeds: $${sellOrder.totalProceeds.toFixed(4)}`);
 
     // Persist to Database (via data-svc)
     try {
@@ -227,7 +233,7 @@ export async function executeSellOrder(positions, sessionContext = {}) {
             })),
         });
         sellOrder.dbTradeId = dbTradeId;
-        console.log(`  📦 DB: sell trade #${dbTradeId} saved (status: ${tradeStatus})`);
+        log.info(`  📦 DB: sell trade #${dbTradeId} saved (status: ${tradeStatus})`);
 
         // Mark buy positions as sold (only if fill is verified)
         for (const pos of sellOrder.positions) {
@@ -238,19 +244,19 @@ export async function executeSellOrder(positions, sessionContext = {}) {
                         soldAt: sellOrder.executedAt,
                         sellOrderId: pos.orderId,
                     });
-                    console.log(`  🏷️  Buy position #${pos.buyPositionId} marked SOLD at $${pos.sellPrice.toFixed(4)}`);
+                    log.info(`  🏷️  Buy position #${pos.buyPositionId} marked SOLD at $${pos.sellPrice.toFixed(4)}`);
                 } catch (err) {
-                    console.warn(`  ⚠️  Could not mark buy position #${pos.buyPositionId} as sold: ${err.message}`);
+                    log.warn(`  ⚠️  Could not mark buy position #${pos.buyPositionId} as sold: ${err.message}`);
                 }
             }
         }
     } catch (dbErr) {
-        console.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
+        log.warn(`  ⚠️  DB write failed (non-fatal): ${dbErr.message}`);
     }
 
     // Deferred verification for unverified fills
     if (unverifiedSuccesses.length > 0) {
-        console.log(`  🔄 ${unverifiedSuccesses.length} sell(s) pending verification — starting background check`);
+        log.info(`  🔄 ${unverifiedSuccesses.length} sell(s) pending verification — starting background check`);
         deferredVerifySells(unverifiedSuccesses, sellOrder, sessionContext);
     }
 
@@ -284,7 +290,7 @@ async function deferredVerifySells(unverifiedResults, sellOrder, sessionContext)
 
                 if (fill.verified) {
                     r._deferredVerified = true;
-                    console.log(
+                    log.info(
                         `  🔔 DEFERRED VERIFIED: ${r.label} SELL at $${fill.fillPrice.toFixed(4)} × ${fill.fillSize} = $${fill.fillCost.toFixed(4)} (attempt ${attempt})`,
                     );
 
@@ -298,7 +304,7 @@ async function deferredVerifySells(unverifiedResults, sellOrder, sessionContext)
                                 actualCost: fill.fillCost,
                             });
                         } catch (err) {
-                            console.warn(`  ⚠️  Deferred DB trade update failed: ${err.message}`);
+                            log.warn(`  ⚠️  Deferred DB trade update failed: ${err.message}`);
                         }
                     }
 
@@ -310,9 +316,9 @@ async function deferredVerifySells(unverifiedResults, sellOrder, sessionContext)
                                 soldAt: sellOrder.executedAt,
                                 sellOrderId: r.orderId,
                             });
-                            console.log(`  🏷️  Deferred: Buy position #${r.buyPositionId} marked SOLD at $${fill.fillPrice.toFixed(4)}`);
+                            log.info(`  🏷️  Deferred: Buy position #${r.buyPositionId} marked SOLD at $${fill.fillPrice.toFixed(4)}`);
                         } catch (err) {
-                            console.warn(`  ⚠️  Deferred position-sold update failed: ${err.message}`);
+                            log.warn(`  ⚠️  Deferred position-sold update failed: ${err.message}`);
                         }
                     }
 
@@ -330,11 +336,11 @@ async function deferredVerifySells(unverifiedResults, sellOrder, sessionContext)
                                     pos.sellShares = fill.fillSize;
                                     pos.sellProceeds = fill.fillCost;
                                     await dataSvc('PUT', `/api/session-files/${targetDate}`, session);
-                                    console.log(`  📄 Session file updated with verified sell price`);
+                                    log.info(`  📄 Session file updated with verified sell price`);
                                 }
                             }
                         } catch (err) {
-                            console.warn(`  ⚠️  Deferred session update failed: ${err.message}`);
+                            log.warn(`  ⚠️  Deferred session update failed: ${err.message}`);
                         }
                     }
                 } else {
@@ -342,12 +348,12 @@ async function deferredVerifySells(unverifiedResults, sellOrder, sessionContext)
                 }
             } catch (err) {
                 allDone = false;
-                console.log(`  ℹ️  Deferred verification attempt ${attempt} for ${r.label}: ${err.message}`);
+                log.info(`  ℹ️  Deferred verification attempt ${attempt} for ${r.label}: ${err.message}`);
             }
         }
 
         if (allDone) {
-            console.log(`  ✅ All deferred sell verifications complete`);
+            log.info(`  ✅ All deferred sell verifications complete`);
             return;
         }
     }
@@ -355,9 +361,9 @@ async function deferredVerifySells(unverifiedResults, sellOrder, sessionContext)
     // After all attempts, log remaining unverified
     const stillUnverified = unverifiedResults.filter((r) => !r._deferredVerified);
     if (stillUnverified.length > 0) {
-        console.warn(`  ❌ ${stillUnverified.length} sell(s) could NOT be verified after ${maxAttempts} attempts:`);
+        log.warn(`  ❌ ${stillUnverified.length} sell(s) could NOT be verified after ${maxAttempts} attempts:`);
         for (const r of stillUnverified) {
-            console.warn(`     • ${r.label}: order ${r.orderId} — CHECK POLYMARKET ACTIVITY MANUALLY`);
+            log.warn(`     • ${r.label}: order ${r.orderId} — CHECK POLYMARKET ACTIVITY MANUALLY`);
         }
     }
 }

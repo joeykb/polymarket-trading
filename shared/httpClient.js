@@ -10,6 +10,9 @@
 
 const DEFAULT_TIMEOUT_MS = 10000;
 
+/** Service auth key — injected into all outbound requests */
+const SERVICE_KEY = process.env.SERVICE_AUTH_KEY || '';
+
 /**
  * Make an HTTP request to another service. Throws on error.
  * @param {string} url
@@ -27,6 +30,7 @@ export async function svcRequest(url, { method = 'GET', body, timeoutMs = DEFAUL
     try {
         const headers = { 'Content-Type': 'application/json' };
         if (requestId) headers['X-Request-Id'] = requestId;
+        if (SERVICE_KEY) headers['x-service-key'] = SERVICE_KEY;
 
         const opts = {
             method,

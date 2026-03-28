@@ -23,7 +23,7 @@ import http from 'http';
 import { createLogger, requestLogger } from '../../shared/logger.js';
 import { getDb, closeDb } from './db.js';
 import { compressExistingFiles, listSessionFiles, OUTPUT_DIR } from './storage.js';
-import { handleRequest } from './routes.js';
+import { handleRequest, metricsWrap } from './routes.js';
 import { withCors } from '../../shared/httpServer.js';
 
 const PORT = parseInt(process.env.DATA_SVC_PORT || '3005');
@@ -34,19 +34,27 @@ getDb();
 // ── Server ──────────────────────────────────────────────────────────────
 
 const log = createLogger('data-svc');
-const server = http.createServer(requestLogger(log, withCors(handleRequest)));
+const server = http.createServer(metricsWrap(requestLogger(log, withCors(handleRequest))));
 
 server.listen(PORT, () => {
     log.info('started', { port: PORT, outputDir: OUTPUT_DIR, sessions: listSessionFiles().length });
     compressExistingFiles();
 });
 
-// Graceful shutdown
-function shutdown() {
-    log.info('shutting down');
-    closeDb();
-    server.close();
-    process.exit(0);
+// Graceful shutdown — drain HTTP connections, close DB, then exit
+function gracefulShutdown(signal) {
+    log.info('shutdown_initiated', { signal });
+    server.close(() => {
+        closeDb();
+        log.info('shutdown_complete', { signal });
+        process.exit(0);
+    });
+    setTimeout(() => {
+        log.warn('shutdown_forced', { signal, reason: 'timeout after 10s' });
+        closeDb();
+        process.exit(1);
+    }, 10_000).unref();
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

@@ -11,6 +11,9 @@
 
 import { services } from '../../shared/services.js';
 import { createClient } from '../../shared/httpClient.js';
+import { createLogger } from '../../shared/logger.js';
+
+const log = createLogger('monitor-svc');
 
 // ── Service URLs ────────────────────────────────────────────────────────
 
@@ -76,16 +79,16 @@ export async function tryPlaceBuyOrder(snapshot, liqTokens = [], context = {}) {
     try {
         const result = await svcPost(TRADING_SVC, '/api/buy', { snapshot, liqTokens, context });
         if (!result || result.error) {
-            console.warn(`  ⚠️  Buy order failed: ${result?.error || 'unknown'}`);
+            log.warn('buy_order_failed', { error: result?.error || 'unknown' });
             return null;
         }
         if (result.allUnfilled) {
-            console.warn('  ⚠️  Order placed but no fills confirmed — treating as failed');
+            log.warn('buy_order_unfilled', { action: 'treating_as_failed' });
             return null;
         }
         return result;
     } catch (err) {
-        console.warn(`  ⚠️  Buy order failed: ${err.message}`);
+        log.warn('buy_order_error', { error: err.message });
         return null;
     }
 }
@@ -96,7 +99,7 @@ export async function executeSellOrder(positions, context = {}) {
         if (!result || result.error) return null;
         return result;
     } catch (err) {
-        console.warn(`  ⚠️  Sell order failed: ${err.message}`);
+        log.warn('sell_order_error', { error: err.message });
         return null;
     }
 }
@@ -107,7 +110,7 @@ export async function tryRedeemPositions(session) {
         if (!result || result.error) return null;
         return result;
     } catch (err) {
-        console.warn(`  ⚠️  Redeem failed: ${err.message}`);
+        log.warn('redeem_error', { error: err.message });
         return null;
     }
 }

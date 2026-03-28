@@ -22,6 +22,11 @@ import { nowISO } from '../../shared/dates.js';
 import { jsonResponse as jsonRes, errorResponse as errRes } from '../../shared/httpServer.js';
 import { TtlCache } from '../../shared/cache.js';
 import { CircuitBreaker, CircuitOpenError } from '../../shared/circuitBreaker.js';
+import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
+
+const metrics = createMetrics('weather_svc');
+const { wrapHandler } = createHttpMetrics(metrics);
+const apiCalls = metrics.counter('api_calls_total', 'External API calls', ['provider', 'result']);
 
 const log = createLogger('weather-svc');
 
@@ -130,12 +135,12 @@ async function fetchOMCurrent() {
 const wcBreaker = new CircuitBreaker('weather-company', {
     failureThreshold: 3,
     resetTimeMs: 60_000,
-    onStateChange: (name, from, to) => console.log(`  ⚡ ${name}: ${from} → ${to}`),
+    onStateChange: (name, from, to) => log.warn('circuit_breaker_state_change', { breaker: name, from, to }),
 });
 const omBreaker = new CircuitBreaker('open-meteo', {
     failureThreshold: 3,
     resetTimeMs: 60_000,
-    onStateChange: (name, from, to) => console.log(`  ⚡ ${name}: ${from} → ${to}`),
+    onStateChange: (name, from, to) => log.warn('circuit_breaker_state_change', { breaker: name, from, to }),
 });
 
 // ── Resilient fetchers ──────────────────────────────────────────────────
@@ -149,21 +154,21 @@ async function fetchForecast(targetDate) {
                 return await wcBreaker.call(() => fetchWCForecast(targetDate));
             } catch (e) {
                 if (e instanceof CircuitOpenError) break; // skip remaining retries
-                console.warn(`  ⚠️  WC forecast attempt ${i}/${retries}: ${e.message}`);
+                log.warn('wc_forecast_retry', { attempt: i, retries, error: e.message });
                 if (i < retries) await new Promise((r) => setTimeout(r, 1000 * i));
             }
         }
     } else {
-        console.warn('  ⚡ WC circuit open — skipping to fallback');
+        log.warn('wc_circuit_open', { action: 'skipping_to_fallback' });
     }
     // Fallback to Open-Meteo
-    console.log('  ⚡ Falling back to Open-Meteo...');
+    log.info('forecast_fallback', { provider: 'open-meteo' });
     for (let i = 1; i <= retries; i++) {
         try {
             return await omBreaker.call(() => fetchOMForecast(targetDate));
         } catch (e) {
             if (e instanceof CircuitOpenError) break;
-            console.warn(`  ⚠️  Open-Meteo attempt ${i}/${retries}: ${e.message}`);
+            log.warn('om_forecast_retry', { attempt: i, retries, error: e.message });
             if (i < retries) await new Promise((r) => setTimeout(r, 1000 * i));
         }
     }
@@ -175,7 +180,7 @@ async function fetchCurrent() {
         return await wcBreaker.call(() => fetchWCCurrent());
     } catch (e) {
         if (!(e instanceof CircuitOpenError)) {
-            console.warn(`  ⚠️  WC current failed: ${e.message}, trying Open-Meteo`);
+            log.warn('wc_current_failed', { error: e.message, fallback: 'open-meteo' });
         }
         return await omBreaker.call(() => fetchOMCurrent());
     }
@@ -230,6 +235,10 @@ async function handleRequest(req, res) {
     const query = Object.fromEntries(url.searchParams);
 
     try {
+        if (path === '/metrics') {
+            return metrics.handleRequest(res);
+        }
+
         if (path === '/health') {
             return jsonRes(res, healthResponse('weather-svc', {
                 sources: ['weather-company', 'open-meteo'],
@@ -265,25 +274,31 @@ async function handleRequest(req, res) {
 
         errRes(res, `Not found: ${path}`, 404);
     } catch (err) {
-        console.error(`❌ ${path}:`, err.message);
+        log.error('request_error', { path, error: err.message });
         errRes(res, err.message, 500);
     }
 }
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-const server = http.createServer(requestLogger(log, handleRequest));
+const server = http.createServer(wrapHandler(requestLogger(log, handleRequest)));
 
 server.listen(PORT, () => {
     const c = cfg();
     log.info('started', { port: PORT, station: 'KLGA', lat: c.lat, lon: c.lon, wcKey: c.apiKey ? 'configured' : 'missing' });
 });
 
-process.on('SIGINT', () => {
-    server.close();
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    server.close();
-    process.exit(0);
-});
+function gracefulShutdown(signal) {
+    log.info('shutdown_initiated', { signal });
+    server.close(() => {
+        log.info('shutdown_complete', { signal });
+        process.exit(0);
+    });
+    setTimeout(() => {
+        log.warn('shutdown_forced', { signal, reason: 'timeout after 10s' });
+        process.exit(1);
+    }, 10_000).unref();
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
