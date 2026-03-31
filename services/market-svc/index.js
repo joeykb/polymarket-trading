@@ -24,6 +24,7 @@ import { nowISO, formatDateForSlug, extractDateFromTitle } from '../../shared/da
 import { jsonResponse as jsonRes, errorResponse as errRes } from '../../shared/httpServer.js';
 import { TtlCache } from '../../shared/cache.js';
 import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
+import { services } from '../../shared/services.js';
 
 const metrics = createMetrics('market_svc');
 const { wrapHandler } = createHttpMetrics(metrics);
@@ -32,24 +33,63 @@ const log = createLogger('market-svc');
 
 const PORT = parseInt(process.env.MARKET_SVC_PORT || '3003');
 const GAMMA_BASE = process.env.GAMMA_BASE_URL || 'https://gamma-api.polymarket.com';
-const SLUG_TEMPLATE = process.env.SLUG_TEMPLATE || 'highest-temperature-in-nyc-on-{date}';
+const DATA_SVC = services.dataSvc;
+const DEFAULT_SLUG_TEMPLATE = process.env.SLUG_TEMPLATE || 'highest-temperature-in-nyc-on-{date}';
 const MAX_SEARCH_PAGES = parseInt(process.env.MAX_SEARCH_PAGES || '3');
 const SEARCH_PAGE_SIZE = parseInt(process.env.SEARCH_PAGE_SIZE || '100');
+
+// ── Market Registry Cache ───────────────────────────────────────────────
+// Looks up slug template from the data-svc markets table, with fallback.
+
+const _marketCache = new Map();
+
+async function getSlugTemplate(marketId = 'nyc') {
+    if (_marketCache.has(marketId)) return _marketCache.get(marketId);
+    try {
+        const res = await fetch(`${DATA_SVC}/api/markets/${marketId}`, { signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+            const market = await res.json();
+            if (market.slug_template) {
+                _marketCache.set(marketId, market.slug_template);
+                return market.slug_template;
+            }
+        }
+    } catch (err) {
+        log.warn('market_registry_lookup_failed', { marketId, error: err.message });
+    }
+    // Fallback to env default
+    return DEFAULT_SLUG_TEMPLATE;
+}
+
+/** Extract city name from slug template, e.g. 'highest-temperature-in-nyc-on-{date}' → 'nyc' */
+function getCityFromSlug(slugTemplate) {
+    const match = slugTemplate.match(/in-(\w+)-on/);
+    return match ? match[1] : 'nyc';
+}
 
 // ── Range Parsing ───────────────────────────────────────────────────────
 
 function parseRange(question) {
+    // Two-degree range: "78-79°F" or "78-79"
     const rangeMatch = question.match(/(\d+)-(\d+)/);
     if (rangeMatch) {
         return { low: parseInt(rangeMatch[1]), high: parseInt(rangeMatch[2]), isOpenEnd: false, openEndDirection: null };
     }
+    // Open-end upper: "66°F or higher" or "21°C or higher"
     const upperMatch = question.match(/(\d+).*or higher/i);
     if (upperMatch) {
         return { low: parseInt(upperMatch[1]), high: Infinity, isOpenEnd: true, openEndDirection: 'above' };
     }
+    // Open-end lower: "55°F or below" or "11°C or below"
     const lowerMatch = question.match(/(\d+).*or (?:lower|below)/i);
     if (lowerMatch) {
         return { low: -Infinity, high: parseInt(lowerMatch[1]), isOpenEnd: true, openEndDirection: 'below' };
+    }
+    // Single-degree: "be 14°C on" or "be 78°F on" (London 2026 format)
+    const singleMatch = question.match(/be (\d+)°[CF]\b/i);
+    if (singleMatch) {
+        const val = parseInt(singleMatch[1]);
+        return { low: val, high: val, isOpenEnd: false, openEndDirection: null };
     }
     throw new Error(`Cannot parse range from question: "${question}"`);
 }
@@ -106,9 +146,9 @@ async function gammaFetch(url) {
     return res.json();
 }
 
-async function trySlugDiscovery(targetDate) {
+async function trySlugDiscovery(targetDate, slugTemplate) {
     const dateSlug = formatDateForSlug(targetDate);
-    const slug = SLUG_TEMPLATE.replace('{date}', dateSlug);
+    const slug = slugTemplate.replace('{date}', dateSlug);
     try {
         const data = await gammaFetch(`${GAMMA_BASE}/events?slug=${slug}`);
         if (Array.isArray(data) && data.length > 0) return data[0];
@@ -118,21 +158,29 @@ async function trySlugDiscovery(targetDate) {
     return null;
 }
 
-async function trySlugWithoutYear(targetDate) {
+async function trySlugWithoutYear(targetDate, slugTemplate) {
     const [year, month, day] = targetDate.split('-').map(Number);
     const d = new Date(year, month - 1, day);
     const monthName = d.toLocaleDateString('en-US', { month: 'long' }).toLowerCase();
-    const slug = `highest-temperature-in-nyc-on-${monthName}-${day}`;
+    const city = getCityFromSlug(slugTemplate);
+    const slug = `highest-temperature-in-${city}-on-${monthName}-${day}`;
     try {
         const data = await gammaFetch(`${GAMMA_BASE}/events?slug=${slug}`);
-        if (Array.isArray(data) && data.length > 0) return data[0];
+        if (Array.isArray(data) && data.length > 0) {
+            // Filter for active, non-closed events to avoid returning prior-year markets
+            const active = data.find(e => e.active && !e.closed);
+            if (active) return active;
+            // If all are closed, still return the first (for resolve-day lookups)
+            return data[0];
+        }
     } catch {
         /* intentional: slug variant may not exist */
     }
     return null;
 }
 
-async function searchAllTemperatureEvents() {
+async function searchAllTemperatureEvents(slugTemplate) {
+    const city = getCityFromSlug(slugTemplate);
     const results = [];
     try {
         const maxOffset = MAX_SEARCH_PAGES * SEARCH_PAGE_SIZE;
@@ -151,7 +199,7 @@ async function searchAllTemperatureEvents() {
             for (const event of data) {
                 const t = event.title?.toLowerCase() || '';
                 const s = event.slug?.toLowerCase() || '';
-                if ((t.includes('temperature') && t.includes('nyc')) || s.includes('highest-temperature-in-nyc')) {
+                if ((t.includes('temperature') && t.includes(city)) || s.includes(`highest-temperature-in-${city}`)) {
                     results.push(event);
                 }
             }
@@ -168,7 +216,7 @@ async function searchAllTemperatureEvents() {
             d.setDate(d.getDate() + i);
             const dateStr = d.toISOString().split('T')[0];
             try {
-                const event = await trySlugDiscovery(dateStr);
+                const event = await trySlugDiscovery(dateStr, slugTemplate);
                 if (event) results.push(event);
             } catch {
                 /* intentional: individual date discovery failure */
@@ -178,15 +226,22 @@ async function searchAllTemperatureEvents() {
     return results;
 }
 
-async function discoverMarket(targetDate) {
-    let event = await trySlugDiscovery(targetDate);
-    if (!event) event = await trySlugWithoutYear(targetDate);
+async function discoverMarket(targetDate, marketId = 'nyc') {
+    const slugTemplate = await getSlugTemplate(marketId);
+    // Primary: try slug with year (e.g. highest-temperature-in-london-on-april-1-2026)
+    let event = await trySlugDiscovery(targetDate, slugTemplate);
+    // Fallback: yearless slug — but prefer active events to avoid prior-year stale data
+    if (!event) event = await trySlugWithoutYear(targetDate, slugTemplate);
     if (!event) {
-        const allEvents = await searchAllTemperatureEvents();
+        const allEvents = await searchAllTemperatureEvents(slugTemplate);
         event = allEvents.find((e) => extractDateFromTitle(e.title) === targetDate);
         if (!event) {
-            throw new Error(`No temperature market found for ${targetDate}`);
+            throw new Error(`No temperature market found for ${targetDate} (market: ${marketId})`);
         }
+    }
+    // Safety: warn if we received a closed event — data may be from a prior year
+    if (event.closed) {
+        log.warn('discovered_closed_event', { marketId, targetDate, eventId: event.id, slug: event.slug });
     }
 
     const markets = event.markets || [];
@@ -208,16 +263,36 @@ async function discoverMarket(targetDate) {
 
 function findTargetRange(forecastTempF, ranges) {
     const sorted = [...ranges].sort((a, b) => a.lowTemp - b.lowTemp);
-    const roundedUp = Math.ceil(forecastTempF);
-    const rangeStart = roundedUp % 2 === 0 ? roundedUp : roundedUp - 1;
+    const rounded = Math.round(forecastTempF);
 
-    for (const range of sorted) {
-        if (range.isOpenEnd && range.openEndDirection === 'above') {
-            if (rangeStart >= range.lowTemp) return range;
-        } else if (range.isOpenEnd && range.openEndDirection === 'below') {
-            if (rangeStart <= range.highTemp) return range;
-        } else {
-            if (rangeStart === range.lowTemp) return range;
+    // Detect if this is a single-degree market (London 2026: low === high for non-open-end ranges)
+    const nonOpenRanges = sorted.filter(r => !r.isOpenEnd);
+    const isSingleDegree = nonOpenRanges.length > 0 && nonOpenRanges.every(r => r.lowTemp === r.highTemp);
+
+    if (isSingleDegree) {
+        // Single-degree market: find the range whose value is closest to the forecast
+        for (const range of sorted) {
+            if (range.isOpenEnd && range.openEndDirection === 'above') {
+                if (rounded >= range.lowTemp) return range;
+            } else if (range.isOpenEnd && range.openEndDirection === 'below') {
+                if (rounded <= range.highTemp) return range;
+            } else {
+                if (rounded === range.lowTemp) return range;
+            }
+        }
+    } else {
+        // Two-degree market (NYC-style): snap to even-numbered range start
+        const roundedUp = Math.ceil(forecastTempF);
+        const rangeStart = roundedUp % 2 === 0 ? roundedUp : roundedUp - 1;
+
+        for (const range of sorted) {
+            if (range.isOpenEnd && range.openEndDirection === 'above') {
+                if (rangeStart >= range.lowTemp) return range;
+            } else if (range.isOpenEnd && range.openEndDirection === 'below') {
+                if (rangeStart <= range.highTemp) return range;
+            } else {
+                if (rangeStart === range.lowTemp) return range;
+            }
         }
     }
     return sorted[sorted.length - 1];
@@ -327,9 +402,9 @@ function selectRanges(forecastTempF, ranges, targetDate) {
 // Market data changes slowly; avoid redundant Gamma API calls.
 // Uses shared TtlCache — always async, with automatic eviction.
 
-const cache = new TtlCache({ evictIntervalMs: 60_000, maxEntries: 50 });
+const cache = new TtlCache({ evictIntervalMs: 60_000, maxEntries: 200 });
 
-const MARKET_TTL = 2 * 60 * 1000; // 2 min — ranges update slowly
+const MARKET_TTL = 2 * 60 * 1000;
 
 // ── Request Handler ─────────────────────────────────────────────────────
 
@@ -349,13 +424,17 @@ async function handleRequest(req, res) {
 
         if (path === '/api/market') {
             if (!query.date) return errRes(res, 'date parameter required');
-            const event = await cache.get(`market:${query.date}`, MARKET_TTL, () => discoverMarket(query.date));
+            const marketId = query.market || 'nyc';
+            const key = `market:${marketId}:${query.date}`;
+            const event = await cache.get(key, MARKET_TTL, () => discoverMarket(query.date, marketId));
             return jsonRes(res, event);
         }
 
         if (path === '/api/ranges') {
             if (!query.date || !query.forecastF) return errRes(res, 'date and forecastF parameters required');
-            const event = await cache.get(`market:${query.date}`, MARKET_TTL, () => discoverMarket(query.date));
+            const marketId = query.market || 'nyc';
+            const key = `market:${marketId}:${query.date}`;
+            const event = await cache.get(key, MARKET_TTL, () => discoverMarket(query.date, marketId));
             const selection = selectRanges(parseFloat(query.forecastF), event.ranges, query.date);
             return jsonRes(res, { ...selection, eventId: event.id, eventTitle: event.title, closed: event.closed });
         }

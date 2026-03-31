@@ -45,7 +45,7 @@ export function attachSessionContext(order, session) {
     if (!order) return;
     order._sessionId = session.id;
     order._targetDate = session.targetDate;
-    order._marketId = 'nyc';
+    order._marketId = session.marketId || 'nyc';
 }
 
 // ── Liquidity-Gated Buy Flow ────────────────────────────────────────────
@@ -106,7 +106,7 @@ export function startLiquidityGatedBuy(session, snapshot, takeSnapshotFn) {
                 log.info('deadline_buy_forced', { targetDate, waitStr });
                 console.log(`\n  ⏰ DEADLINE — forcing buy after ${waitStr}`);
 
-                const deadlineLiq = await fetchLiquidityFromService(targetDate);
+                const deadlineLiq = await fetchLiquidityFromService(targetDate, session.marketId);
                 // Take fresh snapshot so buy uses latest forecast
                 let freshSnapshot;
                 try {
@@ -129,7 +129,7 @@ export function startLiquidityGatedBuy(session, snapshot, takeSnapshotFn) {
                 const order = await tryPlaceBuyOrder(filteredSnapshot, deadlineLiq?.tokens || [], {
                     sessionId: session.id,
                     targetDate: session.targetDate,
-                    marketId: 'nyc',
+                    marketId: session.marketId || 'nyc',
                 });
                 if (!order) {
                     log.warn('deadline_buy_failed', { targetDate });
@@ -153,7 +153,7 @@ export function startLiquidityGatedBuy(session, snapshot, takeSnapshotFn) {
                 return;
             }
 
-            const liqData = await fetchLiquidityFromService(targetDate);
+            const liqData = await fetchLiquidityFromService(targetDate, session.marketId);
             if (!liqData || !liqData.tokens || liqData.tokens.length === 0) return;
 
             const requireAll = config.liquidity.requireAllLiquid;
@@ -204,7 +204,7 @@ export function startLiquidityGatedBuy(session, snapshot, takeSnapshotFn) {
             const order = await tryPlaceBuyOrder(filteredSnapshot, liqData.tokens, {
                 sessionId: session.id,
                 targetDate: session.targetDate,
-                marketId: 'nyc',
+                marketId: session.marketId || 'nyc',
             });
             if (!order) {
                 log.warn('liquidity_buy_failed', { targetDate });

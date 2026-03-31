@@ -17,11 +17,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { services } from '../../shared/services.js';
 import { createLogger, requestLogger } from '../../shared/logger.js';
-import { getTodayET, getTargetDateET, getTomorrowET, daysUntil, getPhase } from '../../shared/dates.js';
+import { getTodayET, getTargetDateET, getTomorrowET, daysUntil, getPhase, getTodayInTz, getDateOffsetInTz, getPhaseInTz } from '../../shared/dates.js';
 import { jsonResponse as json, readJsonBody as readBody, handleCors } from '../../shared/httpServer.js';
 import { createClient } from '../../shared/httpClient.js';
 import { healthResponse, checkDependencies } from '../../shared/health.js';
 import { createMetrics, createHttpMetrics } from '../../shared/metrics.js';
+import { SERVICE_AUTH_HEADER } from '../../shared/serviceAuth.js';
 
 const metrics = createMetrics('dashboard_svc');
 const { wrapHandler } = createHttpMetrics(metrics);
@@ -30,6 +31,9 @@ import {
     listAvailableDates,
     fetchLiquidityData,
     fetchLiquidityBids,
+    fetchMarkets,
+    invalidateMarketsCache,
+    fetchSpendData,
     globalCurrentTemp,
     getConfigSnapshot,
     updateConfig,
@@ -46,6 +50,14 @@ const STATIC_DIR = path.join(__dirname, 'static');
 const DATA_SVC = services.dataSvc;
 const TRADING_SVC = services.tradingSvc;
 const LIQUIDITY_SVC = services.liquiditySvc;
+const SERVICE_AUTH_KEY = process.env.SERVICE_AUTH_KEY || '';
+
+/** Build headers for write operations (include service auth key if configured). */
+function proxyWriteHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    if (SERVICE_AUTH_KEY) h[SERVICE_AUTH_HEADER] = SERVICE_AUTH_KEY;
+    return h;
+}
 
 // ── MIME types ──────────────────────────────────────────────────────────
 
@@ -149,8 +161,9 @@ const server = http.createServer(
             // ─── API: GET /api/status ───────────────────────────────────
             if (url.pathname === '/api/status') {
                 const date = url.searchParams.get('date') || targetDate;
-                const session = await loadSessionData(date);
-                const liveData = await fetchLiquidityData(date);
+                const marketId = url.searchParams.get('market') || 'nyc';
+                const session = await loadSessionData(date, marketId);
+                const liveData = await fetchLiquidityData(date, marketId);
                 const latestSnap = session?.snapshots?.[session.snapshots.length - 1] || null;
                 if (latestSnap) overlayLivePrices(latestSnap, liveData);
                 if (session) session.pnl = computeLivePnL(session.buyOrder, latestSnap, liveData.bids);
@@ -161,6 +174,7 @@ const server = http.createServer(
                     const recentSnaps = session.snapshots ? session.snapshots.slice(-20) : [];
                     sessionLight = {
                         id: session.id,
+                        marketId: session.marketId || marketId,
                         status: session.status,
                         phase: session.phase,
                         initialForecastTempF: session.initialForecastTempF,
@@ -182,18 +196,22 @@ const server = http.createServer(
                     };
                 }
 
-                if (sessionLight?.snapshots?.length > 0 && globalCurrentTemp.tempF != null) {
+                if (marketId === 'nyc' && sessionLight?.snapshots?.length > 0 && globalCurrentTemp.tempF != null) {
                     const lastSnap = sessionLight.snapshots[sessionLight.snapshots.length - 1];
                     lastSnap.currentTempF = globalCurrentTemp.tempF;
                     lastSnap.currentConditions = globalCurrentTemp.conditions;
                     lastSnap.maxTodayF = globalCurrentTemp.maxTodayF;
                 }
 
+                const allSessions = await listAvailableDates(marketId);
+                const availableDates = [...new Set(allSessions.map(s => s.date))].sort().reverse();
+
                 return json(res, {
                     targetDate: date,
+                    marketId,
                     session: sessionLight,
                     observation: null,
-                    availableDates: await listAvailableDates(),
+                    availableDates,
                     serverTime: new Date().toISOString(),
                 });
             }
@@ -207,66 +225,82 @@ const server = http.createServer(
 
             // ─── API: GET /api/portfolio ────────────────────────────────
             if (url.pathname === '/api/portfolio') {
-                const portfolioDates = [getTodayET(), getTomorrowET(), getTargetDateET()];
-                const cfg = await getCachedConfig();
-                const plays = await Promise.all(
-                    portfolioDates.map(async (date) => {
-                        const session = await loadSessionData(date);
-                        const phase = getPhase(date);
+                const marketFilter = url.searchParams.get('market') || 'all';
+                const markets = await fetchMarkets(); // already filtered to active=1 from DB
+                const cfg = await getCachedConfig(); // still needed for manualSellEnabled
+
+                // If no markets in DB yet, fall back to NYC-only
+                const marketsToUse = markets.length > 0
+                    ? (marketFilter !== 'all' ? markets.filter(m => m.id === marketFilter) : markets)
+                    : [{ id: 'nyc', name: 'NYC Temperature', unit: 'F', timezone: 'America/New_York' }];
+
+                const allPlays = [];
+                for (const market of marketsToUse) {
+                    const tz = market.timezone || 'America/New_York';
+                    const isNY = tz === 'America/New_York';
+                    const portfolioDates = isNY
+                        ? [getTodayET(), getTomorrowET(), getTargetDateET()]
+                        : [getDateOffsetInTz(0, tz), getDateOffsetInTz(1, tz), getDateOffsetInTz(2, tz)];
+
+                    for (const date of portfolioDates) {
+                        const session = await loadSessionData(date, market.id);
+                        const phase = isNY ? getPhase(date) : getPhaseInTz(date, tz);
                         const days = daysUntil(date);
                         const latest = session?.snapshots?.[session.snapshots.length - 1] || null;
-                        const liveData = await fetchLiquidityData(date);
+                        const liveData = await fetchLiquidityData(date, market.id);
                         if (latest) overlayLivePrices(latest, liveData);
-                        return {
+
+                        allPlays.push({
                             date,
+                            marketId: market.id,
+                            marketName: market.name || market.id.toUpperCase(),
+                            unit: market.unit || 'F',
+                            timezone: tz,
                             phase,
                             daysUntil: days,
-                            session: session
-                                ? {
-                                      id: session.id,
-                                      status: session.status,
-                                      phase: session.phase,
-                                      initialForecastTempF: session.initialForecastTempF,
-                                      initialTargetRange: session.initialTargetRange,
-                                      forecastSource: session.forecastSource,
-                                      rebalanceThreshold: session.rebalanceThreshold,
-                                      snapshotCount: session.snapshots?.length || 0,
-                                      alertCount: session.alerts?.length || 0,
-                                      resolution: session.resolution || null,
-                                      buyOrder: await enrichBuyOrderWithDbIds(session.buyOrder, date),
-                                      manualSellEnabled: !!cfg.dashboard?.manualSellEnabled,
-                                      pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
-                                      lastEdge: session.lastEdge || null,
-                                      trajectory: session.trajectory || null,
-                                  }
-                                : null,
-                            latest: latest
-                                ? {
-                                      timestamp: latest.timestamp,
-                                      phase: latest.phase,
-                                      forecastTempF: latest.forecastTempF,
-                                      forecastChange: latest.forecastChange,
-                                      forecastSource: latest.forecastSource,
-                                      currentTempF: latest.currentTempF,
-                                      currentConditions: latest.currentConditions,
-                                      maxTodayF: latest.maxTodayF,
-                                      target: latest.target,
-                                      below: latest.below,
-                                      above: latest.above,
-                                      totalCost: latest.totalCost,
-                                      eventClosed: latest.eventClosed,
-                                      daysUntilTarget: latest.daysUntilTarget,
-                                      _liveOverlay: latest._liveOverlay,
-                                  }
-                                : null,
+                            session: session ? {
+                                id: session.id,
+                                status: session.status,
+                                phase: session.phase,
+                                initialForecastTempF: session.initialForecastTempF,
+                                initialTargetRange: session.initialTargetRange,
+                                forecastSource: session.forecastSource,
+                                rebalanceThreshold: session.rebalanceThreshold,
+                                snapshotCount: session.snapshots?.length || 0,
+                                alertCount: session.alerts?.length || 0,
+                                resolution: session.resolution || null,
+                                buyOrder: await enrichBuyOrderWithDbIds(session.buyOrder, date),
+                                manualSellEnabled: !!cfg.dashboard?.manualSellEnabled,
+                                pnl: computeLivePnL(session.buyOrder, latest, liveData.bids),
+                                lastEdge: session.lastEdge || null,
+                                trajectory: session.trajectory || null,
+                            } : null,
+                            latest: latest ? {
+                                timestamp: latest.timestamp,
+                                phase: latest.phase,
+                                forecastTempF: latest.forecastTempF,
+                                forecastChange: latest.forecastChange,
+                                forecastSource: latest.forecastSource,
+                                currentTempF: latest.currentTempF,
+                                currentConditions: latest.currentConditions,
+                                maxTodayF: latest.maxTodayF,
+                                target: latest.target,
+                                below: latest.below,
+                                above: latest.above,
+                                totalCost: latest.totalCost,
+                                eventClosed: latest.eventClosed,
+                                daysUntilTarget: latest.daysUntilTarget,
+                                _liveOverlay: latest._liveOverlay,
+                            } : null,
                             hasData: !!session,
-                        };
-                    }),
-                );
+                        });
+                    }
+                }
 
+                // Apply NYC current temp overlay
                 if (globalCurrentTemp.tempF != null) {
-                    for (const play of plays) {
-                        if (play.latest) {
+                    for (const play of allPlays) {
+                        if (play.marketId === 'nyc' && play.latest) {
                             play.latest.currentTempF = globalCurrentTemp.tempF;
                             play.latest.currentConditions = globalCurrentTemp.conditions;
                             play.latest.maxTodayF = globalCurrentTemp.maxTodayF;
@@ -274,7 +308,74 @@ const server = http.createServer(
                     }
                 }
 
-                return json(res, { plays, availableDates: await listAvailableDates(), serverTime: new Date().toISOString() });
+                // Fetch spend data
+                const spend = await fetchSpendData();
+
+                return json(res, {
+                    plays: allPlays,
+                    markets: markets.map(m => ({ id: m.id, name: m.name, unit: m.unit, timezone: m.timezone })),
+                    spend,
+                    serverTime: new Date().toISOString(),
+                });
+            }
+
+            // ─── API: GET /api/markets ─────────────────────────────────
+            if (url.pathname === '/api/markets' && req.method === 'GET') {
+                return json(res, await fetchMarkets());
+            }
+
+            // ─── API: GET /api/markets/all (admin — includes inactive) ───
+            if (url.pathname === '/api/markets/all' && req.method === 'GET') {
+                try {
+                    const proxyRes = await fetch(`${DATA_SVC}/api/markets/all`, { signal: AbortSignal.timeout(5000) });
+                    if (proxyRes.ok) return json(res, await proxyRes.json());
+                } catch {}
+                return json(res, await fetchMarkets()); // fallback
+            }
+
+            // ─── API: POST /api/markets (admin — create new market) ──────
+            if (url.pathname === '/api/markets' && req.method === 'POST') {
+                const body = await readBody(req);
+                try {
+                    const proxyRes = await fetch(`${DATA_SVC}/api/markets`, {
+                        method: 'POST',
+                        headers: proxyWriteHeaders(),
+                        body: JSON.stringify(body),
+                        signal: AbortSignal.timeout(5000),
+                    });
+                    const data = await proxyRes.json();
+                    return json(res, data, proxyRes.status);
+                } catch (err) {
+                    return json(res, { error: err.message }, 502);
+                }
+            }
+
+            // ─── API: PUT /api/markets/:id (admin update) ────────────────
+            {
+                const mktMatch = url.pathname.match(/^\/api\/markets\/([a-z0-9_-]+)$/);
+                if (mktMatch && req.method === 'PUT') {
+                    const body = await readBody(req);
+                    try {
+                        const proxyRes = await fetch(`${DATA_SVC}/api/markets/${mktMatch[1]}`, {
+                            method: 'PUT',
+                            headers: proxyWriteHeaders(),
+                            body: JSON.stringify(body),
+                            signal: AbortSignal.timeout(5000),
+                        });
+                        if (proxyRes.ok) {
+                            invalidateMarketsCache(); // bust cache so dashboard reflects toggle immediately
+                            return json(res, await proxyRes.json());
+                        }
+                        return json(res, { error: `data-svc ${proxyRes.status}` }, proxyRes.status);
+                    } catch (err) {
+                        return json(res, { error: err.message }, 502);
+                    }
+                }
+            }
+
+            // ─── API: GET /api/spend ──────────────────────────────────
+            if (url.pathname === '/api/spend') {
+                return json(res, await fetchSpendData());
             }
 
             // ─── API: GET /api/dates ────────────────────────────────────
@@ -285,8 +386,11 @@ const server = http.createServer(
             // ─── API: GET /api/trades ───────────────────────────────────
             if (url.pathname === '/api/trades') {
                 try {
+                    // Forward market filter if provided
+                    const marketFilter = url.searchParams.get('market') || '';
+                    const summaryUrl = `${DATA_SVC}/api/trade-summary?limit=15${marketFilter ? '&market=' + encodeURIComponent(marketFilter) : ''}`;
                     // Single call to data-svc for lightweight trade summaries
-                    const summaryRes = await fetch(`${DATA_SVC}/api/trade-summary?limit=15`, { signal: AbortSignal.timeout(15000) });
+                    const summaryRes = await fetch(summaryUrl, { signal: AbortSignal.timeout(15000) });
                     if (!summaryRes.ok) throw new Error('trade-summary failed');
                     const { trades: summaries } = await summaryRes.json();
 
@@ -299,7 +403,7 @@ const server = http.createServer(
                         let pnl = null;
                         if (s.status === 'active') {
                             try {
-                                const liquidityBids = await fetchLiquidityBids(s.date);
+                                const liquidityBids = await fetchLiquidityBids(s.date, s.marketId);
                                 pnl = computeLivePnL(bo, s.latestSnapshot, liquidityBids);
                             } catch {
                                 /* intentional: liquidity fetch best-effort */
@@ -308,6 +412,7 @@ const server = http.createServer(
 
                         trades.push({
                             date: s.date,
+                            marketId: s.marketId || 'nyc',
                             placedAt: bo.placedAt,
                             mode: bo.mode || (bo.simulated ? 'dry-run' : 'live'),
                             positions: (bo.positions || []).map((p) => ({
@@ -406,7 +511,11 @@ const server = http.createServer(
             // ─── API: GET /api/liquidity (proxy) ────────────────────────
             if (url.pathname === '/api/liquidity') {
                 const date = url.searchParams.get('date');
-                const liqUrl = date ? `${LIQUIDITY_SVC}/api/liquidity?date=${date}` : `${LIQUIDITY_SVC}/api/liquidity`;
+                const market = url.searchParams.get('market');
+                const liqParams = new URLSearchParams();
+                if (date) liqParams.set('date', date);
+                if (market) liqParams.set('market', market);
+                const liqUrl = liqParams.toString() ? `${LIQUIDITY_SVC}/api/liquidity?${liqParams}` : `${LIQUIDITY_SVC}/api/liquidity`;
                 try {
                     const liqRes = await fetch(liqUrl, { signal: AbortSignal.timeout(3000) });
                     if (liqRes.ok) {

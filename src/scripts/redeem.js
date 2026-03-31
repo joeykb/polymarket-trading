@@ -109,11 +109,13 @@ async function main() {
         },
     );
 
+    const proxyUrl = process.env.HTTP_PROXY || process.env.HTTPS_PROXY;
     console.log(`\n🏆 TempEdge Position Redeemer`);
     console.log(`═══════════════════════════════════════`);
     console.log(`  Wallet:   ${wallet.address}`);
     console.log(`  Mode:     ${dryRun ? '🧪 DRY RUN' : '💰 LIVE'}`);
     console.log(`  RPC:      ${POLYGON_RPC}`);
+    console.log(`  Proxy:    ${proxyUrl || 'NONE (direct)'}`);
 
     const usdcE = new ethers.Contract(USDC_E_ADDRESS, ERC20_ABI, provider);
     const balBefore = await usdcE.balanceOf(wallet.address);
@@ -124,51 +126,156 @@ async function main() {
     // ── Phase 1: Scan all on-chain positions from sessions ────────────
     console.log(`📡 Phase 1: Scanning on-chain token balances...\n`);
 
-    const sessionFiles = fs.readdirSync(OUTPUT_DIR)
-        .filter(f => f.startsWith('monitor-2026') && f.endsWith('.json'))
-        .sort();
+    // Scan both legacy flat files and market-scoped directories
+    const sessionEntries = [];
 
-    const knownTokens = [];
+    // Legacy flat files: /app/output/monitor-2026-*.json
+    const legacyFiles = fs.readdirSync(OUTPUT_DIR)
+        .filter(f => f.startsWith('monitor-2026') && f.endsWith('.json'));
+    for (const f of legacyFiles) {
+        sessionEntries.push({ filePath: path.join(OUTPUT_DIR, f), marketId: 'nyc' });
+    }
 
-    for (const file of sessionFiles) {
-        const session = JSON.parse(fs.readFileSync(path.join(OUTPUT_DIR, file), 'utf8'));
-        const date = file.replace('monitor-', '').replace('.json', '');
-        const lastSnap = session.snapshots?.[session.snapshots.length - 1];
-        if (!lastSnap) continue;
+    // Market-scoped files: /app/output/{market}/monitor-2026-*.json
+    const marketDirs = fs.readdirSync(OUTPUT_DIR)
+        .filter(d => {
+            const full = path.join(OUTPUT_DIR, d);
+            return fs.statSync(full).isDirectory() && !d.startsWith('.');
+        });
+    for (const mDir of marketDirs) {
+        const mPath = path.join(OUTPUT_DIR, mDir);
+        const mFiles = fs.readdirSync(mPath)
+            .filter(f => f.startsWith('monitor-2026') && f.endsWith('.json'));
+        for (const f of mFiles) {
+            sessionEntries.push({ filePath: path.join(mPath, f), marketId: mDir });
+        }
+    }
+    sessionEntries.sort((a, b) => a.filePath.localeCompare(b.filePath));
+    console.log(`  Scanning ${sessionEntries.length} session files (${legacyFiles.length} legacy + ${sessionEntries.length - legacyFiles.length} market-scoped)\n`);
 
-        for (const key of ['target', 'below', 'above']) {
-            const range = lastSnap[key];
-            if (!range || !range.clobTokenIds) continue;
+    // Collect unique conditionIds from buyOrder positions across all session files
+    const conditionMap = new Map(); // conditionId -> { question, date, marketId, filePath }
 
-            let conditionId = range.conditionId;
-            if (!conditionId && session.buyOrder) {
-                const pos = session.buyOrder.positions.find(p => p.question === range.question);
-                if (pos?.conditionId) conditionId = pos.conditionId;
+    for (const { filePath, marketId } of sessionEntries) {
+        try {
+            const session = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            const fileName = path.basename(filePath);
+            const date = fileName.replace('monitor-', '').replace('.json', '');
+
+            // Extract conditionIds from buyOrder positions
+            if (session.buyOrder?.positions) {
+                for (const pos of session.buyOrder.positions) {
+                    if (!pos.conditionId) continue;
+                    if (pos.redeemed) continue; // already redeemed
+                    if (pos.status === 'failed') continue; // never filled
+                    if (!conditionMap.has(pos.conditionId)) {
+                        conditionMap.set(pos.conditionId, {
+                            question: pos.question,
+                            conditionId: pos.conditionId,
+                            date,
+                            marketId,
+                            filePath,
+                            clobTokenId: pos.clobTokenId || null,
+                            clobTokenIds: pos.clobTokenIds || null,
+                        });
+                    }
+                }
             }
 
-            for (const tokenId of range.clobTokenIds) {
-                knownTokens.push({ tokenId, question: range.question, conditionId, date, key });
+            // Also try to extract from non-compressed snapshots
+            const snaps = session.snapshots;
+            if (Array.isArray(snaps) && snaps.length > 0) {
+                const lastSnap = snaps[snaps.length - 1];
+                if (lastSnap) {
+                    for (const key of ['target', 'below', 'above']) {
+                        const range = lastSnap[key];
+                        if (!range?.conditionId) continue;
+                        if (conditionMap.has(range.conditionId)) {
+                            // Enrich with clobTokenIds from snapshots
+                            const existing = conditionMap.get(range.conditionId);
+                            if (!existing.clobTokenIds && range.clobTokenIds) {
+                                existing.clobTokenIds = range.clobTokenIds;
+                            }
+                        }
+                    }
+                }
             }
+        } catch { /* skip corrupt files */ }
+    }
+
+    console.log(`  Found ${conditionMap.size} unique conditionIds across ${sessionEntries.length} sessions\n`);
+
+    // Resolve token IDs via CLOB API and check on-chain balances
+    console.log(`  Resolving token IDs and checking on-chain balances...\n`);
+    const heldPositions = [];
+
+    for (const [conditionId, meta] of conditionMap) {
+        try {
+            // Try CLOB first to get token IDs and resolution status
+            let market = null;
+            try {
+                market = await clobClient.getMarket(conditionId);
+            } catch (err) {
+                console.log(`  ⚠️  CLOB lookup failed for ${conditionId.substring(0, 12)}: ${err.message}`);
+            }
+
+            // Collect all token IDs to check
+            const tokenIds = [];
+            if (market?.tokens) {
+                for (const t of market.tokens) {
+                    if (t.token_id) tokenIds.push({ tokenId: t.token_id, outcome: t.outcome });
+                }
+            }
+            // Fallback: use cached clobTokenIds from session
+            if (tokenIds.length === 0 && meta.clobTokenIds) {
+                for (const tid of meta.clobTokenIds) {
+                    tokenIds.push({ tokenId: tid, outcome: 'unknown' });
+                }
+            }
+            if (tokenIds.length === 0 && meta.clobTokenId) {
+                tokenIds.push({ tokenId: meta.clobTokenId, outcome: 'unknown' });
+            }
+
+            if (tokenIds.length === 0) {
+                console.log(`  ⚠️  ${meta.date} ${meta.marketId}: no token IDs for ${conditionId.substring(0, 12)}`);
+                continue;
+            }
+
+            // Check on-chain balance for each token
+            for (const { tokenId, outcome } of tokenIds) {
+                try {
+                    const bal = await ctf.balanceOf(wallet.address, tokenId);
+                    const balNum = parseFloat(ethers.utils.formatUnits(bal, 6));
+                    if (balNum > 0.001) {
+                        heldPositions.push({
+                            tokenId,
+                            question: meta.question,
+                            conditionId,
+                            date: meta.date,
+                            marketId: meta.marketId,
+                            filePath: meta.filePath,
+                            outcome,
+                            shares: balNum,
+                            rawBalance: bal,
+                            negRisk: market?.neg_risk === true,
+                            marketClosed: market?.closed || false,
+                            winner: market?.tokens?.find(t => t.winner === true)?.outcome?.toUpperCase() || null,
+                            winnerTokenId: market?.tokens?.find(t => t.winner === true)?.token_id || null,
+                        });
+                        console.log(`  ✅ ${meta.date} ${meta.marketId} [${outcome}]: ${balNum.toFixed(2)} shares on-chain`);
+                    }
+                } catch { /* skip balance check errors */ }
+            }
+        } catch (err) {
+            console.log(`  ⚠️  Error processing ${conditionId.substring(0, 12)}: ${err.message}`);
         }
     }
 
-    console.log(`  Found ${knownTokens.length} known token IDs across ${sessionFiles.length} sessions\n`);
-
-    const heldPositions = [];
-    for (const token of knownTokens) {
-        try {
-            const bal = await ctf.balanceOf(wallet.address, token.tokenId);
-            const balNum = parseFloat(ethers.utils.formatUnits(bal, 6));
-            if (balNum > 0.001) {
-                heldPositions.push({ ...token, shares: balNum, rawBalance: bal });
-            }
-        } catch { /* skip */ }
-    }
-
-    console.log(`  ${heldPositions.length} position(s) with on-chain balance:\n`);
+    console.log(`\n  ${heldPositions.length} position(s) with on-chain balance.\n`);
 
     if (heldPositions.length === 0) {
         console.log(`  No on-chain positions found.`);
+        console.log(`═══════════════════════════════════════`);
         return;
     }
 
@@ -183,8 +290,8 @@ async function main() {
         }
     }
 
-    // ── Phase 2: Check resolution via CLOB and redeem ─────────────────
-    console.log(`📋 Phase 2: Checking market resolution via CLOB...\n`);
+    // ── Phase 2: Redeem positions (resolution data already fetched in Phase 1) ──
+    console.log(`📋 Phase 2: Redeeming resolved positions...\n`);
 
     let totalRedeemed = 0;
     let totalValue = 0;
@@ -192,7 +299,7 @@ async function main() {
     const byCondition = {};
     for (const pos of heldPositions) {
         if (!pos.conditionId) {
-            console.log(`  ⚠️  ${pos.date} ${pos.key}: no conditionId, skipping`);
+            console.log(`  ⚠️  ${pos.date} ${pos.marketId}: no conditionId, skipping`);
             continue;
         }
         if (!byCondition[pos.conditionId]) byCondition[pos.conditionId] = [];
@@ -203,7 +310,11 @@ async function main() {
         const pos0 = positions[0];
         const rangeDesc = pos0.question?.substring(55, 80) || 'unknown';
 
-        const { resolved, winner, negRisk, winnerTokenId } = await checkMarketResolution(conditionId, clobClient);
+        // Use pre-fetched resolution data from Phase 1
+        const resolved = pos0.marketClosed;
+        const winner = pos0.winner;
+        const negRisk = pos0.negRisk;
+        const winnerTokenId = pos0.winnerTokenId;
 
         if (!resolved) {
             const totalShares = positions.reduce((s, p) => s + p.shares, 0);
@@ -326,8 +437,10 @@ async function main() {
             totalRedeemed++;
             totalValue += value;
 
-            // Update session file
-            const sessionFile = path.join(OUTPUT_DIR, `monitor-${pos0.date}.json`);
+            // Update session file (try market-scoped first, then legacy)
+            const marketScopedFile = path.join(OUTPUT_DIR, pos0.marketId || 'nyc', `monitor-${pos0.date}.json`);
+            const legacyFile = path.join(OUTPUT_DIR, `monitor-${pos0.date}.json`);
+            const sessionFile = fs.existsSync(marketScopedFile) ? marketScopedFile : legacyFile;
             if (fs.existsSync(sessionFile)) {
                 const session = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
                 if (session.buyOrder?.positions) {

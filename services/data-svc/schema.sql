@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS markets (
     station_lat REAL,
     station_lon REAL,
     station_name TEXT,                   -- e.g. 'KLGA', 'EGLL'
+    timezone    TEXT NOT NULL DEFAULT 'America/New_York', -- IANA timezone
+    daily_budget REAL NOT NULL DEFAULT 3.0, -- Per-market daily spend cap in USD
     active      INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -6,11 +6,27 @@
 
 const CFG = window.__TEMPEDGE_CONFIG__ || {};
 let currentDate = CFG.defaultDate || new Date().toISOString().slice(0, 10);
+let currentMarket = 'all';
 let refreshTimer = null;
 let lastRenderState = null;
 let currentPlay = null;
 let manualSellEnabled = CFG.manualSellEnabled || false;
 var _gaugeIdCounter = 0;
+
+// ── Market Metadata ──────────────────────
+var MARKET_FLAGS = {
+    nyc: '🇺🇸', london: '🇬🇧', wellington: '🇳🇿', tokyo: '🇯🇵',
+    sydney: '🇦🇺', miami: '🌴', chicago: '🇺🇸', la: '🇺🇸'
+};
+var MARKET_COLORS = [
+    '#3b82f6', '#f59e0b', '#10b981', '#8b5cf6',
+    '#ef4444', '#06b6d4', '#ec4899', '#84cc16'
+];
+var MARKET_SHORT_NAMES = {
+    nyc: 'NYC', london: 'London', wellington: 'Wellington', tokyo: 'Tokyo',
+    sydney: 'Sydney', miami: 'Miami', chicago: 'Chicago', la: 'LA'
+};
+var _portfolioData = null; // cached portfolio response
 
 // ── Trade Readiness Gauge (SVG Thermometer) ─────────────────────────────
 function renderTradeGauge(play) {
@@ -186,9 +202,10 @@ function _gaugeThermometerSVG(fillPct, mercuryColor, glowColor) {
 
 
 // ── Data Fetching ─────────────────────────
-async function fetchStatus(date) {
+async function fetchStatus(date, marketId) {
     try {
-        const res = await fetch('/api/status?date=' + (date || currentDate));
+        const mkt = marketId || (currentMarket !== 'all' ? currentMarket : 'nyc');
+        const res = await fetch('/api/status?date=' + (date || currentDate) + '&market=' + mkt);
         return await res.json();
     } catch {
         return null;
@@ -197,21 +214,39 @@ async function fetchStatus(date) {
 
 async function fetchPortfolio() {
     try {
-        const res = await fetch('/api/portfolio');
-        return await res.json();
+        const mkt = currentMarket || 'all';
+        const res = await fetch('/api/portfolio?market=' + mkt);
+        const data = await res.json();
+        _portfolioData = data;
+        return data;
     } catch {
         return null;
     }
 }
 
+function getMarketColor(marketId, markets) {
+    if (!markets) return MARKET_COLORS[0];
+    var idx = markets.findIndex(function(m) { return m.id === marketId; });
+    return MARKET_COLORS[idx >= 0 ? idx % MARKET_COLORS.length : 0];
+}
+
+function getUnitSymbol(unit) {
+    return unit === 'C' ? '°C' : '°F';
+}
+
 function shortLabel(question) {
     if (!question) return '--';
+    // Detect unit from the actual Polymarket question text
+    var unitChar = question.includes('°C') ? '°C' : '°F';
     const rangeMatch = question.match(/(\d+)-(\d+)/);
-    if (rangeMatch) return rangeMatch[1] + '-' + rangeMatch[2] + '\u00b0F';
+    if (rangeMatch) return rangeMatch[1] + '-' + rangeMatch[2] + unitChar;
     const upperMatch = question.match(/(\d+).*or higher/i);
-    if (upperMatch) return upperMatch[1] + '\u00b0F+';
+    if (upperMatch) return upperMatch[1] + unitChar + '+';
     const lowerMatch = question.match(/(\d+).*or (?:lower|below)/i);
-    if (lowerMatch) return '\u2264' + lowerMatch[1] + '\u00b0F';
+    if (lowerMatch) return '\u2264' + lowerMatch[1] + unitChar;
+    // Single-degree: "be 14°C on" (London 2026 format)
+    var singleMatch = question.match(/be (\d+)°[CF]\b/i);
+    if (singleMatch) return singleMatch[1] + unitChar;
     return question.slice(0, 15);
 }
 
@@ -312,12 +347,23 @@ function renderPortfolioCard(play) {
     const latest = play.latest;
     const eventClosed = latest?.eventClosed === true;
 
-    const forecastTemp = latest ? latest.forecastTempF + '\u00b0F' : '--';
-    const currentTemp = latest?.currentTempF != null ? latest.currentTempF + '\u00b0F' : '--';
+    // Derive unit from market metadata
+    var mktId = play.marketId || 'nyc';
+    var mktMeta = _portfolioData?.markets?.find(function(m) { return m.id === mktId; });
+    var unit = mktMeta?.unit || 'F';
+    var unitSym = getUnitSymbol(unit);
+
+    const forecastTemp = latest ? latest.forecastTempF + unitSym : '--';
+    const currentTemp = latest?.currentTempF != null ? latest.currentTempF + unitSym : '--';
     const forecastTarget = latest && !eventClosed ? shortLabel(latest.target?.question) : '--';
 
-    const buyOrder = eventClosed ? null : play.session?.buyOrder;
-    const pnl = eventClosed ? null : play.session?.pnl;
+    let buyOrder = eventClosed ? null : play.session?.buyOrder;
+    let pnl = eventClosed ? null : play.session?.pnl;
+    // Suppress contaminated buyOrder (wrong unit for this market)
+    if (buyOrder && unit === 'C') {
+        var bQs = (buyOrder.positions || []).map(function(p) { return p.question || ''; }).join(' ').toLowerCase();
+        if (bQs.includes('°f') && !bQs.includes('°c')) { buyOrder = null; pnl = null; }
+    }
     const hasFilled = buyOrder?.positions?.some(function (p) {
         return p.status !== 'failed' && p.status !== 'rejected';
     });
@@ -491,10 +537,25 @@ function extractViewModel(data) {
     const session = data.session;
     const observation = data.observation;
     const snapshots = session?.snapshots || [];
-    const alerts = session?.alerts || [];
+    const rawAlerts = session?.alerts || [];
     const latest = snapshots[snapshots.length - 1] || null;
     const status = session?.status || (observation ? 'observation' : 'none');
     const phase = latest?.phase || session?.phase || '';
+
+    // Filter out contaminated alerts for non-NYC markets
+    // (legacy sessions may contain NYC-era alerts with °F in a °C market)
+    var mktMeta = _portfolioData?.markets?.find(function(m) { return m.id === currentMarket; });
+    var expectedUnit = (mktMeta && mktMeta.unit) || 'F';
+    var alerts = rawAlerts;
+    if (expectedUnit === 'C') {
+        alerts = rawAlerts.filter(function(a) {
+            var msg = (a.message || '').toLowerCase();
+            // Reject alerts that reference °F or Fahrenheit (cross-market contamination)
+            if (msg.includes('°f') && !msg.includes('°c')) return false;
+            if (msg.includes('new york') || msg.includes('nyc')) return false;
+            return true;
+        });
+    }
 
     let forecastTemp = '--',
         targetRange = null,
@@ -544,8 +605,16 @@ function extractViewModel(data) {
     const forecastChange = latest?.forecastChange || 0;
     const sourceLabel = forecastSource === 'weather-company' ? 'WU/KLGA' : forecastSource;
 
-    const detailBuyOrder = eventClosed ? null : session?.buyOrder;
-    const detailPnL = eventClosed ? null : session?.pnl;
+    let detailBuyOrder = eventClosed ? null : session?.buyOrder;
+    let detailPnL = eventClosed ? null : session?.pnl;
+    // Suppress contaminated buyOrder (wrong unit for this market)
+    if (detailBuyOrder && expectedUnit === 'C') {
+        var buyQ = (detailBuyOrder.positions || []).map(function(p) { return p.question || ''; }).join(' ').toLowerCase();
+        if (buyQ.includes('°f') && !buyQ.includes('°c')) {
+            detailBuyOrder = null;
+            detailPnL = null;
+        }
+    }
     let costLabel = 'Total Cost';
     let costValue = totalCost > 0 ? '$' + totalCost?.toFixed(3) : '--';
     let costSub = totalCost > 0 ? 'Profit: $' + profit + ' \u00b7 ROI: ' + roi + '%' : '';

@@ -354,6 +354,12 @@ function Invoke-DeployGreen {
         }
     }
 
+    # Force pod recreation: image tag (:green) is the same, so K8s won't rolling-restart
+    # unless we explicitly tell it to pick up the newly-built images.
+    foreach ($svc in $ServiceRegistry) {
+        Invoke-Kubectl "rollout restart deployment/$($svc.Name)-green -n tempedge" -Silent | Out-Null
+    }
+
     # Wait for all green services including monitor
     Write-Step "WAIT" "Waiting for green pods..."
     foreach ($svc in $ServiceRegistry) {

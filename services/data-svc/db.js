@@ -69,12 +69,47 @@ export function getDb() {
         }
     }
 
-    // ── Seed default market (NYC) ───────────────────────────────────
+    // ── Migrate: add timezone column if missing ───────────────────────
+    try {
+        _db.exec("ALTER TABLE markets ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/New_York'");
+        log.info('migration_applied', { column: 'markets.timezone' });
+    } catch {
+        /* intentional: column already exists */
+    }
+
+    // ── Migrate: add daily_budget column if missing ──────────────────
+    try {
+        _db.exec("ALTER TABLE markets ADD COLUMN daily_budget REAL NOT NULL DEFAULT 3.0");
+        log.info('migration_applied', { column: 'markets.daily_budget' });
+    } catch {
+        /* intentional: column already exists */
+    }
+
+    // ── Seed all temperature markets ────────────────────────────────
+    const MARKETS = [
+        { id: 'nyc',       name: 'New York City', slugTemplate: 'highest-temperature-in-nyc-on-{date}',       unit: 'F', lat: 40.7769,   lon: -73.8740,   station: 'KLGA', tz: 'America/New_York' },
+        { id: 'seoul',     name: 'Seoul',         slugTemplate: 'highest-temperature-in-seoul-on-{date}',     unit: 'C', lat: 37.5665,   lon: 126.9780,   station: 'RKSS', tz: 'Asia/Seoul' },
+        { id: 'shanghai',  name: 'Shanghai',      slugTemplate: 'highest-temperature-in-shanghai-on-{date}',  unit: 'C', lat: 31.2304,   lon: 121.4737,   station: 'ZSSS', tz: 'Asia/Shanghai' },
+        { id: 'madrid',    name: 'Madrid',        slugTemplate: 'highest-temperature-in-madrid-on-{date}',    unit: 'C', lat: 40.4168,   lon: -3.7038,    station: 'LEMD', tz: 'Europe/Madrid' },
+        { id: 'shenzhen',  name: 'Shenzhen',      slugTemplate: 'highest-temperature-in-shenzhen-on-{date}',  unit: 'C', lat: 22.5431,   lon: 114.0579,   station: 'ZGSZ', tz: 'Asia/Shanghai' },
+        { id: 'london',    name: 'London',        slugTemplate: 'highest-temperature-in-london-on-{date}',    unit: 'C', lat: 51.4700,   lon: -0.4543,    station: 'EGLL', tz: 'Europe/London' },
+        { id: 'tokyo',     name: 'Tokyo',         slugTemplate: 'highest-temperature-in-tokyo-on-{date}',     unit: 'C', lat: 35.5494,   lon: 139.7798,   station: 'RJTT', tz: 'Asia/Tokyo' },
+        { id: 'wellington', name: 'Wellington',    slugTemplate: 'highest-temperature-in-wellington-on-{date}', unit: 'C', lat: -41.3276, lon: 174.8050,   station: 'NZWN', tz: 'Pacific/Auckland' },
+    ];
+
     const insertMarket = _db.prepare(`
-        INSERT OR IGNORE INTO markets (id, name, slug_template, unit, station_lat, station_lon, station_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO markets (id, name, slug_template, unit, station_lat, station_lon, station_name, timezone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insertMarket.run('nyc', 'NYC Temperature', 'highest-temperature-in-nyc-on-{date}', 'F', 40.7769, -73.874, 'KLGA');
+    const seedMarkets = _db.transaction((markets) => {
+        for (const m of markets) {
+            insertMarket.run(m.id, m.name, m.slugTemplate, m.unit, m.lat, m.lon, m.station, m.tz);
+        }
+    });
+    seedMarkets(MARKETS);
+
+    // Update existing NYC row to have timezone if it was seeded before migration
+    _db.prepare("UPDATE markets SET timezone = 'America/New_York' WHERE id = 'nyc' AND timezone IS NULL").run();
 
     log.info('db_connected', { path: DB_PATH });
     return _db;

@@ -22,16 +22,17 @@
 
 import 'dotenv/config';
 import { createLogger } from '../../shared/logger.js';
-import { nowISO, getTodayET, getDateOffsetET, daysUntil, getPhase } from '../../shared/dates.js';
+import { nowISO, getTodayET, getDateOffsetET, daysUntil, getPhase, getDateOffsetInTz, getPhaseInTz } from '../../shared/dates.js';
 import { takeSnapshot } from './snapshot.js';
 import { detectAlerts } from './alerts.js';
 import { analyzeTrend, resolveRanges, shouldPlaceBuy, computePnL, checkStopLoss, computeEdge, analyzeTrajectory } from './strategy.js';
-import { fetchWeatherData, discoverMarket, selectRanges, tryPlaceBuyOrder, tryRedeemPositions, fetchLiquidityFromService } from './svcClients.js';
+import { fetchWeatherData, discoverMarket, selectRanges, tryPlaceBuyOrder, tryRedeemPositions, fetchLiquidityFromService, fetchDailySpend } from './svcClients.js';
 import { loadSession, saveSession, dbInsertSnapshot, dbInsertAlertsBatch } from './persistence.js';
 import { executeResolveDaySell, executeRebalanceSell, executeStopLossSell } from './sellFlow.js';
 import { getConfig, refreshConfig } from './monitorConfig.js';
 import { filterSnapshotByTier, attachSessionContext, startLiquidityGatedBuy } from './buyFlow.js';
 import { createOrResumeSession, syncSessionToDb, stopSession } from './sessionManager.js';
+import { checkBudget } from './budget.js';
 
 const log = createLogger('monitor');
 
@@ -39,8 +40,13 @@ const log = createLogger('monitor');
 
 const _svcFns = { fetchWeatherData, discoverMarket, selectRanges };
 
-async function _takeSnapshot(targetDate, previous) {
-    return takeSnapshot(targetDate, previous, _svcFns);
+/**
+ * @param {string} targetDate
+ * @param {Object|null} previous
+ * @param {Object} [opts] - { marketCtx, marketId }
+ */
+async function _takeSnapshot(targetDate, previous, opts = {}) {
+    return takeSnapshot(targetDate, previous, _svcFns, opts);
 }
 
 function _detectAlerts(current, previous, session) {
@@ -58,16 +64,16 @@ function _shouldPlaceBuy(session, snapshot) {
 
 // ── Session Management (re-export with snapshot injection) ──────────────
 
-async function _createOrResumeSession(targetDate, intervalMinutes) {
-    return createOrResumeSession(targetDate, intervalMinutes, _takeSnapshot);
+async function _createOrResumeSession(targetDate, intervalMinutes, marketOpts = {}) {
+    return createOrResumeSession(targetDate, intervalMinutes, (date, prev) => _takeSnapshot(date, prev, marketOpts), marketOpts);
 }
 
 // ── Monitoring Cycle ────────────────────────────────────────────────────
 
-async function runMonitoringCycle(session) {
+async function runMonitoringCycle(session, marketOpts = {}) {
     const config = getConfig();
     const previousSnapshot = session.snapshots[session.snapshots.length - 1] || null;
-    const snapshot = await _takeSnapshot(session.targetDate, previousSnapshot);
+    const snapshot = await _takeSnapshot(session.targetDate, previousSnapshot, marketOpts);
     const alerts = _detectAlerts(snapshot, previousSnapshot, session);
 
     session.phase = snapshot.phase;
@@ -118,7 +124,7 @@ async function runMonitoringCycle(session) {
             session.trajectory,
         );
         session.lastEdge = edge;
-        log.info('edge_computed', { ev: edge.ev, confidence: edge.confidence, tier: edge.tier, action: edge.action, targetDate: session.targetDate });
+        log.info('edge_computed', { ev: edge.ev, confidence: edge.confidence, tier: edge.tier, action: edge.action, targetDate: session.targetDate, marketId: session.marketId });
 
         if (edge.action === 'skip') {
             log.info('buy_skipped', { reason: edge.reason, ev: edge.ev, tier: edge.tier });
@@ -128,22 +134,37 @@ async function runMonitoringCycle(session) {
                 message: `Buy skipped: ${edge.reason}`,
                 data: { ev: edge.ev, confidence: edge.confidence, tier: edge.tier, targetPrice: snapshot.target?.yesPrice },
             });
-        } else if (buySignal === true) {
-            const filteredSnapshot = filterSnapshotByTier(snapshot, edge.rangesToBuy);
-            const immLiq = await fetchLiquidityFromService(session.targetDate);
-            session.buyOrder = await tryPlaceBuyOrder(filteredSnapshot, immLiq?.tokens || [], {
-                sessionId: session.id,
-                targetDate: session.targetDate,
-                marketId: 'nyc',
-            });
-            if (session.buyOrder) {
-                session.buyOrder.edge = edge;
-                session.initialForecastTempF = session.initialForecastTempF ?? snapshot.forecastTempF;
+        } else {
+            // Budget check before buy
+            const estimatedCost = snapshot.totalCost || 0;
+            const spendData = await fetchDailySpend();
+            const budgetCheck = await checkBudget(session.marketId || 'nyc', estimatedCost, config, spendData);
+
+            if (!budgetCheck.allowed) {
+                log.info('buy_budget_blocked', { marketId: session.marketId, reason: budgetCheck.reason, remaining: budgetCheck.remaining, cost: estimatedCost });
+                alerts.push({
+                    timestamp: nowISO(),
+                    type: 'budget_blocked',
+                    message: `Buy blocked: ${budgetCheck.reason}`,
+                    data: { remaining: budgetCheck.remaining, estimatedCost, marketId: session.marketId },
+                });
+            } else if (buySignal === true) {
+                const filteredSnapshot = filterSnapshotByTier(snapshot, edge.rangesToBuy);
+                const immLiq = await fetchLiquidityFromService(session.targetDate, session.marketId);
+                session.buyOrder = await tryPlaceBuyOrder(filteredSnapshot, immLiq?.tokens || [], {
+                    sessionId: session.id,
+                    targetDate: session.targetDate,
+                    marketId: session.marketId || 'nyc',
+                });
+                if (session.buyOrder) {
+                    session.buyOrder.edge = edge;
+                    session.initialForecastTempF = session.initialForecastTempF ?? snapshot.forecastTempF;
+                }
+                attachSessionContext(session.buyOrder, session);
+            } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
+                session.pendingEdge = edge;
+                startLiquidityGatedBuy(session, snapshot, (date, prev) => _takeSnapshot(date, prev, marketOpts));
             }
-            attachSessionContext(session.buyOrder, session);
-        } else if (buySignal === 'await-liquidity' && !session.awaitingLiquidity) {
-            session.pendingEdge = edge;
-            startLiquidityGatedBuy(session, snapshot, _takeSnapshot);
         }
     }
 
@@ -156,7 +177,7 @@ async function runMonitoringCycle(session) {
 
     // ── P&L + Stop-Loss ─────────────────────────────────────────────────
     if (session.buyOrder) {
-        const liqData = await fetchLiquidityFromService(session.targetDate);
+        const liqData = await fetchLiquidityFromService(session.targetDate, session.marketId);
         const liquidityBids = {};
         if (liqData?.tokens) {
             for (const t of liqData.tokens) {
@@ -221,6 +242,8 @@ export {
     refreshConfig,
     loadSession,
     getPhase,
+    getPhaseInTz,
     getDateOffsetET,
+    getDateOffsetInTz,
     daysUntil,
 };

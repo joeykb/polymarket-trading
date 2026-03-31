@@ -296,7 +296,7 @@ export async function redeemPositions(session) {
         try {
             await dataSvc('POST', '/api/trades', {
                 sessionId: session.id || null,
-                marketId: 'nyc',
+                marketId: session.marketId || session.buyOrder?._marketId || 'nyc',
                 targetDate: session.targetDate || null,
                 type: 'redeem',
                 mode: tradingCfg.mode,

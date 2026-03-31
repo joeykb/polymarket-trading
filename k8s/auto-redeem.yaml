@@ -7,8 +7,8 @@
 #
 # Uses the trading-svc image (has ethers + clob-client).
 # Mounts the same PVC as data-svc for direct session file access.
-# CLOB calls go through the VPN init (gluetun sidecar not needed —
-# Polygon RPC is not geo-blocked and CLOB resolution check is best-effort).
+# CLOB read endpoints (getMarket) are NOT geo-blocked — no VPN needed.
+# Only order placement requires VPN (handled by trading-svc sidecar).
 ---
 apiVersion: batch/v1
 kind: CronJob

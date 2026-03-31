@@ -57,23 +57,50 @@ export async function svcPut(base, path, body) {
     return client.put(path, body, { timeoutMs: 15000 });
 }
 
-// ── Domain-Specific Service Calls ───────────────────────────────────────
+/**
+ * Fetch weather data with optional market context for multi-market support.
+ * @param {string} targetDate
+ * @param {Object} [marketCtx] - { lat, lon, unit, tz, station }
+ */
+export async function fetchWeatherData(targetDate, marketCtx = {}) {
+    const params = new URLSearchParams({ date: targetDate });
+    if (marketCtx.lat) params.set('lat', marketCtx.lat);
+    if (marketCtx.lon) params.set('lon', marketCtx.lon);
+    if (marketCtx.unit) params.set('unit', marketCtx.unit);
+    if (marketCtx.tz) params.set('tz', marketCtx.tz);
+    if (marketCtx.station) params.set('station', marketCtx.station);
+    const qs = params.toString();
 
-export async function fetchWeatherData(targetDate) {
     const [forecast, current] = await Promise.all([
-        svcGet(WEATHER_SVC, `/api/forecast?date=${targetDate}`),
-        svcGet(WEATHER_SVC, `/api/current`).catch(() => ({ tempF: null, maxSince7amF: null, conditions: null })),
+        svcGet(WEATHER_SVC, `/api/forecast?${qs}`),
+        svcGet(WEATHER_SVC, `/api/current?${qs.replace(/date=[^&]+&?/, '')}`).catch(() => ({
+            tempF: null, temp: null, maxSince7am: null, maxSince7amF: null, conditions: null,
+        })),
     ]);
     return { forecast, current };
 }
 
-export async function discoverMarket(targetDate) {
-    return svcGet(MARKET_SVC, `/api/market?date=${targetDate}`);
+/**
+ * Discover a Polymarket event for a given date and market.
+ * @param {string} targetDate
+ * @param {string} [marketId='nyc']
+ */
+export async function discoverMarket(targetDate, marketId = 'nyc') {
+    return svcGet(MARKET_SVC, `/api/market?date=${targetDate}&market=${marketId}`);
 }
 
-export async function selectRanges(forecastTempF, ranges, targetDate) {
-    return svcGet(MARKET_SVC, `/api/ranges?date=${targetDate}&forecastF=${forecastTempF}`);
+/**
+ * Select ranges based on forecast temperature for a given market.
+ * @param {number} forecastTemp - Forecast high temp in the market's native unit
+ * @param {Array} ranges
+ * @param {string} targetDate
+ * @param {string} [marketId='nyc']
+ */
+export async function selectRanges(forecastTemp, ranges, targetDate, marketId = 'nyc') {
+    return svcGet(MARKET_SVC, `/api/ranges?date=${targetDate}&forecastF=${forecastTemp}&market=${marketId}`);
 }
+
+// ── Domain-Specific Service Calls ───────────────────────────────────────
 
 export async function tryPlaceBuyOrder(snapshot, liqTokens = [], context = {}) {
     try {
@@ -115,13 +142,27 @@ export async function tryRedeemPositions(session) {
     }
 }
 
-export async function fetchLiquidityFromService(date) {
+export async function fetchLiquidityFromService(date, marketId) {
     try {
-        return await svcGet(LIQUIDITY_SVC, `/api/liquidity?date=${date}`);
+        const qs = marketId ? `date=${date}&market=${marketId}` : `date=${date}`;
+        return await svcGet(LIQUIDITY_SVC, `/api/liquidity?${qs}`);
     } catch {
         return null; /* intentional: liquidity-svc may not be ready */
     }
 }
 
+/**
+ * Fetch today's spend per market from data-svc.
+ * @returns {Object} Map of marketId → totalSpent (e.g. { nyc: 2.5, london: 1.3 })
+ */
+export async function fetchDailySpend() {
+    try {
+        return await svcGet(DATA_SVC, '/api/spend');
+    } catch {
+        return {}; /* intentional: spend tracking is best-effort */
+    }
+}
+
 // Re-export service URL constants for use by other modules
 export { WEATHER_SVC, MARKET_SVC, TRADING_SVC, DATA_SVC, LIQUIDITY_SVC };
+

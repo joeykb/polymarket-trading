@@ -28,6 +28,8 @@ spec:
           ports:
             - containerPort: 3003
           env:
+            - name: DATA_SVC_URL
+              value: "http://data-svc-green:3005"
             - name: MARKET_SVC_PORT
               value: "3003"
           resources:

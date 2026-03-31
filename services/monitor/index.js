@@ -1,13 +1,12 @@
 /**
- * TempEdge Monitor — Multi-date phase-aware monitoring (Microservice Edition)
+ * TempEdge Monitor — Multi-Market, Multi-Date Phase-Aware Monitoring
  *
- * Monitors 3+ concurrent plays at different phases:
- *   T+0 (resolve):  Target is today — keep best range, discard 2
- *   T+1 (monitor):  Target is tomorrow — watch for shifts
- *   T+2 (buy):      Target is day after — initial selection
+ * Monitors multiple markets (NYC, London, Wellington, etc.) across
+ * T+0 through T+N concurrent plays. Each market × date pair gets
+ * its own session with market-specific weather, discovery, and budget.
  *
  * Usage:
- *   node index.js                     # Auto-detect dates
+ *   node index.js                     # Auto-detect markets and dates
  *   node index.js --interval 5        # Check every 5 minutes
  */
 
@@ -18,12 +17,15 @@ import {
     stopSession,
     getConfig,
     getPhase,
+    getPhaseInTz,
     getDateOffsetET,
+    getDateOffsetInTz,
     refreshConfig,
     loadSession,
 } from './orchestrator.js';
 import { tryRedeemPositions } from './svcClients.js';
 import { saveSession } from './persistence.js';
+import { getEnabledMarkets, computeBudgetAllocations } from './budget.js';
 import { services } from '../../shared/services.js';
 import { createLogger } from '../../shared/logger.js';
 
@@ -85,43 +87,48 @@ function formatPriceChange(change) {
 function shortLabel(question) {
     if (!question) return '--';
     const rangeMatch = question.match(/(\d+)-(\d+)/);
-    if (rangeMatch) return `${rangeMatch[1]}-${rangeMatch[2]}°F`;
+    if (rangeMatch) return `${rangeMatch[1]}-${rangeMatch[2]}°`;
     const upperMatch = question.match(/(\d+).*or higher/i);
-    if (upperMatch) return `${upperMatch[1]}°F+`;
+    if (upperMatch) return `${upperMatch[1]}°+`;
     const lowerMatch = question.match(/(\d+).*or (?:lower|below)/i);
-    if (lowerMatch) return `≤${lowerMatch[1]}°F`;
+    if (lowerMatch) return `≤${lowerMatch[1]}°`;
+    // Single-degree: "be 14°C on" or "be 78°F on" (London 2026 format)
+    const singleMatch = question.match(/be (\d+)°[CF]\b/i);
+    if (singleMatch) return `${singleMatch[1]}°`;
     return question.slice(0, 15);
 }
 
-function printSnapshotCompact(date, snapshot, session) {
+function printSnapshotCompact(key, snapshot, session) {
     const phase = snapshot.phase || session.phase;
     const phaseLabel = PHASE_LABELS[phase] || phase;
     const phaseColor = PHASE_COLORS[phase] || '';
-    const target = shortLabel(snapshot.target.question).padEnd(14);
+    const target = shortLabel(snapshot.target.question).padEnd(12);
     const price = formatPrice(snapshot.target.yesPrice).padEnd(8);
     const cost = '$' + snapshot.totalCost.toFixed(3);
-    const currentTemp = snapshot.currentTempF !== null ? `${snapshot.currentTempF}°F` : '--';
-    const forecast = `${snapshot.forecastTempF}°F`;
+    const unit = snapshot.unit || 'F';
+    const currentTemp = snapshot.currentTempF !== null ? `${snapshot.currentTempF}°${unit}` : '--';
+    const forecast = `${snapshot.forecastTempF}°${unit}`;
     const delta = snapshot.forecastChange !== 0 ? ` (${snapshot.forecastChange > 0 ? '+' : ''}${snapshot.forecastChange})` : '';
     console.log(
-        `  │ ${date} │ ${phaseColor}${phaseLabel.padEnd(12)}${RESET} │ Now: ${currentTemp.padEnd(5)} │ Fcst: ${forecast.padEnd(5)}${delta.padEnd(6)} │ 🎯 ${target} ${price} │ Cost: ${cost} │`,
+        `  │ ${key.padEnd(16)} │ ${phaseColor}${phaseLabel.padEnd(12)}${RESET} │ ${currentTemp.padEnd(6)} │ ${forecast.padEnd(6)}${delta.padEnd(6)} │ 🎯 ${target} ${price} │ ${cost} │`,
     );
 }
 
-function printDetailedSnapshot(date, snapshot, session) {
+function printDetailedSnapshot(key, snapshot, session) {
     const time = formatTime(snapshot.timestamp);
     const count = session.snapshots.length;
     const phase = snapshot.phase || session.phase;
     const phaseLabel = PHASE_LABELS[phase] || phase;
     const phaseColor = PHASE_COLORS[phase] || '';
+    const unit = snapshot.unit || 'F';
 
-    console.log(`\n  ┌─ ${date} ${phaseColor}${phaseLabel}${RESET} @ ${time} (#${count}) ${'─'.repeat(30)}┐`);
+    console.log(`\n  ┌─ ${key} ${phaseColor}${phaseLabel}${RESET} @ ${time} (#${count}) ${'─'.repeat(20)}┐`);
     console.log(
-        `  │  Forecast: ${snapshot.forecastTempF}°F  (Δ ${snapshot.forecastChange >= 0 ? '+' : ''}${snapshot.forecastChange}°F)  [${snapshot.forecastSource || 'unknown'}]`,
+        `  │  Forecast: ${snapshot.forecastTempF}°${unit}  (Δ ${snapshot.forecastChange >= 0 ? '+' : ''}${snapshot.forecastChange})  [${snapshot.forecastSource || 'unknown'}]`,
     );
     if (snapshot.currentTempF != null) {
-        const maxToday = snapshot.maxTodayF ? `  Hi: ${snapshot.maxTodayF}°F` : '';
-        console.log(`  │  Current:  ${snapshot.currentTempF}°F  ${snapshot.currentConditions || ''}${maxToday}`);
+        const maxToday = snapshot.maxTodayF ? `  Hi: ${snapshot.maxTodayF}°${unit}` : '';
+        console.log(`  │  Current:  ${snapshot.currentTempF}°${unit}  ${snapshot.currentConditions || ''}${maxToday}`);
     }
     console.log(
         `  │  🎯 Target: ${shortLabel(snapshot.target.question).padEnd(14)} YES: ${formatPrice(snapshot.target.yesPrice).padEnd(8)} (${formatPriceChange(snapshot.target.priceChange)})`,
@@ -151,31 +158,93 @@ function printResolution(resolution) {
     console.log(`    ❌ DISCARD: ${resolution.discard.map(shortLabel).join(', ')}`);
 }
 
-// ── Multi-Date Session Management ───────────────────────────────────────
+// ── Market Registry ─────────────────────────────────────────────────────
+// Fetch full market metadata from data-svc to build weather/discovery context.
 
-function getPortfolioDates() {
+const _marketMetadata = new Map();
+
+async function fetchMarketMetadata(marketId) {
+    if (_marketMetadata.has(marketId)) return _marketMetadata.get(marketId);
+    try {
+        const res = await fetch(`${DATA_SVC}/api/markets/${marketId}`, { signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+            const meta = await res.json();
+            _marketMetadata.set(marketId, meta);
+            return meta;
+        }
+    } catch (err) {
+        log.warn('market_metadata_fetch_failed', { marketId, error: err.message });
+    }
+    // Return NYC defaults for backwards compatibility
+    return {
+        id: marketId,
+        name: marketId.toUpperCase(),
+        unit: 'F',
+        station_lat: 40.7769,
+        station_lon: -73.874,
+        station_name: 'KLGA',
+        timezone: 'America/New_York',
+    };
+}
+
+/**
+ * Build the market context object for weather-svc calls.
+ */
+function buildMarketCtx(meta) {
+    return {
+        lat: meta.station_lat,
+        lon: meta.station_lon,
+        unit: meta.unit || 'F',
+        tz: meta.timezone || 'America/New_York',
+        station: meta.station_name || 'KLGA',
+    };
+}
+
+// ── Multi-Market Session Key ────────────────────────────────────────────
+
+function sessionKey(marketId, date) {
+    return `${marketId}:${date}`;
+}
+
+// ── Multi-Market Portfolio Generation ───────────────────────────────────
+
+function getPortfolioDates(marketId, meta) {
     const cfg = getConfig();
     const maxDays = cfg.phases.scoutDaysMax;
+    const tz = meta?.timezone || 'America/New_York';
     const dates = [];
     for (let i = 0; i <= maxDays; i++) {
-        const date = getDateOffsetET(i);
-        const phase = getPhase(date);
+        const date = tz !== 'America/New_York' ? getDateOffsetInTz(i, tz) : getDateOffsetET(i);
+        const phase = tz !== 'America/New_York' ? getPhaseInTz(date, tz) : getPhase(date);
         dates.push({ date, phase });
     }
     return dates;
 }
 
-async function initializeSessions(dates) {
+async function initializeSessions(enabledMarkets) {
     const sessions = new Map();
-    for (const { date, phase } of dates) {
-        try {
-            log.info('session_init', { date, phase: PHASE_LABELS[phase] });
-            console.log(`\n  📅 Initializing ${date} (${PHASE_LABELS[phase]})...`);
-            const session = await createOrResumeSession(date, intervalMinutes);
-            sessions.set(date, session);
-        } catch (err) {
-            log.warn('session_skip', { date, error: err.message });
-            console.log(`  ⚠️  Skipping ${date}: ${err.message}`);
+
+    for (const market of enabledMarkets) {
+        const marketId = market.id || market;
+        const meta = await fetchMarketMetadata(marketId);
+        const dates = getPortfolioDates(marketId, meta);
+        const marketCtx = buildMarketCtx(meta);
+        const marketOpts = { marketCtx, marketId };
+
+        console.log(`\n  🏙️  Market: ${meta.name || marketId.toUpperCase()} (${meta.unit || 'F'}, ${meta.timezone || 'ET'})`);
+
+        for (const { date, phase } of dates) {
+            const key = sessionKey(marketId, date);
+            try {
+                log.info('session_init', { marketId, date, phase: PHASE_LABELS[phase] });
+                console.log(`    📅 ${date} (${PHASE_LABELS[phase]})...`);
+                const session = await createOrResumeSession(date, intervalMinutes, marketOpts);
+                session.marketId = marketId;
+                sessions.set(key, { session, marketOpts, meta });
+            } catch (err) {
+                log.warn('session_skip', { marketId, date, error: err.message });
+                console.log(`    ⚠️  Skipping ${date}: ${err.message}`);
+            }
         }
     }
     return sessions;
@@ -205,39 +274,33 @@ async function clearRestartSignal() {
 }
 
 // ── Startup Redeem Sweep ────────────────────────────────────────────────
-// Scans ALL persisted session files for unredeemed positions.
-// This catches sessions from past dates that the monitor no longer watches
-// (only T+0 through T+4 are in the active portfolio).
 
 async function sweepUnredeemedSessions() {
     try {
-        const res = await fetch(`${DATA_SVC}/api/session-files`, { signal: AbortSignal.timeout(5000) });
+        const res = await fetch(`${DATA_SVC}/api/session-files?format=full`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) return;
-        const { dates } = await res.json();
-        if (!dates || dates.length === 0) return;
+        const { sessions: files } = await res.json();
+        if (!files || files.length === 0) return;
 
         const today = getDateOffsetET(0);
         let redeemed = 0;
 
-        for (const date of dates) {
-            // Skip today/future — those are actively monitored
+        for (const { marketId, date } of files) {
             if (date >= today) continue;
 
-            const session = await loadSession(date);
+            const session = await loadSession(date, marketId);
             if (!session) continue;
 
-            // Already redeemed or no positions to redeem
             if (session.redeemExecuted || !session.buyOrder?.positions?.length) continue;
 
-            // Check if all positions were already sold
             const unsold = session.buyOrder.positions.filter(p => !p.soldAt);
             if (unsold.length === 0) {
-                log.info('redeem_sweep_skip_sold', { date, reason: 'all_positions_sold' });
+                log.info('redeem_sweep_skip_sold', { marketId, date, reason: 'all_positions_sold' });
                 continue;
             }
 
-            log.info('redeem_sweep_attempt', { date, positions: unsold.length });
-            console.log(`  🔄 Redeem sweep: ${date} — ${unsold.length} unredeemed positions`);
+            log.info('redeem_sweep_attempt', { marketId, date, positions: unsold.length });
+            console.log(`  🔄 Redeem sweep: ${marketId}/${date} — ${unsold.length} unredeemed positions`);
 
             try {
                 const result = await tryRedeemPositions(session);
@@ -247,15 +310,13 @@ async function sweepUnredeemedSessions() {
                     session.status = 'completed';
                     await saveSession(session);
                     redeemed++;
-                    log.info('redeem_sweep_success', { date, redeemed: result.redeemed, value: result.totalValue });
-                    console.log(`  ✅ Redeemed ${date}: ${result.redeemed} positions, $${result.totalValue?.toFixed(2) || '?'}`);
+                    log.info('redeem_sweep_success', { marketId, date, redeemed: result.redeemed, value: result.totalValue });
+                    console.log(`  ✅ Redeemed ${marketId}/${date}: ${result.redeemed} positions, $${result.totalValue?.toFixed(2) || '?'}`);
                 } else {
-                    log.warn('redeem_sweep_failed', { date, error: result?.error || 'no result' });
-                    console.log(`  ⚠️  Redeem failed for ${date}: ${result?.error || 'no result'}`);
+                    log.warn('redeem_sweep_failed', { marketId, date, error: result?.error || 'no result' });
                 }
             } catch (err) {
-                log.warn('redeem_sweep_error', { date, error: err.message });
-                console.log(`  ⚠️  Redeem error for ${date}: ${err.message}`);
+                log.warn('redeem_sweep_error', { marketId, date, error: err.message });
             }
         }
 
@@ -272,7 +333,6 @@ async function sweepUnredeemedSessions() {
 // ── Main ────────────────────────────────────────────────────────────────
 
 async function main() {
-    // Load config from data-svc
     await refreshConfig();
     const cfg = getConfig();
     intervalMinutes = cfg.monitor.intervalMinutes || intervalMinutes;
@@ -281,25 +341,21 @@ async function main() {
     console.log('\n  🔍 Checking for unredeemed past sessions...');
     await sweepUnredeemedSessions();
 
-    const dates = getPortfolioDates();
+    const enabledMarkets = await getEnabledMarkets(cfg);
+    const budget = await computeBudgetAllocations(cfg);
 
-    console.log(`\n🌡️  TempEdge Monitor — Rolling Portfolio (Microservice Edition)`);
+    console.log(`\n🌡️  TempEdge Monitor — Multi-Market Rolling Portfolio`);
     console.log('═══════════════════════════════════════════════════════════════');
-    console.log(`  Dates:           ${dates.map((d) => d.date).join(', ')}`);
+    console.log(`  Markets:         ${enabledMarkets.map(m => m.id || m).join(', ')}`);
+    console.log(`  Daily budget:    $${budget.totalBudget.toFixed(2)}`);
+    for (const a of budget.allocations) {
+        console.log(`    → ${a.marketId.padEnd(10)} $${a.budget.toFixed(2)} (priority #${a.priority})`);
+    }
     console.log(`  Check interval:  ${intervalMinutes} minutes`);
-    console.log(`  Weather:         weather-svc`);
-    console.log(`  Markets:         market-svc`);
-    console.log(`  Trading:         trading-svc`);
-    console.log(`  Data:            data-svc`);
-    console.log(`  Rebalance at:    ±${cfg.monitor.rebalanceThreshold}°F`);
+    console.log(`  Rebalance at:    ±${cfg.monitor.rebalanceThreshold}°`);
     console.log('═══════════════════════════════════════════════════════════════');
 
-    console.log('\n  📊 Portfolio Overview:');
-    console.log('  ┌────────────┬──────────────┬───────────┬─────────────────┬────────────────────────────┬────────────┐');
-    console.log('  │ Date       │ Phase        │ Current   │ Forecast        │ Target                     │ Cost       │');
-    console.log('  ├────────────┼──────────────┼───────────┼─────────────────┼────────────────────────────┼────────────┤');
-
-    const sessions = await initializeSessions(dates);
+    const sessions = await initializeSessions(enabledMarkets);
 
     if (sessions.size === 0) {
         log.error('no_markets_found', { reason: 'exiting' });
@@ -307,15 +363,15 @@ async function main() {
         process.exit(1);
     }
 
-    for (const [date, session] of sessions) {
+    console.log('\n  📊 Portfolio Overview:');
+    for (const [key, { session }] of sessions) {
         const latest = session.snapshots[session.snapshots.length - 1];
-        if (latest) printSnapshotCompact(date, latest, session);
+        if (latest) printSnapshotCompact(key, latest, session);
     }
-    console.log('  └────────────┴──────────────┴───────────┴─────────────────┴────────────────────────────┴────────────┘');
 
-    for (const [date, session] of sessions) {
+    for (const [key, { session }] of sessions) {
         const latest = session.snapshots[session.snapshots.length - 1];
-        if (latest) printDetailedSnapshot(date, latest, session);
+        if (latest) printDetailedSnapshot(key, latest, session);
     }
 
     const intervalMs = intervalMinutes * 60 * 1000;
@@ -328,7 +384,7 @@ async function main() {
             log.info('restart_signal_detected');
             console.log('\n  🔄 Restart signal detected');
             await clearRestartSignal();
-            for (const [, session] of sessions) await stopSession(session);
+            for (const [, { session }] of sessions) await stopSession(session);
             log.info('sessions_saved_shutdown');
             console.log('  💾 Sessions saved. Exiting...');
             process.exit(0);
@@ -336,54 +392,61 @@ async function main() {
     }, 5000);
 
     const timer = setInterval(async () => {
-        log.info('monitoring_cycle', { time: formatTime(new Date().toISOString()) });
+        log.info('monitoring_cycle', { time: formatTime(new Date().toISOString()), markets: enabledMarkets.length });
         console.log(`\n${'═'.repeat(65)}`);
-        console.log(`  ⏱️  Monitoring cycle @ ${formatTime(new Date().toISOString())}`);
+        console.log(`  ⏱️  Monitoring cycle @ ${formatTime(new Date().toISOString())} [${enabledMarkets.length} markets]`);
 
         // Refresh config each cycle for hot-reload
         await refreshConfig();
+        const currentCfg = getConfig();
 
-        // Retry failed initializations
-        const currentDates = getPortfolioDates();
-        for (const { date, phase } of currentDates) {
-            if (!sessions.has(date)) {
-                try {
-                    console.log(`  🔄 Retrying ${date}...`);
-                    const session = await createOrResumeSession(date, intervalMinutes);
-                    sessions.set(date, session);
-                    console.log(`  ✅ Initialized ${date} (${phase})`);
-                } catch (err) {
-                    console.log(`  ⚠️  ${date} unavailable: ${err.message.slice(0, 80)}`);
-                    log.warn('session_retry_failed', { date, error: err.message });
+        // Re-check enabled markets (may have changed via admin)
+        const currentMarkets = await getEnabledMarkets(currentCfg);
+
+        // Retry failed initializations for all markets × dates
+        for (const market of currentMarkets) {
+            const marketId = market.id || market;
+            const meta = await fetchMarketMetadata(marketId);
+            const dates = getPortfolioDates(marketId, meta);
+            const marketCtx = buildMarketCtx(meta);
+            const marketOpts = { marketCtx, marketId };
+
+            for (const { date, phase } of dates) {
+                const key = sessionKey(marketId, date);
+                if (!sessions.has(key)) {
+                    try {
+                        const session = await createOrResumeSession(date, intervalMinutes, marketOpts);
+                        session.marketId = marketId;
+                        sessions.set(key, { session, marketOpts, meta });
+                        console.log(`  ✅ ${key} initialized (${phase})`);
+                    } catch (err) {
+                        log.warn('session_retry_failed', { marketId, date, error: err.message });
+                    }
                 }
             }
         }
 
-        console.log('  ┌────────────┬──────────────┬───────────┬─────────────────┬────────────────────────────┬────────────┐');
-
-        for (const [date, session] of sessions) {
+        // Run monitoring cycles
+        for (const [key, entry] of sessions) {
+            const { session, marketOpts } = entry;
             if (session.status === 'completed') {
-                console.log(`  │ ${date} │ ✅ COMPLETE   │ Market resolved                                           │`);
+                console.log(`  │ ${key.padEnd(16)} │ ✅ COMPLETE   │`);
                 continue;
             }
             try {
-                const { snapshot, alerts, resolution } = await runMonitoringCycle(session);
-                printSnapshotCompact(date, snapshot, session);
+                const { snapshot, alerts, resolution } = await runMonitoringCycle(session, marketOpts);
+                printSnapshotCompact(key, snapshot, session);
                 if (alerts.length > 0 || resolution) {
-                    console.log('  ├────────────┴──────────────┴───────────┴─────────────────┴────────────────────────────┴────────────┤');
                     printAlerts(alerts);
                     printResolution(resolution);
-                    console.log('  ├────────────┬──────────────┬───────────┬─────────────────┬────────────────────────────┬────────────┤');
                 }
             } catch (err) {
-                console.log(`  │ ${date} │ ❌ ERROR      │ ${err.message.slice(0, 80).padEnd(52)} │`);
-                log.error('cycle_error', { date, error: err.message });
+                console.log(`  │ ${key.padEnd(16)} │ ❌ ERROR      │ ${err.message.slice(0, 60)} │`);
+                log.error('cycle_error', { key, error: err.message });
             }
         }
 
-        console.log('  └────────────┴──────────────┴───────────┴─────────────────┴────────────────────────────┴────────────┘');
-
-        const allComplete = [...sessions.values()].every((s) => s.status === 'completed');
+        const allComplete = [...sessions.values()].every((e) => e.session.status === 'completed');
         if (allComplete) {
             console.log('\n  ✅ All markets resolved. Done.');
             clearInterval(timer);
@@ -403,10 +466,10 @@ async function main() {
         clearInterval(restartWatcher);
         await Promise.all(
             [...sessions.values()]
-                .filter((s) => s.status === 'active')
-                .map((s) => stopSession(s)),
+                .filter((e) => e.session.status === 'active')
+                .map((e) => stopSession(e.session)),
         );
-        const totalSnapshots = [...sessions.values()].reduce((sum, s) => sum + s.snapshots.length, 0);
+        const totalSnapshots = [...sessions.values()].reduce((sum, e) => sum + e.session.snapshots.length, 0);
         log.info('shutdown_complete', { sessions: sessions.size, totalSnapshots });
         console.log(`  💾 ${sessions.size} sessions saved (${totalSnapshots} snapshots)`);
         process.exit(0);

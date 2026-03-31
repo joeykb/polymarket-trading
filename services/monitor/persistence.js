@@ -48,9 +48,9 @@ async function postWithRetry(path, body, label) {
 
 // ── Session Persistence (file-backed, no retry) ─────────────────────────
 
-export async function loadSession(targetDate) {
+export async function loadSession(targetDate, marketId = 'nyc') {
     try {
-        const data = await svcGet(DATA_SVC, `/api/session-files/${targetDate}`);
+        const data = await svcGet(DATA_SVC, `/api/session-files/${targetDate}?market=${marketId}`);
         return data;
     } catch {
         return null; /* intentional: session may not exist yet */
@@ -59,7 +59,8 @@ export async function loadSession(targetDate) {
 
 export async function saveSession(session) {
     try {
-        await svcPut(DATA_SVC, `/api/session-files/${session.targetDate}`, session);
+        const marketId = session.marketId || 'nyc';
+        await svcPut(DATA_SVC, `/api/session-files/${session.targetDate}?market=${marketId}`, session);
     } catch (err) {
         log.warn('session_save_failed', { error: err.message });
     }
@@ -76,7 +77,7 @@ export async function dbInsertSnapshot(data, session) {
     if (session && !session._dbSessionReady) {
         const retryResult = await dbUpsertSession({
             id: session.id,
-            marketId: 'nyc',
+            marketId: session.marketId || 'nyc',
             targetDate: session.targetDate,
             status: session.status,
             phase: session.phase,

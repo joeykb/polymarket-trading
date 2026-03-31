@@ -13,7 +13,7 @@
  */
 
 import { createLogger } from '../../shared/logger.js';
-import { nowISO, getPhase } from '../../shared/dates.js';
+import { nowISO, getPhase, getPhaseInTz } from '../../shared/dates.js';
 import { svcGet, DATA_SVC, tryPlaceBuyOrder, fetchLiquidityFromService } from './svcClients.js';
 import { loadSession, saveSession, dbUpsertSession, dbInsertSnapshot } from './persistence.js';
 import { getConfig } from './monitorConfig.js';
@@ -31,7 +31,7 @@ async function upsertAndReconcile(session, extra = {}) {
     const config = getConfig();
     const upsertResult = await dbUpsertSession({
         id: session.id,
-        marketId: 'nyc',
+        marketId: session.marketId || 'nyc',
         targetDate: session.targetDate,
         status: session.status,
         phase: session.phase,
@@ -118,14 +118,14 @@ async function hydrateBuyOrderFromChain(session, targetDate) {
 // ── DB Reconciliation ───────────────────────────────────────────────────
 
 async function reconcileSessionId(session, targetDate) {
+    const marketId = session.marketId || 'nyc';
     try {
-        const dbSession = await svcGet(DATA_SVC, `/api/db/sessions/nyc/${targetDate}`);
+        const dbSession = await svcGet(DATA_SVC, `/api/db/sessions/${marketId}/${targetDate}`);
         if (dbSession && dbSession.id && dbSession.id !== session.id) {
             session.id = dbSession.id;
         }
         session._dbSessionReady = true;
     } catch {
-        // Session not in DB — upsert it so snapshots/alerts have a valid FK target
         await upsertAndReconcile(session);
     }
 }
@@ -140,18 +140,21 @@ async function reconcileSessionId(session, targetDate) {
  * @param {Function} takeSnapshotFn - async (date, prev) => snapshot
  * @returns {Promise<Object>} session
  */
-export async function createOrResumeSession(targetDate, intervalMinutes, takeSnapshotFn) {
+export async function createOrResumeSession(targetDate, intervalMinutes, takeSnapshotFn, marketOpts = {}) {
     const config = getConfig();
-    const existing = await loadSession(targetDate);
+    const marketId = marketOpts.marketId || 'nyc';
+    const tz = marketOpts.marketCtx?.tz || 'America/New_York';
+    const existing = await loadSession(targetDate, marketId);
 
     if (existing && existing.status === 'completed') {
-        log.info('session_completed', { targetDate });
+        log.info('session_completed', { marketId, targetDate });
         return existing;
     }
 
     if (existing && (existing.status === 'active' || existing.status === 'stopped')) {
         existing.status = 'active';
-        existing.phase = getPhase(targetDate);
+        existing.marketId = existing.marketId || marketId;
+        existing.phase = tz !== 'America/New_York' ? getPhaseInTz(targetDate, tz) : getPhase(targetDate);
 
         cleanupFailedBuyOrder(existing, targetDate);
 
@@ -161,7 +164,7 @@ export async function createOrResumeSession(targetDate, intervalMinutes, takeSna
 
         if (existing.awaitingLiquidity && !existing.buyOrder) {
             existing.awaitingLiquidity = false;
-            log.info('liquidity_wait_reset', { targetDate });
+            log.info('liquidity_wait_reset', { marketId, targetDate });
         }
 
         cleanupFailedResolveSell(existing, targetDate);
@@ -169,14 +172,14 @@ export async function createOrResumeSession(targetDate, intervalMinutes, takeSna
         await saveSession(existing);
         await reconcileSessionId(existing, targetDate);
 
-        log.info('session_resumed', { targetDate, snapshots: existing.snapshots.length, phase: existing.phase });
+        log.info('session_resumed', { marketId, targetDate, snapshots: existing.snapshots.length, phase: existing.phase });
         return existing;
     }
 
     // New session
-    log.info('initial_snapshot', { targetDate });
+    log.info('initial_snapshot', { marketId, targetDate });
     const snapshot = await takeSnapshotFn(targetDate, null);
-    const phase = getPhase(targetDate);
+    const phase = tz !== 'America/New_York' ? getPhaseInTz(targetDate, tz) : getPhase(targetDate);
 
     let buyOrder = null;
     if (snapshot.eventClosed) {
@@ -184,8 +187,8 @@ export async function createOrResumeSession(targetDate, intervalMinutes, takeSna
     } else {
         const shouldGate = config.liquidity.wsEnabled && phase === 'buy';
         if (!shouldGate) {
-            const initLiq = await fetchLiquidityFromService(targetDate);
-            buyOrder = await tryPlaceBuyOrder(snapshot, initLiq?.tokens || [], { targetDate, marketId: 'nyc' });
+            const initLiq = await fetchLiquidityFromService(targetDate, marketId);
+            buyOrder = await tryPlaceBuyOrder(snapshot, initLiq?.tokens || [], { targetDate, marketId });
             if (buyOrder) {
                 log.info('initial_buy_success', { targetDate, cost: buyOrder.totalCost.toFixed(3), mode: buyOrder.mode || 'live' });
             } else {
@@ -200,12 +203,13 @@ export async function createOrResumeSession(targetDate, intervalMinutes, takeSna
     if (buyOrder) {
         buyOrder._sessionId = sessionId;
         buyOrder._targetDate = targetDate;
-        buyOrder._marketId = 'nyc';
+        buyOrder._marketId = marketId;
     }
 
     const session = {
         id: sessionId,
         targetDate,
+        marketId,
         startedAt: nowISO(),
         status: 'active',
         phase,

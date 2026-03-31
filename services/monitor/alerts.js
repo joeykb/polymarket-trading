@@ -23,6 +23,7 @@ export function detectAlerts(current, previous, session, config) {
     const now = nowISO();
     const initialForecast = session.initialForecastTempF;
     const cfg = config || {};
+    const unitLabel = '°' + (current.unit || 'F');
 
     if (current.eventClosed) {
         alerts.push({ timestamp: now, type: 'market_closed', message: 'Market has been closed/resolved.', data: {} });
@@ -46,7 +47,7 @@ export function detectAlerts(current, previous, session, config) {
         alerts.push({
             timestamp: now,
             type: 'forecast_shift',
-            message: `Forecast shifted ${delta > 0 ? '+' : ''}${delta}°F from initial (${initialForecast}°F → ${current.forecastTempF}°F)${isDrastic ? ' ⚠️ DRASTIC' : ''}`,
+            message: `Forecast shifted ${delta > 0 ? '+' : ''}${delta}${unitLabel} from initial (${initialForecast}${unitLabel} → ${current.forecastTempF}${unitLabel})${isDrastic ? ' ⚠️ DRASTIC' : ''}`,
             data: { initialForecast, currentForecast: current.forecastTempF, delta, isDrastic },
         });
     }

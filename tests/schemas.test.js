@@ -40,6 +40,7 @@ describe('validate helper', () => {
 
 describe('tradeSchema', () => {
     const validTrade = {
+        marketId: 'nyc',
         targetDate: '2026-03-25',
         type: 'buy',
         totalCost: 3.15,
@@ -49,7 +50,7 @@ describe('tradeSchema', () => {
         const { data, error } = validate(tradeSchema, validTrade);
         expect(error).toBeNull();
         expect(data.type).toBe('buy');
-        expect(data.marketId).toBe('nyc'); // default
+        expect(data.marketId).toBe('nyc');
         expect(data.mode).toBe('live'); // default
     });
 
@@ -85,6 +86,7 @@ describe('tradeSchema', () => {
 describe('sessionSchema', () => {
     const validSession = {
         id: 'sess-abc',
+        marketId: 'nyc',
         targetDate: '2026-03-25',
         status: 'active',
         phase: 'buy',
@@ -94,7 +96,7 @@ describe('sessionSchema', () => {
         const { data, error } = validate(sessionSchema, validSession);
         expect(error).toBeNull();
         expect(data.id).toBe('sess-abc');
-        expect(data.marketId).toBe('nyc'); // default
+        expect(data.marketId).toBe('nyc');
     });
 
     it('rejects empty id', () => {

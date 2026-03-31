@@ -57,7 +57,7 @@ export async function executeResolveDaySell(session, snapshot, config) {
     if (session.resolveSellExecuted) return alerts;
     if (snapshot.phase !== 'resolve') return alerts;
 
-    const resolveSellHour = config.buyHourEST || 9.5;
+    const resolveSellHour = config.buyHourEST ?? 9.5;
     const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
     const nowDate = new Date(nowET);
     const currentHour = nowDate.getHours() + nowDate.getMinutes() / 60;
@@ -78,7 +78,7 @@ export async function executeResolveDaySell(session, snapshot, config) {
     }
 
     log.info('resolve_day_sell', { positions: positionsToSell.length });
-    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
+    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: session.marketId || 'nyc' };
     const sellResult = await executeSellOrder(positionsToSell, sellCtx);
 
     if (sellResult) {
@@ -134,7 +134,7 @@ export async function executeRebalanceSell(session, snapshot, config) {
 
     if (positionsToSell.length === 0) return alerts;
 
-    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
+    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: session.marketId || 'nyc' };
     const sellResult = await executeSellOrder(positionsToSell, sellCtx);
 
     if (sellResult) {
@@ -173,7 +173,7 @@ export async function executeStopLossSell(session, snapshot, stopLoss) {
 
     if (positionsToSell.length === 0) return alerts;
 
-    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: 'nyc' };
+    const sellCtx = { sessionId: session.id, targetDate: session.targetDate, marketId: session.marketId || 'nyc' };
     const sellResult = await executeSellOrder(positionsToSell, sellCtx);
 
     if (sellResult) {

@@ -23,7 +23,15 @@ if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
 // ── Session Files ───────────────────────────────────────────────────────
 
-function getSessionFilePath(date) {
+function getSessionFilePath(date, marketId = 'nyc') {
+    // New: market-scoped directory
+    const dir = path.join(OUTPUT_DIR, marketId);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `monitor-${date}.json`);
+}
+
+/** Legacy flat path for backwards compatibility */
+function getLegacySessionPath(date) {
     return path.join(OUTPUT_DIR, `monitor-${date}.json`);
 }
 
@@ -78,21 +86,72 @@ export function decompressSnapshots(compressed) {
     return snapshots;
 }
 
-export function loadSessionFile(date) {
-    const filePath = getSessionFilePath(date);
-    if (!fs.existsSync(filePath)) return null;
+export function loadSessionFile(date, marketId = 'nyc') {
+    // Try new market-scoped path first
+    let filePath = getSessionFilePath(date, marketId);
+    if (!fs.existsSync(filePath)) {
+        // Fallback to legacy flat path ONLY for NYC (all legacy files are NYC data)
+        if (marketId === 'nyc') {
+            const legacyPath = getLegacySessionPath(date);
+            if (fs.existsSync(legacyPath)) {
+                filePath = legacyPath;
+            } else {
+                return null;
+            }
+        } else {
+            return null;
+        }
+    }
     try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         if (data.snapshots && data.snapshots._deltaCompressed) {
             data.snapshots = decompressSnapshots(data.snapshots);
         }
+
+        // ── Content validation: reject contaminated session files ──────
+        // Before multi-market fixes, the monitor wrote NYC data into all
+        // market-scoped directories.  Detect this by checking:
+        //   1. The file's own marketId field (if present) must match
+        //   2. The target question must reference the correct city
+        //   3. The snapshot's unit must not be °F for a °C-based market
+        if (marketId !== 'nyc') {
+            // Check file-level marketId mismatch
+            if (data.marketId && data.marketId !== marketId) {
+                log.info('session_market_mismatch', { date, expected: marketId, found: data.marketId });
+                return null;
+            }
+            const snaps = Array.isArray(data.snapshots) ? data.snapshots : [];
+            const lastSnap = snaps[snaps.length - 1];
+            if (lastSnap) {
+                const q = (lastSnap.target?.question || '').toLowerCase();
+                // If a non-NYC market's target question mentions NYC/New York, it's contaminated
+                if (q.includes('new york') || q.includes('in nyc ')) {
+                    log.info('session_contaminated', { date, marketId, reason: 'nyc_target', target: q.slice(0, 80) });
+                    return null;
+                }
+                // If the snapshot has °F unit or °F in the question for a non-F market, it's contaminated
+                // (catches London files from before the unit fix)
+                if (q.includes('°f') && !q.includes('°c')) {
+                    log.info('session_contaminated', { date, marketId, reason: 'wrong_unit', target: q.slice(0, 80) });
+                    return null;
+                }
+                // If forecast temp is unreasonably high for a °C market (> 60), likely °F data
+                if (lastSnap.forecastTempF > 60 && (!lastSnap.unit || lastSnap.unit === 'F')) {
+                    log.info('session_contaminated', { date, marketId, reason: 'f_temp_in_c_market', forecast: lastSnap.forecastTempF });
+                    return null;
+                }
+            }
+        }
+
         return data;
     } catch {
         return null; /* intentional: file may not exist */
     }
 }
 
-export function saveSessionFile(date, data) {
+export function saveSessionFile(date, data, marketId) {
+    // Determine marketId from data if not explicitly passed
+    const mId = marketId || data?.marketId || 'nyc';
     // Apply hot-patch if present
     const patchPath = path.join(OUTPUT_DIR, `patch-${date}.json`);
     if (fs.existsSync(patchPath)) {
@@ -110,16 +169,42 @@ export function saveSessionFile(date, data) {
     if (writeData.snapshots && Array.isArray(writeData.snapshots) && writeData.snapshots.length > 1) {
         writeData.snapshots = compressSnapshots(writeData.snapshots);
     }
-    fs.writeFileSync(getSessionFilePath(date), JSON.stringify(writeData, null, 2), 'utf-8');
+    fs.writeFileSync(getSessionFilePath(date, mId), JSON.stringify(writeData, null, 2), 'utf-8');
 }
 
-export function listSessionFiles() {
+export function listSessionFiles(marketId) {
     if (!fs.existsSync(OUTPUT_DIR)) return [];
-    return fs
-        .readdirSync(OUTPUT_DIR)
+    const results = [];
+
+    // Scan legacy flat files (pre-multi-market)
+    const legacyFiles = fs.readdirSync(OUTPUT_DIR)
         .filter((f) => f.startsWith('monitor-') && f.endsWith('.json'))
-        .map((f) => f.replace('monitor-', '').replace('.json', ''))
-        .sort();
+        .map((f) => ({ marketId: 'nyc', date: f.replace('monitor-', '').replace('.json', '') }));
+    results.push(...legacyFiles);
+
+    // Scan market-scoped directories
+    const entries = fs.readdirSync(OUTPUT_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.')) continue; // skip hidden dirs
+        const dirPath = path.join(OUTPUT_DIR, entry.name);
+        const files = fs.readdirSync(dirPath)
+            .filter((f) => f.startsWith('monitor-') && f.endsWith('.json'))
+            .map((f) => ({ marketId: entry.name, date: f.replace('monitor-', '').replace('.json', '') }));
+        results.push(...files);
+    }
+
+    // Filter by market if requested
+    const filtered = marketId ? results.filter((r) => r.marketId === marketId) : results;
+
+    // Deduplicate (legacy + scoped may overlap for nyc)
+    const seen = new Set();
+    return filtered.filter((r) => {
+        const key = `${r.marketId}:${r.date}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export function compressExistingFiles() {

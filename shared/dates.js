@@ -124,3 +124,55 @@ export function extractDateFromTitle(title) {
     }
     return null;
 }
+
+// ── Timezone-aware date utilities (multi-market) ────────────────────────
+
+/**
+ * Get today's date in YYYY-MM-DD format in a specific IANA timezone.
+ * @param {string} timezone - IANA timezone, e.g. 'Asia/Seoul', 'Pacific/Auckland'
+ * @returns {string}
+ */
+export function getTodayInTz(timezone) {
+    return new Date().toLocaleDateString('en-CA', { timeZone: timezone });
+}
+
+/**
+ * Date N days from today in YYYY-MM-DD format in a specific IANA timezone.
+ * @param {number} offset - Number of days ahead
+ * @param {string} timezone - IANA timezone
+ * @returns {string}
+ */
+export function getDateOffsetInTz(offset, timezone) {
+    const nowLocal = new Date(new Date().toLocaleString('en-US', { timeZone: timezone }));
+    nowLocal.setDate(nowLocal.getDate() + offset);
+    return nowLocal.toLocaleDateString('en-CA');
+}
+
+/**
+ * Number of calendar days between now (in a timezone) and a target date.
+ * @param {string} dateStr - ISO date string, e.g. "2026-03-08"
+ * @param {string} timezone - IANA timezone
+ * @returns {number}
+ */
+export function daysUntilInTz(dateStr, timezone) {
+    const today = getTodayInTz(timezone);
+    const target = new Date(dateStr + 'T12:00:00');
+    const now = new Date(today + 'T12:00:00');
+    return Math.round((target - now) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Determine the monitoring phase based on days until target in a timezone.
+ * @param {string} targetDate
+ * @param {string} timezone - IANA timezone (defaults to America/New_York)
+ * @returns {"scout" | "track" | "buy" | "monitor" | "resolve"}
+ */
+export function getPhaseInTz(targetDate, timezone = 'America/New_York') {
+    const days = daysUntilInTz(targetDate, timezone);
+    if (days <= 0) return 'resolve';
+    if (days === 1) return 'monitor';
+    if (days === 2) return 'buy';
+    if (days === 3) return 'track';
+    return 'scout';
+}
+

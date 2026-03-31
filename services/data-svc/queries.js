@@ -25,8 +25,9 @@ export function upsertSession({
     rebalanceThreshold,
 }) {
     const db = getDb();
+    if (!marketId) throw new Error('marketId is required for session upsert');
     // Try by id first, then by (market_id, target_date) — handles monitor restarts with new UUIDs
-    const existing = db.prepare('SELECT id FROM sessions WHERE market_id = ? AND target_date = ?').get(marketId || 'nyc', targetDate);
+    const existing = db.prepare('SELECT id FROM sessions WHERE market_id = ? AND target_date = ?').get(marketId, targetDate);
     if (existing) {
         // Update existing session (keep original ID)
         db.prepare(
@@ -46,7 +47,7 @@ export function upsertSession({
         )
         .run(
             id,
-            marketId || 'nyc',
+            marketId,
             targetDate,
             status,
             phase,
@@ -129,7 +130,7 @@ export function insertTrade({ sessionId, marketId, targetDate, type, mode, place
         )
         .run(
             sessionId,
-            marketId || 'nyc',
+            marketId || (sessionId ? 'nyc' : (() => { throw new Error('marketId is required for trade insert'); })()),
             targetDate,
             type,
             mode || 'live',
@@ -291,6 +292,22 @@ export function getActivePositions(targetDate) {
         JOIN trades t ON p.trade_id = t.id
         WHERE t.target_date = ?
           AND p.status NOT IN ('sold', 'redeemed', 'failed')
+          AND t.type = 'buy'
+        ORDER BY p.label
+    `,
+        )
+        .all(targetDate);
+}
+
+export function getAllPositionsForDate(targetDate) {
+    const db = getDb();
+    return db
+        .prepare(
+            `
+        SELECT p.*, t.target_date, t.type as trade_type, t.market_id
+        FROM positions p
+        JOIN trades t ON p.trade_id = t.id
+        WHERE t.target_date = ?
           AND t.type = 'buy'
         ORDER BY p.label
     `,
@@ -706,16 +723,89 @@ export function getActiveMarkets() {
 }
 
 /**
+ * Get a single market by ID
+ */
+export function getMarketById(id) {
+    const db = getDb();
+    return db.prepare('SELECT * FROM markets WHERE id = ?').get(id);
+}
+
+/**
  * Add a new market
  */
-export function addMarket({ id, name, slugTemplate, unit, stationLat, stationLon, stationName }) {
+export function addMarket({ id, name, slugTemplate, unit, stationLat, stationLon, stationName, timezone }) {
     const db = getDb();
     return db
         .prepare(
             `
-        INSERT OR IGNORE INTO markets (id, name, slug_template, unit, station_lat, station_lon, station_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO markets (id, name, slug_template, unit, station_lat, station_lon, station_name, timezone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `,
         )
-        .run(id, name, slugTemplate, unit || 'F', stationLat, stationLon, stationName);
+        .run(id, name, slugTemplate, unit || 'F', stationLat, stationLon, stationName, timezone || 'America/New_York');
 }
+
+/**
+ * Update a market's active status
+ */
+export function setMarketActive(id, active) {
+    const db = getDb();
+    return db.prepare('UPDATE markets SET active = ? WHERE id = ?').run(active ? 1 : 0, id);
+}
+
+/**
+ * Update market fields (partial update — only supplied fields are changed).
+ */
+export function updateMarket(id, fields) {
+    const db = getDb();
+    const allowed = ['name', 'slug_template', 'unit', 'station_lat', 'station_lon', 'station_name', 'timezone', 'daily_budget', 'active'];
+    const sets = [];
+    const values = [];
+    for (const [key, val] of Object.entries(fields)) {
+        if (allowed.includes(key)) {
+            sets.push(`${key} = ?`);
+            values.push(val);
+        }
+    }
+    if (sets.length === 0) return { changes: 0 };
+    values.push(id);
+    return db.prepare(`UPDATE markets SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+}
+
+/**
+ * Get today's spend per market (sum of buy trades' actual_cost or total_cost).
+ * Used for budget enforcement.
+ * @param {string} today - ISO date string (YYYY-MM-DD)
+ * @returns {Object} Map of marketId → totalSpent
+ */
+export function getDailySpendByMarket(today) {
+    const db = getDb();
+    const rows = db.prepare(`
+        SELECT market_id, SUM(COALESCE(actual_cost, total_cost)) as total_spent
+        FROM trades
+        WHERE type = 'buy' AND status != 'failed'
+          AND created_at >= ? AND created_at < date(?, '+1 day')
+        GROUP BY market_id
+    `).all(today, today);
+
+    const result = {};
+    for (const row of rows) {
+        result[row.market_id] = row.total_spent || 0;
+    }
+    return result;
+}
+
+/**
+ * Get all registered markets.
+ * @returns {Array} List of market objects
+ */
+export function getMarkets() {
+    const db = getDb();
+    try {
+        return db.prepare('SELECT id, name, slug_template, unit, station_lat, station_lon, station_name, timezone, daily_budget, active FROM markets ORDER BY id').all();
+    } catch {
+        // Table may not exist yet — return fallback
+        return [{ id: 'nyc', name: 'NYC Temperature', unit: 'F', timezone: 'America/New_York' }];
+    }
+}
+

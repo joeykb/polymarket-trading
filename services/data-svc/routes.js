@@ -62,7 +62,8 @@ function insertWithFkRecovery(insertFn, body) {
         return null;
     } catch (err) {
         if (err.message.includes('FOREIGN KEY') && body.sessionId) {
-            const existing = queries.getSession('nyc', body.targetDate || '');
+            const marketId = body.marketId || 'nyc';
+            const existing = queries.getSession(marketId, body.targetDate || '');
             if (existing) {
                 body.sessionId = existing.id;
                 insertFn();
@@ -98,7 +99,13 @@ export async function handleRequest(req, res) {
 
         // ── Session Files ───────────────────────────────
         if (pathname === '/api/session-files' && method === 'GET') {
-            return json(res, { dates: listSessionFiles() });
+            const files = listSessionFiles(query.market);
+            // Legacy callers expect { dates: ['2026-03-28', ...] }
+            // New callers get the full objects with { marketId, date }
+            if (query.format === 'full') {
+                return json(res, { sessions: files });
+            }
+            return json(res, { dates: files.map(f => f.date) });
         }
 
         // ── Trade Summary (lightweight — no snapshots) ──
@@ -113,7 +120,8 @@ export async function handleRequest(req, res) {
             }
             if (m.match && method === 'PUT') {
                 const body = await readBody(req);
-                saveSessionFile(m.params.date, body);
+                const marketId = body.marketId || query.market || 'nyc';
+                saveSessionFile(m.params.date, body, marketId);
                 return json(res, { saved: true });
             }
         }
@@ -133,7 +141,10 @@ export async function handleRequest(req, res) {
         {
             const m = matchRoute('/api/sessions/:id', pathname);
             if (m.match && method === 'GET') {
-                const session = queries.getSession('nyc', m.params.id);
+                // Try as market_id/target_date first, then fall back to session lookup by id
+                const marketId = query.market || 'nyc';
+                let session = queries.getSession(marketId, m.params.id);
+                if (!session) session = queries.getSessionById(m.params.id);
                 if (!session) return error(res, 'Session not found', 404);
                 return json(res, session);
             }
@@ -308,7 +319,8 @@ export async function handleRequest(req, res) {
                 queries.insertAlertsBatch(body.alerts);
             } catch (err) {
                 if (err.message.includes('FOREIGN KEY') && body.alerts[0]?.sessionId) {
-                    const existing = queries.getSession('nyc', body.alerts[0].targetDate || '');
+                    const marketId = body.alerts[0].marketId || 'nyc';
+                    const existing = queries.getSession(marketId, body.alerts[0].targetDate || '');
                     if (existing) {
                         for (const a of body.alerts) a.sessionId = existing.id;
                         queries.insertAlertsBatch(body.alerts);
@@ -429,6 +441,56 @@ export async function handleRequest(req, res) {
             return json(res, queries.getActiveMarkets());
         }
 
+        // All markets (including inactive) for admin panel
+        if (pathname === '/api/markets/all' && method === 'GET') {
+            return json(res, queries.getMarkets());
+        }
+
+        // Create a new market
+        if (pathname === '/api/markets' && method === 'POST') {
+            const body = await readBody(req);
+            if (!body.id || !body.name) return error(res, 'id and name are required', 400);
+            const id = body.id.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+            queries.addMarket({
+                id,
+                name: body.name,
+                slugTemplate: body.slug_template || `highest-temperature-in-${id}-on-{date}`,
+                unit: body.unit || 'C',
+                stationLat: parseFloat(body.station_lat) || 0,
+                stationLon: parseFloat(body.station_lon) || 0,
+                stationName: body.station_name || '',
+                timezone: body.timezone || 'UTC',
+            });
+            return json(res, queries.getMarketById(id), 201);
+        }
+
+        {
+            const m = matchRoute('/api/markets/:id', pathname);
+            if (m.match && method === 'GET') {
+                const market = queries.getMarketById(m.params.id);
+                if (!market) return error(res, 'Market not found', 404);
+                return json(res, market);
+            }
+            if (m.match && method === 'PUT') {
+                const body = await readBody(req);
+                const existing = queries.getMarketById(m.params.id);
+                if (!existing) return error(res, 'Market not found', 404);
+                queries.updateMarket(m.params.id, body);
+                return json(res, queries.getMarketById(m.params.id));
+            }
+        }
+
+        // ── Daily Spend ─────────────────────────────────
+        if (pathname === '/api/spend' && method === 'GET') {
+            const today = query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            return json(res, queries.getDailySpendByMarket(today));
+        }
+
+        // ── Markets Registry ────────────────────────────
+        if (pathname === '/api/markets' && method === 'GET') {
+            return json(res, queries.getMarkets());
+        }
+
         // ── Forecast Accuracy ───────────────────────────
         if (pathname === '/api/forecast-accuracy' && method === 'GET') {
             return json(res, queries.getForecastAccuracy());
@@ -445,37 +507,109 @@ export async function handleRequest(req, res) {
 // ── Helper: Trade Summary ───────────────────────────────────────────────
 
 function handleTradeSummary(res, query) {
-    const dates = listSessionFiles();
+    const files = listSessionFiles(query.market);
     const limit = parseInt(query.limit || '15');
-    const recent = dates.slice(-limit).reverse();
+    // Scan all files (not just the last N) since many files may lack buyOrders
+    // Reverse to process newest first, then limit the final results
+    const allFiles = [...files].reverse();
     const trades = [];
     const coveredDates = new Set();
 
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
+    // Load phantom trade blocklist (survives monitor overwrites)
+    let blocklist = [];
+    try {
+        const blocklistPath = path.join(process.env.OUTPUT_DIR || '/app/output', 'trade-blocklist.json');
+        if (fs.existsSync(blocklistPath)) {
+            blocklist = JSON.parse(fs.readFileSync(blocklistPath, 'utf-8'));
+        }
+    } catch { /* intentional: blocklist is optional */ }
+
     // Source 1: Session files (primary source - has rich monitoring data)
-    for (const date of recent) {
-        const data = loadSessionFile(date);
+    for (const { marketId, date } of allFiles) {
+        if (trades.length >= limit) break; // stop when we have enough trades
+        const data = loadSessionFile(date, marketId);
         if (!data?.buyOrder) continue;
+
+        // ── Blocklist check ──
+        const isBlocked = blocklist.some(b => b.market === marketId && b.date === date);
+        if (isBlocked) {
+            log.info('trade_blocklisted', { date, marketId });
+            continue;
+        }
+
+        // ── Cross-market contamination check ──
+        // Reject buyOrders where the position questions reference a different city
+        // (e.g., NYC buyOrder leaked into london/seoul/shanghai session files)
+        if (marketId && marketId !== 'nyc') {
+            const posQuestions = (data.buyOrder.positions || []).map(p => (p.question || '').toLowerCase()).join(' ');
+            if (posQuestions.includes('new york') || posQuestions.includes('in nyc ')) {
+                log.info('trade_summary_contaminated_buyorder', { date, marketId, reason: 'nyc_question_in_non_nyc_market' });
+                continue;
+            }
+        }
+
         const latest = data.snapshots?.[data.snapshots.length - 1];
 
         const buyOrder = { ...data.buyOrder };
         if (buyOrder.positions) {
             try {
-                const dbPositions = queries.getActivePositions(data.targetDate || date);
+                const dbPositions = queries.getAllPositionsForDate(data.targetDate || date);
                 const posMap = {};
                 for (const p of dbPositions) {
                     posMap[p.question] = p;
                 }
-                buyOrder.positions = buyOrder.positions.map((p) => {
-                    const dbPos = posMap[p.question];
-                    return {
-                        ...p,
-                        positionId: dbPos?.id || p.positionId || null,
-                        soldAt: dbPos?.sold_at || p.soldAt || null,
-                        soldStatus: dbPos?.status === 'sold' ? 'placed' : p.soldStatus || null,
-                    };
-                });
+
+                // Load verified share overrides (survives monitor rewrites)
+                let verifiedShares = {};
+                try {
+                    const vsPath = path.join(process.env.OUTPUT_DIR || '/app/output', 'verified-shares.json');
+                    if (fs.existsSync(vsPath)) {
+                        verifiedShares = JSON.parse(fs.readFileSync(vsPath, 'utf-8'));
+                    }
+                } catch { /* intentional */ }
+
+                buyOrder.positions = buyOrder.positions
+                    .filter((p) => {
+                        // Remove failed positions — order was placed but never filled on-chain
+                        if (p.status === 'failed') return false;
+                        // Check DB for 'failed' status too
+                        const dbPos = posMap[p.question];
+                        if (dbPos?.status === 'failed') return false;
+                        return true;
+                    })
+                    .map((p) => {
+                        const dbPos = posMap[p.question];
+                        const sessionDate = data.targetDate || date;
+
+                        // Look up verified shares by date|market or date|market|tempRange key
+                        let vShares = null;
+                        const keyBase = sessionDate + '|' + marketId;
+                        const vrec = verifiedShares[keyBase];
+                        if (vrec && Math.abs(vrec.price - p.buyPrice) < 0.05) {
+                            vShares = vrec.shares;
+                        }
+                        // Also try range-specific key (e.g., "2026-03-28|nyc|38-39")
+                        const qMatch = (p.question || '').match(/(\d+-\d+)°/);
+                        if (qMatch) {
+                            const rangeKey = keyBase + '|' + qMatch[1];
+                            const vrecRange = verifiedShares[rangeKey];
+                            if (vrecRange) vShares = vrecRange.shares;
+                        }
+
+                        return {
+                            ...p,
+                            shares: vShares || dbPos?.fill_shares || dbPos?.shares || p.shares || 0,
+                            buyPrice: dbPos?.fill_price || dbPos?.price || p.buyPrice,
+                            positionId: dbPos?.id || p.positionId || null,
+                            soldAt: dbPos?.sold_at || p.soldAt || null,
+                            soldStatus: dbPos?.status === 'sold' ? 'placed' : p.soldStatus || null,
+                        };
+                    });
+                // Recalculate totalCost from enriched data (excludes failed positions)
+                const enrichedCost = buyOrder.positions.reduce((sum, p) => sum + ((p.buyPrice || 0) * (p.shares || 0)), 0);
+                if (enrichedCost > 0) buyOrder.totalCost = enrichedCost;
             } catch {
                 /* intentional: DB lookup is optional enrichment */
             }
@@ -489,6 +623,7 @@ function handleTradeSummary(res, query) {
 
         trades.push({
             date: sessionDate,
+            marketId: marketId || 'nyc',
             buyOrder,
             status: sessionStatus,
             phase: data.phase,
@@ -512,6 +647,8 @@ function handleTradeSummary(res, query) {
         const byDate = {};
         for (const t of dbTrades) {
             if (coveredDates.has(t.target_date)) continue;
+            // Respect market filter for DB trades too
+            if (query.market && t.market_id !== query.market) continue;
             if (!byDate[t.target_date]) byDate[t.target_date] = [];
             byDate[t.target_date].push(t);
         }
@@ -551,6 +688,7 @@ function handleTradeSummary(res, query) {
 
             trades.push({
                 date: targetDate,
+                marketId: buyTrades[0].market_id || 'nyc',
                 buyOrder: {
                     placedAt: buyTrades[0].placed_at,
                     totalCost: parseFloat(totalCost.toFixed(4)),
@@ -578,7 +716,8 @@ function handleTradeSummary(res, query) {
 // ── Helper: Get Session File ────────────────────────────────────────────
 
 function handleGetSessionFile(res, date, query) {
-    const data = loadSessionFile(date);
+    const marketId = query.market || 'nyc';
+    const data = loadSessionFile(date, marketId);
     if (!data) return error(res, 'Session file not found', 404);
 
     if (query.slim) {

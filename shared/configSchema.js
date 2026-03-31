@@ -10,6 +10,20 @@
  */
 
 export const CONFIG_SCHEMA = {
+    // ── Markets ──────────────────────────────────────────────────────
+    // NOTE: Enabled markets are controlled via the Market Registry active toggle.
+    // The ENABLED_MARKETS config field has been removed in favor of the DB-driven active flag.
+    'markets.dailyBudget': {
+        key: 'MARKETS_DAILY_BUDGET',
+        default: 5.0,
+        description: 'Total daily budget across all markets ($). Allocated by liquidity rank.',
+    },
+    'markets.maxPerMarket': {
+        key: 'MARKETS_MAX_PER_MARKET',
+        default: 3.0,
+        description: 'Max daily spend per single market ($)',
+    },
+
     // ── Trading ──────────────────────────────────────────────────────
     'trading.mode': {
         key: 'TRADING_MODE',
@@ -138,11 +152,6 @@ export const CONFIG_SCHEMA = {
         default: 'https://gamma-api.polymarket.com',
         description: 'Gamma API base URL',
         requiresRestart: true,
-    },
-    'polymarket.slugTemplate': {
-        key: 'SLUG_TEMPLATE',
-        default: 'highest-temperature-in-nyc-on-{date}',
-        description: 'Market slug pattern',
     },
     'polymarket.maxSearchPages': { key: 'MAX_SEARCH_PAGES', default: 4, description: 'Max event search pages' },
     'polymarket.searchPageSize': { key: 'SEARCH_PAGE_SIZE', default: 50, description: 'Events per search page' },

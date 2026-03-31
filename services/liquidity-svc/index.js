@@ -143,7 +143,7 @@ function scheduleReconnect(stream) {
     const delay = Math.round(base + jitter);
     stream.reconnectAttempts++;
     setTimeout(() => {
-        if (dateStreams.has(stream.date)) connectDate(stream);
+        if (dateStreams.has(stream.key)) connectDate(stream);
     }, delay);
 }
 
@@ -258,20 +258,28 @@ function handlePriceChange(entry, event) {
 
 // ── Session Discovery (via data-svc) ────────────────────────────────────
 
+/**
+ * Composite key for market-aware stream management.
+ */
+function streamKey(marketId, date) {
+    return `${marketId}:${date}`;
+}
+
 async function discoverSessions() {
     const result = new Map();
 
     try {
-        // Get all session file dates from data-svc
-        const listData = await svcGet(`${DATA_SVC}/api/session-files`, { timeoutMs: 10000 });
+        // Get all session files with market info from data-svc
+        const listData = await svcGet(`${DATA_SVC}/api/session-files?format=full`, { timeoutMs: 10000 });
         if (!listData) return result;
-        const dates = listData.dates;
-        if (!dates?.length) return result;
+        const sessions = listData.sessions;
+        if (!sessions?.length) return result;
 
         // Fetch each session and extract tokens
-        for (const date of dates) {
+        for (const { marketId, date } of sessions) {
+            const key = streamKey(marketId || 'nyc', date);
             try {
-                const data = await svcGet(`${DATA_SVC}/api/session-files/${date}`, { timeoutMs: 10000 });
+                const data = await svcGet(`${DATA_SVC}/api/session-files/${date}?market=${marketId || 'nyc'}`, { timeoutMs: 10000 });
                 if (!data?.targetDate) continue;
 
                 const latest = data.snapshots?.[data.snapshots.length - 1];
@@ -298,8 +306,8 @@ async function discoverSessions() {
                     for (const pos of data.buyOrder.positions) {
                         let label = pos.label;
                         if (usedLabels.has(label)) {
-                            const m = pos.question?.match(/between (\d+-\d+°F)|(\d+°F or higher)/);
-                            label = m?.[1] || m?.[2]?.replace(' or higher', '+') || pos.label;
+                            const m = pos.question?.match(/between (\d+-\d+°F)|(\d+°F or higher)|(\d+°C)/);
+                            label = m?.[1] || m?.[2]?.replace(' or higher', '+') || m?.[3] || pos.label;
                         }
                         usedLabels.add(label);
 
@@ -325,8 +333,8 @@ async function discoverSessions() {
                         if (pos.question) {
                             let found = false;
                             for (const snap of data.snapshots || []) {
-                                for (const key of ['target', 'below', 'above']) {
-                                    const r = snap[key];
+                                for (const k of ['target', 'below', 'above']) {
+                                    const r = snap[k];
                                     if (r?.question === pos.question && r?.clobTokenIds?.[0]) {
                                         addToken(r.clobTokenIds[0]);
                                         found = true;
@@ -341,7 +349,7 @@ async function discoverSessions() {
 
                 const tokens = [...tokenMap.values()];
                 if (tokens.length > 0) {
-                    result.set(date, tokens);
+                    result.set(key, { marketId: marketId || 'nyc', date, tokens });
                 }
             } catch {
                 /* intentional: individual session parse failure */
@@ -359,9 +367,9 @@ async function discoverSessions() {
 async function syncStreams() {
     const sessions = await discoverSessions();
 
-    for (const [date, tokens] of sessions) {
-        if (dateStreams.has(date)) {
-            const existing = dateStreams.get(date);
+    for (const [key, { marketId, date, tokens }] of sessions) {
+        if (dateStreams.has(key)) {
+            const existing = dateStreams.get(key);
             const existingIds = existing.tokens
                 .map((t) => t.tokenId)
                 .sort()
@@ -371,25 +379,27 @@ async function syncStreams() {
                 .sort()
                 .join(',');
             if (existingIds !== newIds) {
-                log.info('tokens_changed', { date, action: 'reconnecting' });
-                stopDateStream(date);
-                startDateStream(date, tokens);
+                log.info('tokens_changed', { key, marketId, date, action: 'reconnecting' });
+                stopStream(key);
+                startStream(key, marketId, date, tokens);
             }
             continue;
         }
-        startDateStream(date, tokens);
+        startStream(key, marketId, date, tokens);
     }
 
-    for (const [date] of dateStreams) {
-        if (!sessions.has(date)) {
-            log.info('session_inactive', { date, action: 'stopping_stream' });
-            stopDateStream(date);
+    for (const [key] of dateStreams) {
+        if (!sessions.has(key)) {
+            log.info('session_inactive', { key, action: 'stopping_stream' });
+            stopStream(key);
         }
     }
 }
 
-function startDateStream(date, tokens) {
+function startStream(key, marketId, date, tokens) {
     const stream = {
+        key,
+        marketId,
         date,
         ws: null,
         tokens,
@@ -421,7 +431,7 @@ function startDateStream(date, tokens) {
         });
     }
 
-    dateStreams.set(date, stream);
+    dateStreams.set(key, stream);
     connectDate(stream);
 
     const intervalMs = (svcConfig.liquidity?.checkIntervalSecs || 30) * 1000;
@@ -436,11 +446,11 @@ function startDateStream(date, tokens) {
         stream.totalCount = totalCount;
     }, intervalMs);
 
-    log.info('stream_started', { date, tokens: tokens.length });
+    log.info('stream_started', { key, marketId, date, tokens: tokens.length });
 }
 
-function stopDateStream(date) {
-    const stream = dateStreams.get(date);
+function stopStream(key) {
+    const stream = dateStreams.get(key);
     if (!stream) return;
 
     clearInterval(stream.heartbeatTimer);
@@ -452,13 +462,13 @@ function stopDateStream(date) {
             /* intentional: WS may already be closed */
         }
     }
-    dateStreams.delete(date);
-    log.info('stream_stopped', { date });
+    dateStreams.delete(key);
+    log.info('stream_stopped', { key, marketId: stream.marketId, date: stream.date });
 }
 
 // ── Snapshot Building ───────────────────────────────────────────────────
 
-function getDateSnapshot(stream) {
+function getStreamSnapshot(stream) {
     const tokens = [];
     let bestScore = 0,
         bestToken = null;
@@ -488,6 +498,8 @@ function getDateSnapshot(stream) {
     }
 
     return {
+        key: stream.key,
+        marketId: stream.marketId,
         date: stream.date,
         status: stream.status,
         lastError: stream.lastError,
@@ -502,12 +514,13 @@ function getDateSnapshot(stream) {
     };
 }
 
-function getAllSnapshots() {
+function getAllSnapshots(marketFilter) {
     const dates = {};
-    for (const [date, stream] of dateStreams) {
-        dates[date] = getDateSnapshot(stream);
+    for (const [key, stream] of dateStreams) {
+        if (marketFilter && stream.marketId !== marketFilter) continue;
+        dates[key] = getStreamSnapshot(stream);
     }
-    return { dateCount: dateStreams.size, dates, timestamp: new Date().toISOString() };
+    return { streamCount: Object.keys(dates).length, dates, timestamp: new Date().toISOString() };
 }
 
 // ── HTTP Server ─────────────────────────────────────────────────────────
@@ -533,16 +546,32 @@ const server = http.createServer(
 
         if (url.pathname === '/api/liquidity') {
             const date = url.searchParams.get('date');
-            if (date) {
-                const stream = dateStreams.get(date);
+            const market = url.searchParams.get('market');
+            if (date && market) {
+                // Exact market+date lookup
+                const key = streamKey(market, date);
+                const stream = dateStreams.get(key);
                 return jsonResponse(
                     res,
                     stream
-                        ? getDateSnapshot(stream)
+                        ? getStreamSnapshot(stream)
+                        : { key, marketId: market, date, status: 'not-tracked', tokens: [], tokenCount: 0, timestamp: new Date().toISOString() },
+                );
+            }
+            if (date) {
+                // Legacy: date-only lookup — find first stream matching this date
+                let found = null;
+                for (const [, stream] of dateStreams) {
+                    if (stream.date === date) { found = stream; break; }
+                }
+                return jsonResponse(
+                    res,
+                    found
+                        ? getStreamSnapshot(found)
                         : { date, status: 'not-tracked', tokens: [], tokenCount: 0, timestamp: new Date().toISOString() },
                 );
             }
-            return jsonResponse(res, getAllSnapshots());
+            return jsonResponse(res, getAllSnapshots(market));
         }
 
         if (url.pathname === '/api/liquidity/subscribe' && req.method === 'POST') {
@@ -579,7 +608,7 @@ async function main() {
 
 function gracefulShutdown(signal) {
     log.info('shutdown_initiated', { signal, streams: dateStreams.size });
-    for (const [date] of dateStreams) stopDateStream(date);
+    for (const [key] of dateStreams) stopStream(key);
     server.close(() => {
         log.info('shutdown_complete', { signal });
         process.exit(0);

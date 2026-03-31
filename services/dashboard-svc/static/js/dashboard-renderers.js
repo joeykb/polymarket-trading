@@ -94,6 +94,9 @@ function formatAlertTime(iso) {
 // ── Ranges Table ──────────────────────────
 function renderRangesTable(ranges, target, below, above) {
     if (!ranges || ranges.length === 0) return '<div class="alert-empty">No range data available</div>';
+    // Derive unit from current market context
+    var mktMeta = _portfolioData?.markets?.find(function(m) { return m.id === currentMarket; });
+    var unit = (currentMarket !== 'all' && mktMeta) ? mktMeta.unit : 'F';
     const sorted = [...ranges].sort((a, b) => {
         const aLow = a.question.match(/\d+/);
         const bLow = b.question.match(/\d+/);
@@ -271,7 +274,7 @@ let liquidityTimer = null,
 async function fetchLiquidity() {
     if (liquidityTimer) clearTimeout(liquidityTimer);
     try {
-        const res = await fetch('/api/liquidity?date=' + encodeURIComponent(currentDate));
+        const res = await fetch('/api/liquidity?date=' + encodeURIComponent(currentDate) + '&market=' + encodeURIComponent(currentMarket || 'nyc'));
         renderLiquidity(await res.json());
     } catch {}
     liquidityTimer = setTimeout(fetchLiquidity, CFG.liquidityPollMs || 5000);
@@ -289,7 +292,9 @@ async function fetchPipeline() {
 async function fetchTradeLog() {
     if (tradeLogTimer) clearTimeout(tradeLogTimer);
     try {
-        const res = await fetch('/api/trades');
+        const mkt = (typeof currentMarket !== 'undefined' && currentMarket !== 'all') ? currentMarket : '';
+        const url = '/api/trades' + (mkt ? '?market=' + encodeURIComponent(mkt) : '');
+        const res = await fetch(url);
         renderTradeLog(await res.json());
     } catch {}
     tradeLogTimer = setTimeout(fetchTradeLog, 30000);
@@ -361,8 +366,11 @@ async function sellPosition(posDataStr, btnEl) {
     if (!posData || (!posData.positionId && !posData.question)) return;
 
     const totalShares = posData.shares || 1;
-    const rangeMatch = posData.question ? posData.question.match(/between[ ]+([0-9]+-[0-9]+)[^\x00]*?F/i) : null;
-    const displayName = rangeMatch ? rangeMatch[1] + '°F' : posData.label || 'position';
+    var sellMktMeta = _portfolioData?.markets?.find(function(m) { return m.id === currentMarket; });
+    var sellUnit = sellMktMeta?.unit || 'F';
+    var sellUnitSym = getUnitSymbol(sellUnit);
+    const rangeMatch = posData.question ? posData.question.match(/between[ ]+([0-9]+-[0-9]+)/i) : null;
+    const displayName = rangeMatch ? rangeMatch[1] + sellUnitSym : posData.label || 'position';
 
     let sharesToSell = prompt(
         'Sell ' +

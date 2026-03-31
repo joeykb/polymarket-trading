@@ -17,7 +17,7 @@ import { z } from 'zod';
 
 export const sessionSchema = z.object({
     id: z.string().min(1, 'Session ID is required'),
-    marketId: z.string().default('nyc'),
+    marketId: z.string().min(1, 'marketId is required'),
     targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'targetDate must be YYYY-MM-DD'),
     status: z.enum(['active', 'completed', 'stopped']).default('active'),
     phase: z.enum(['scout', 'track', 'buy', 'monitor', 'resolve']).default('scout'),
@@ -41,7 +41,7 @@ export const sessionUpdateSchema = z
 
 export const tradeSchema = z.object({
     sessionId: z.string().nullable().optional(),
-    marketId: z.string().default('nyc'),
+    marketId: z.string().min(1, 'marketId is required'),
     targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'targetDate must be YYYY-MM-DD'),
     type: z.enum(['buy', 'sell', 'redeem']),
     mode: z.enum(['live', 'dry-run']).default('live'),

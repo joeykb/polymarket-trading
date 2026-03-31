@@ -228,7 +228,7 @@ Write-SimpleService -Name "weather-svc" -Port 3002 -Image "tempedge-weather-svc"
 Write-Host "[OK] weather-svc-green.yaml" -ForegroundColor Green
 
 # ── market-svc-green ─────────────────────────────────────────────────────
-$env = @{ MARKET_SVC_PORT = "3003" }
+$env = @{ MARKET_SVC_PORT = "3003"; DATA_SVC_URL = $greenUrls.DATA_SVC_URL }
 Write-SimpleService -Name "market-svc" -Port 3003 -Image "tempedge-market-svc" -Env $env |
     Out-File "$outDir/market-svc-green.yaml" -Encoding utf8
 Write-Host "[OK] market-svc-green.yaml" -ForegroundColor Green
