@@ -234,6 +234,15 @@ export async function handleRequest(req, res) {
             }
         }
 
+        // PATCH /api/positions/by-condition — Update by conditionId + targetDate (for auto-redeem CronJob)
+        if (pathname === '/api/positions/by-condition' && method === 'PATCH') {
+            const body = await readBody(req);
+            const { conditionId, targetDate, ...updates } = body;
+            if (!conditionId || !targetDate) return error(res, 'conditionId and targetDate required', 400);
+            const result = queries.markPositionByCondition(conditionId, targetDate, updates);
+            return json(res, { updated: true, changes: result.changes });
+        }
+
         // ── Historical Analytics ─────────────────────────────
         if (pathname === '/api/analytics/performance' && method === 'GET') {
             const result = queries.getTradePerformance(query.from, query.to);

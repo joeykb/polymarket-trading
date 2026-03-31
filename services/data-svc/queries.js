@@ -392,6 +392,46 @@ export function markPositionRedeemed(positionId, { redeemedValue, redeemedAt, re
         .run(redeemedValue, redeemedAt, redeemedTx, positionId);
 }
 
+/**
+ * Mark position(s) by condition_id + target_date as redeemed or burned.
+ * Used by the auto-redeem CronJob which has conditionId but not DB position ID.
+ *
+ * @param {string} conditionId
+ * @param {string} targetDate - e.g. '2026-03-29'
+ * @param {Object} updates - { status, redeemedAt, redeemedValue, redeemedTx, fillShares }
+ * @returns {Object} { changes }
+ */
+export function markPositionByCondition(conditionId, targetDate, updates) {
+    const db = getDb();
+    const fields = [];
+    const values = [];
+
+    // Build dynamic SET clause from allowed fields
+    const allowed = {
+        status: 'status',
+        redeemedAt: 'redeemed_at',
+        redeemedValue: 'redeemed_value',
+        redeemedTx: 'redeemed_tx',
+        fillShares: 'fill_shares',
+    };
+    for (const [key, col] of Object.entries(allowed)) {
+        if (updates[key] !== undefined) {
+            fields.push(`${col} = ?`);
+            values.push(updates[key]);
+        }
+    }
+    if (fields.length === 0) return { changes: 0 };
+
+    // Find positions by condition_id joined through trades with matching target_date
+    values.push(conditionId, targetDate);
+    return db.prepare(`
+        UPDATE positions SET ${fields.join(', ')}
+        WHERE condition_id = ? AND trade_id IN (
+            SELECT id FROM trades WHERE target_date = ?
+        )
+    `).run(...values);
+}
+
 // ── Snapshots ────────────────────────────────────────────────────────────
 
 /**

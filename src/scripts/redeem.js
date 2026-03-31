@@ -26,6 +26,7 @@ const __dirname = path.dirname(__filename);
 const OUTPUT_DIR = path.resolve(__dirname, '../../output');
 
 const POLYGON_RPC = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
+const DATA_SVC_URL = process.env.DATA_SVC_URL || 'http://data-svc:3005';
 
 // Polymarket contracts on Polygon
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
@@ -59,6 +60,28 @@ const GAS_OVERRIDES = {
 };
 
 const PARENT_COLLECTION_ID = ethers.constants.HashZero;
+
+/**
+ * Sync position status to data-svc DB.
+ * Best-effort — failures logged but don't block redemption.
+ */
+async function syncToDb(conditionId, targetDate, updates) {
+    try {
+        const res = await fetch(`${DATA_SVC_URL}/api/positions/by-condition`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conditionId, targetDate, ...updates }),
+        });
+        const data = await res.json();
+        if (data.changes > 0) {
+            console.log(`     📊 DB synced: ${data.changes} position(s) updated`);
+        } else {
+            console.log(`     📊 DB: no matching positions found (may not be in DB yet)`);
+        }
+    } catch (err) {
+        console.log(`     ⚠️  DB sync failed (non-fatal): ${err.message}`);
+    }
+}
 
 /**
  * Check market resolution via CLOB client
@@ -273,6 +296,54 @@ async function main() {
 
     console.log(`\n  ${heldPositions.length} position(s) with on-chain balance.\n`);
 
+    // ── Auto-generate verified-shares.json from on-chain balances ─────
+    const verifiedShares = {};
+    for (const pos of heldPositions) {
+        const key = `${pos.date}|${pos.marketId || 'nyc'}`;
+        if (!verifiedShares[key]) verifiedShares[key] = {};
+        if (pos.outcome) {
+            verifiedShares[key][pos.outcome.toLowerCase()] = pos.shares;
+        }
+    }
+    const vsPath = path.join(OUTPUT_DIR, 'verified-shares.json');
+    try {
+        // Merge with existing entries (don't overwrite entries not in current scan)
+        let existing = {};
+        if (fs.existsSync(vsPath)) {
+            existing = JSON.parse(fs.readFileSync(vsPath, 'utf8'));
+        }
+        const merged = { ...existing, ...verifiedShares, _updatedAt: new Date().toISOString() };
+        fs.writeFileSync(vsPath, JSON.stringify(merged, null, 2));
+        console.log(`  📝 Updated verified-shares.json (${Object.keys(verifiedShares).length} entries)\n`);
+    } catch (err) {
+        console.log(`  ⚠️  Could not write verified-shares.json: ${err.message}\n`);
+    }
+
+    // ── Phantom Detection: conditionIds with buyOrders but 0 on-chain balance ──
+    const heldConditionIds = new Set(heldPositions.map(p => p.conditionId));
+    const phantomConditions = [];
+    for (const [conditionId, meta] of conditionMap) {
+        if (heldConditionIds.has(conditionId)) continue; // has balance, not phantom
+        // This conditionId had a buyOrder position but no on-chain balance
+        // Check if it was already resolved (redeemed/burned) — skip those
+        const dateObj = new Date(meta.date + 'T12:00:00Z');
+        const daysSince = (Date.now() - dateObj.getTime()) / (1000 * 60 * 60 * 24);
+        if (daysSince < 1) continue; // too recent, may not have settled yet
+        phantomConditions.push({ conditionId, ...meta });
+    }
+
+    if (phantomConditions.length > 0) {
+        console.log(`  👻 Detected ${phantomConditions.length} phantom position(s) (buyOrder but 0 on-chain balance):`);
+        for (const phantom of phantomConditions) {
+            console.log(`     • ${phantom.date} ${phantom.marketId}: ${phantom.conditionId.substring(0, 12)}...`);
+            // Sync to DB as failed
+            await syncToDb(phantom.conditionId, phantom.date, {
+                status: 'failed',
+            });
+        }
+        console.log('');
+    }
+
     if (heldPositions.length === 0) {
         console.log(`  No on-chain positions found.`);
         console.log(`═══════════════════════════════════════`);
@@ -348,6 +419,13 @@ async function main() {
                 await tx.wait();
                 console.log(`     ✅ Tokens burned — position cleared from portfolio`);
                 totalRedeemed++;
+                // Sync burn to DB
+                await syncToDb(conditionId, pos0.date, {
+                    status: 'burned',
+                    redeemedAt: new Date().toISOString(),
+                    redeemedTx: tx.hash,
+                    redeemedValue: 0,
+                });
             } catch (err) {
                 console.log(`     ⚠️  Burn failed: ${err.message}`);
             }
@@ -381,6 +459,13 @@ async function main() {
                 await tx.wait();
                 console.log(`     ✅ NO tokens burned — cleared from portfolio`);
                 totalRedeemed++;
+                // Sync burn to DB
+                await syncToDb(conditionId, pos0.date, {
+                    status: 'burned',
+                    redeemedAt: new Date().toISOString(),
+                    redeemedTx: tx.hash,
+                    redeemedValue: 0,
+                });
             } catch (err) {
                 console.log(`     ⚠️  Burn failed: ${err.message}`);
             }
@@ -436,6 +521,15 @@ async function main() {
             console.log(`     ✅ Redeemed! Gas used: ${receipt.gasUsed.toString()}`);
             totalRedeemed++;
             totalValue += value;
+
+            // Sync redemption to DB
+            await syncToDb(conditionId, pos0.date, {
+                status: 'redeemed',
+                redeemedAt: new Date().toISOString(),
+                redeemedTx: tx.hash,
+                redeemedValue: value,
+                fillShares: totalShares,
+            });
 
             // Update session file (try market-scoped first, then legacy)
             const marketScopedFile = path.join(OUTPUT_DIR, pos0.marketId || 'nyc', `monitor-${pos0.date}.json`);

@@ -53,6 +53,8 @@ spec:
               env:
                 - name: POLYGON_RPC_URL
                   value: "https://polygon.drpc.org"
+                - name: DATA_SVC_URL
+                  value: "http://data-svc.tempedge.svc.cluster.local:3005"
                 # Map K8s secret keys to the env vars the redeem script expects
                 - name: CLOB_API_KEY
                   valueFrom:
