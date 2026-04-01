@@ -467,7 +467,8 @@ const server = http.createServer(
                 try {
                     const from = url.searchParams.get('from') || '';
                     const to = url.searchParams.get('to') || '';
-                    const qs = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&');
+                    const market = url.searchParams.get('market') || '';
+                    const qs = [from && `from=${from}`, to && `to=${to}`, market && `market=${market}`].filter(Boolean).join('&');
                     const perfUrl = `${DATA_SVC}/api/analytics/performance${qs ? '?' + qs : ''}`;
                     const perfRes = await fetch(perfUrl, { signal: AbortSignal.timeout(15000) });
                     if (perfRes.ok) return json(res, await perfRes.json());

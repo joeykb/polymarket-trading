@@ -245,7 +245,7 @@ export async function handleRequest(req, res) {
 
         // ── Historical Analytics ─────────────────────────────
         if (pathname === '/api/analytics/performance' && method === 'GET') {
-            const result = queries.getTradePerformance(query.from, query.to);
+            const result = queries.getTradePerformance(query.from, query.to, query.market);
             return json(res, result);
         }
 

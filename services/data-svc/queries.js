@@ -536,20 +536,23 @@ export function insertAlertsBatch(alerts) {
  * @param {string} [to]   - End date (inclusive), e.g. '2026-03-27'
  * @returns {{ trades: Array, summary: Object }}
  */
-export function getTradePerformance(from, to) {
+export function getTradePerformance(from, to, marketId) {
     const db = getDb();
 
-    // Build date filter
-    let dateFilter = '';
+    // Build date filter — two versions: with 't.' alias (for buy query) and without (for sell query)
+    let dateFilterAliased = '';
+    let dateFilterDirect = '';
     const params = [];
-    if (from) { dateFilter += ' AND t.target_date >= ?'; params.push(from); }
-    if (to)   { dateFilter += ' AND t.target_date <= ?'; params.push(to); }
+    if (from) { dateFilterAliased += ' AND t.target_date >= ?'; dateFilterDirect += ' AND target_date >= ?'; params.push(from); }
+    if (to)   { dateFilterAliased += ' AND t.target_date <= ?'; dateFilterDirect += ' AND target_date <= ?'; params.push(to); }
+    if (marketId && marketId !== 'all') { dateFilterAliased += ' AND t.market_id = ?'; dateFilterDirect += ' AND market_id = ?'; params.push(marketId); }
 
     // Get all buy trades with session context
     const buyTrades = db.prepare(`
         SELECT
             t.id as trade_id,
             t.session_id,
+            t.market_id,
             t.target_date,
             t.placed_at,
             t.mode,
@@ -565,7 +568,7 @@ export function getTradePerformance(from, to) {
         LEFT JOIN sessions s ON t.session_id = s.id
         WHERE t.type = 'buy'
           AND t.status != 'failed'
-          ${dateFilter}
+          ${dateFilterAliased}
         ORDER BY t.target_date DESC, t.placed_at ASC
     `).all(...params);
 
@@ -575,7 +578,7 @@ export function getTradePerformance(from, to) {
         FROM trades
         WHERE type IN ('sell', 'redeem')
           AND status != 'failed'
-          ${dateFilter}
+          ${dateFilterDirect}
         ORDER BY target_date, placed_at
     `).all(...params);
 
@@ -702,6 +705,7 @@ export function getTradePerformance(from, to) {
 
         trades.push({
             targetDate: bt.target_date,
+            marketId: bt.market_id,
             sessionId: bt.session_id,
             placedAt: bt.placed_at,
             mode: bt.mode,

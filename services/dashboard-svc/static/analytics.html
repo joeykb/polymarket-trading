@@ -38,6 +38,11 @@
                 <button class="period-pill" data-period="90">90d</button>
                 <button class="period-pill active" data-period="all">All</button>
             </div>
+            <div class="market-filter">
+                <select id="marketFilter" class="market-select">
+                    <option value="all">🌐  All Markets</option>
+                </select>
+            </div>
             <div class="date-range">
                 <label>From</label>
                 <input type="date" id="dateFrom" class="date-input">
@@ -95,6 +100,7 @@
                     <thead>
                         <tr>
                             <th>Date</th>
+                            <th>Market</th>
                             <th>Range</th>
                             <th>Buy Price</th>
                             <th>Forecast @ Buy</th>
@@ -107,7 +113,7 @@
                         </tr>
                     </thead>
                     <tbody id="tradesBody">
-                        <tr><td colspan="10" class="empty-state">Loading trade data...</td></tr>
+                        <tr><td colspan="11" class="empty-state">Loading trade data...</td></tr>
                     </tbody>
                 </table>
             </div>

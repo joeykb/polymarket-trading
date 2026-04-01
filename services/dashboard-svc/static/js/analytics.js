@@ -9,9 +9,23 @@
 (function () {
     'use strict';
 
-    // ── State ─────────────────────────────────────────────────────────────
-    let _data = null;       // { trades: [], summary: {} }
+    // ── State ─────────────────────────────────────────────────────────────────
+    let _data = null;        // { trades: [], summary: {} }
     let _period = null;      // Default: all trades
+    let _market = 'all';     // Market filter
+    let _markets = [];       // Available markets from API
+
+    // Market display metadata
+    const MARKET_FLAGS = {
+        nyc: '🇺🇸', london: '🇬🇧', wellington: '🇳🇿', tokyo: '🇯🇵',
+        sydney: '🇦🇺', miami: '🌴', chicago: '🇺🇸', la: '🇺🇸',
+        seoul: '🇰🇷', shanghai: '🇨🇳', shenzhen: '🇨🇳', madrid: '🇪🇸',
+    };
+    const MARKET_NAMES = {
+        nyc: 'NYC', london: 'London', wellington: 'Wellington', tokyo: 'Tokyo',
+        sydney: 'Sydney', miami: 'Miami', chicago: 'Chicago', la: 'LA',
+        seoul: 'Seoul', shanghai: 'Shanghai', shenzhen: 'Shenzhen', madrid: 'Madrid',
+    };
 
     // ── DOM refs ──────────────────────────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -21,6 +35,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         setupPeriodPills();
         setupDateRange();
+        setupMarketFilter();
         fetchAndRender();
     });
 
@@ -66,11 +81,44 @@
         });
     }
 
-    // ── Fetch ─────────────────────────────────────────────────────────────
+    // ── Market Filter ─────────────────────────────────────────────────────
+    async function setupMarketFilter() {
+        const select = $('#marketFilter');
+        // Load markets from API
+        try {
+            const res = await fetch('/api/markets');
+            _markets = await res.json();
+            if (Array.isArray(_markets) && _markets.length > 0) {
+                for (const m of _markets) {
+                    const flag = MARKET_FLAGS[m.id] || '🌐';
+                    const name = m.name || MARKET_NAMES[m.id] || m.id.toUpperCase();
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    opt.textContent = `${flag}  ${name}`;
+                    select.appendChild(opt);
+                }
+            }
+        } catch { /* markets API optional */ }
+
+        select.addEventListener('change', () => {
+            _market = select.value;
+            fetchAndRender();
+        });
+    }
+
+    function getMarketUnit(marketId) {
+        if (!marketId) return '°F';
+        const m = _markets.find(mk => mk.id === marketId);
+        if (m && m.unit === 'C') return '°C';
+        return '°F';
+    }
+
+    // ── Fetch ─────────────────────────────────────────────────────────────────
     async function fetchAndRender() {
         const from = $('#dateFrom').value || '';
         const to = $('#dateTo').value || '';
-        const qs = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&');
+        const parts = [from && `from=${from}`, to && `to=${to}`, _market !== 'all' && `market=${_market}`].filter(Boolean);
+        const qs = parts.join('&');
         const url = `/api/analytics/performance${qs ? '?' + qs : ''}`;
 
         try {
@@ -234,7 +282,7 @@
     function renderTradeTable(trades) {
         const tbody = $('#tradesBody');
         if (!trades || trades.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No trades found for this period</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No trades found for this period</td></tr>';
             $('#tradeCount').textContent = '';
             return;
         }
@@ -260,6 +308,11 @@
             // Sparkline SVG
             const sparkline = renderSparkline(t.forecastTrend);
 
+            // Market display
+            const mktFlag = MARKET_FLAGS[t.marketId] || '🌐';
+            const mktName = MARKET_NAMES[t.marketId] || (t.marketId || 'nyc').toUpperCase();
+            const unit = getMarketUnit(t.marketId);
+
             // P&L display
             const pnlClass = t.outcome === 'profit' ? 'positive' : t.outcome === 'loss' ? 'negative' : 'pending';
             const pnlStr = t.realizedPnL != null ? formatUSD(t.realizedPnL) : '—';
@@ -279,11 +332,12 @@
             return `
                 <tr>
                     <td class="trade-date mono">${fmtDate(t.targetDate)}</td>
+                    <td><span class="market-badge">${mktFlag} ${mktName}</span></td>
                     <td><span class="range-badge">${escHtml(range)}</span></td>
                     <td class="mono">${avgBuyPrice ? '$' + avgBuyPrice.toFixed(2) : '—'}</td>
-                    <td class="forecast-val">${t.forecastAtBuy != null ? t.forecastAtBuy.toFixed(1) + '°F' : '—'}</td>
+                    <td class="forecast-val">${t.forecastAtBuy != null ? t.forecastAtBuy.toFixed(1) + unit : '—'}</td>
                     <td class="forecast-val">
-                        ${t.finalForecast != null ? t.finalForecast.toFixed(1) + '°F' : '—'}
+                        ${t.finalForecast != null ? t.finalForecast.toFixed(1) + unit : '—'}
                         ${fDeltaStr ? `<span class="forecast-delta ${fDeltaClass}">${fDeltaStr}</span>` : ''}
                     </td>
                     <td>${sparkline}</td>
